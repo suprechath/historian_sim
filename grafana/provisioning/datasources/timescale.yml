@@ -2,13 +2,14 @@ apiVersion: 1
 
 datasources:
   - name: TimescaleDB
+    uid: timescaledb
     type: postgres
     access: proxy
     url: timescaledb:5432
     database: reactor
-    user: admin
+    user: grafana_reader
     secureJsonData:
-      password: FT1234
+      password: GrafanaReader123!
     jsonData:
       sslmode: disable
       postgresVersion: 1600
