@@ -11,8 +11,11 @@ datasources:
     secureJsonData:
       password: GrafanaReader123!
     jsonData:
+      database: reactor
+      defaultDatabase: reactor
       sslmode: disable
       postgresVersion: 1600
       timescaledb: true
     isDefault: true
     editable: true
+    version: 2

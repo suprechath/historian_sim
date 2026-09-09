@@ -13,10 +13,11 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./db:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
-      interval: 5s
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} && psql -U ${POSTGRES_USER} -d ${POSTGRES_DB} -c \"SELECT 1 FROM pg_roles WHERE rolname = 'grafana_reader';\"" ]
+      interval: 3s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 5s
 
   simulator:
     build: ./simulator
