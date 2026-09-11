@@ -1,138 +1,2014 @@
 {
-    "annotations": {
-        "list": []
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "id": 6,
+      "title": "Reactor 1 — Synthesis (Glass-Lined Steel 5,000 L | Jacketed Heating & Cooling)",
+      "type": "row"
     },
-    "editable": true,
-    "fiscalYearStartMonth": 0,
-    "graphTooltip": 1,
-    "id": null,
-    "links": [],
-    "liveNow": true,
-    "panels": [
-        {
-            "collapsed": false,
-            "gridPos": {
-                "h": 10,
-                "w": 24,
-                "x": 0,
-                "y": 0
-            },
-            "id": 1,
-            "title": "Live Process Trends (Readings Archive)",
-            "type": "timeseries",
-            "datasource": {
-                "type": "postgres",
-                "uid": "timescaledb"
-            },
-            "fieldConfig": {
-                "defaults": {
-                    "custom": {
-                        "drawStyle": "line",
-                        "lineInterpolation": "smooth",
-                        "lineWidth": 2,
-                        "showPoints": "never"
-                    }
-                },
-                "overrides": []
-            },
-            "targets": [
-                {
-                    "datasource": {
-                        "type": "postgres",
-                        "uid": "timescaledb"
-                    },
-                    "format": "time_series",
-                    "rawQuery": true,
-                    "rawSql": "SELECT r.ts AS \"time\", r.value AS \"value\", t.name AS \"metric\" FROM readings r JOIN tags t ON r.tag_id = t.id WHERE $__timeFilter(r.ts) AND t.name IN ('R1.TEMP', 'R1.PRES', 'R1.AGIT', 'R2.TEMP', 'R3.TEMP') ORDER BY r.ts ASC;",
-                    "refId": "A"
-                }
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 23,
+      "title": "R1 Current Working Phase",
+      "type": "stat",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#1F78C1",
+                "value": null
+              }
             ]
+          }
         },
-        {
-            "collapsed": false,
-            "gridPos": {
-                "h": 12,
-                "w": 12,
-                "x": 0,
-                "y": 10
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Phase Event Name"
             },
-            "id": 2,
-            "title": "Current Sensor Snapshots (1s Live Cache)",
-            "type": "table",
-            "datasource": {
-                "type": "postgres",
-                "uid": "timescaledb"
-            },
-            "fieldConfig": {
-                "defaults": {},
-                "overrides": []
-            },
-            "targets": [
-                {
-                    "datasource": {
-                        "type": "postgres",
-                        "uid": "timescaledb"
-                    },
-                    "format": "table",
-                    "rawQuery": true,
-                    "rawSql": "SELECT t.name AS \"Tag\", s.ts AS \"Last Updated\", ROUND(s.value::numeric, 2) AS \"Current Value\", t.units AS \"Units\", CASE s.quality WHEN 0 THEN 'Good' WHEN 1 THEN 'Questionable' WHEN 2 THEN 'Bad' WHEN 3 THEN 'Substituted' END AS \"Quality\" FROM snapshots s JOIN tags t ON s.tag_id = t.id ORDER BY t.id;",
-                    "refId": "A"
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#EF843C",
+                  "mode": "fixed"
                 }
+              }
             ]
-        },
-        {
-            "collapsed": false,
-            "gridPos": {
-                "h": 12,
-                "w": 12,
-                "x": 12,
-                "y": 10
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Active Batch"
             },
-            "id": 3,
-            "title": "Recent Batch Phase Events",
-            "type": "table",
-            "datasource": {
-                "type": "postgres",
-                "uid": "timescaledb"
-            },
-            "fieldConfig": {
-                "defaults": {},
-                "overrides": []
-            },
-            "targets": [
-                {
-                    "datasource": {
-                        "type": "postgres",
-                        "uid": "timescaledb"
-                    },
-                    "format": "table",
-                    "rawQuery": true,
-                    "rawSql": "SELECT e.started_at AS \"Start\", COALESCE(e.ended_at, NOW()) AS \"End\", a.code AS \"Reactor\", COALESCE(b.batch_id, 'None') AS \"Batch\", e.name AS \"Phase\", e.occurrence AS \"Occurrence\" FROM events e JOIN assets a ON e.asset_id = a.id LEFT JOIN batches b ON e.batch_pk = b.id ORDER BY e.started_at DESC LIMIT 25;",
-                    "refId": "A"
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#5794F2",
+                  "mode": "fixed"
                 }
+              }
             ]
-        }
-    ],
-    "refresh": "5s",
-    "schemaVersion": 39,
-    "tags": [
-        "reactor",
-        "historian"
-    ],
-    "time": {
-        "from": "now-1h",
-        "to": "now"
-    },
-    "timepicker": {
-        "refresh_intervals": [
-            "1s",
-            "5s",
-            "10s",
-            "30s"
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Phase Duration"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#705DA0",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "/.*/",
+          "limit": 1,
+          "values": true
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(e.name, 'Idle') AS \"Phase Event Name\", COALESCE(b.batch_id, 'No Active Batch') AS \"Active Batch\", COALESCE(to_char(NOW() - e.started_at, 'HH24:MI:SS'), '00:00:00') AS \"Phase Duration\" FROM assets a LEFT JOIN LATERAL (SELECT id, batch_id FROM batches WHERE current_asset_id = a.id AND status = 'Running' ORDER BY started_at DESC LIMIT 1) b ON TRUE LEFT JOIN LATERAL (SELECT name, started_at FROM events WHERE asset_id = a.id AND batch_pk = b.id AND level = 'Phase' AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1) e ON TRUE WHERE a.code = 'R1' LIMIT 1;",
+          "refId": "A"
+        }
+      ]
     },
-    "timezone": "browser",
-    "title": "Reactor Plant Overview",
-    "uid": "reactor-plant-overview",
-    "version": 1
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "id": 7,
+      "title": "R1 Thermal Reaction Profile & Jacket Mode",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "celsius"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "R1.TEMP"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#EF843C",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "R1.JKT_TEMP"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#1F78C1",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "R1.JKT_MODE"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Jacket Mode (0:Idle, 1:Heat, 2:Cool)"
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "stepAfter"
+              },
+              {
+                "id": "min",
+                "value": -0.1
+              },
+              {
+                "id": "max",
+                "value": 2.2
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT r.ts AS \"time\", r.value AS \"value\", t.name AS \"metric\" FROM readings r JOIN tags t ON r.tag_id = t.id JOIN assets a ON t.asset_id = a.id WHERE $__timeFilter(r.ts) AND a.code = 'R1' AND t.parameter IN ('TEMP', 'JKT_TEMP', 'JKT_MODE') ORDER BY r.ts ASC;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 16
+      },
+      "id": 8,
+      "title": "R1 Vessel Pressure (bar g) & N2 Blanket Status",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#E24D42",
+            "mode": "fixed"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "min": -0.5,
+          "max": 5.5,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 4.5
+              }
+            ]
+          },
+          "unit": "pressurebar"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "R1.N2_BLANKET"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "N2 Blanket (0:Lost, 1:OK)"
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "stepAfter"
+              },
+              {
+                "id": "min",
+                "value": -0.05
+              },
+              {
+                "id": "max",
+                "value": 1.15
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#5794F2",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT r.ts AS \"time\", r.value AS \"value\", t.name AS \"metric\" FROM readings r JOIN tags t ON r.tag_id = t.id JOIN assets a ON t.asset_id = a.id WHERE $__timeFilter(r.ts) AND a.code = 'R1' AND t.parameter IN ('PRES', 'N2_BLANKET') ORDER BY r.ts ASC;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 16
+      },
+      "id": 21,
+      "title": "R1 Agitator Speed (rpm) & Run State",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#6ED0E0",
+            "mode": "fixed"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "min": 0,
+          "max": 200,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 180
+              }
+            ]
+          },
+          "unit": "rotrpm"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "R1.AGIT_RUN"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Agitator State (0/1)"
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "stepAfter"
+              },
+              {
+                "id": "min",
+                "value": -0.05
+              },
+              {
+                "id": "max",
+                "value": 1.15
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT r.ts AS \"time\", r.value AS \"value\", t.name AS \"metric\" FROM readings r JOIN tags t ON r.tag_id = t.id JOIN assets a ON t.asset_id = a.id WHERE $__timeFilter(r.ts) AND a.code = 'R1' AND t.parameter IN ('AGIT', 'AGIT_RUN') ORDER BY r.ts ASC;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 16
+      },
+      "id": 22,
+      "title": "R1 Liquid Volume (L)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#705DA0",
+            "mode": "fixed"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "min": 0,
+          "max": 5000,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 4800
+              }
+            ]
+          },
+          "unit": "L"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT r.ts AS \"time\", r.value AS \"value\", 'R1.VOL' AS \"metric\" FROM readings r JOIN tags t ON r.tag_id = t.id JOIN assets a ON t.asset_id = a.id WHERE $__timeFilter(r.ts) AND a.code = 'R1' AND t.parameter = 'VOL' ORDER BY r.ts ASC;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "id": 9,
+      "title": "Reactor 2 — Workup & Neutralisation (Stainless Steel 316L 5,000 L | Reagent Dosing & Layer Separation)",
+      "type": "row"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "id": 24,
+      "title": "R2 Current Working Phase",
+      "type": "stat",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#1F78C1",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Phase Event Name"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#EF843C",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Active Batch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#5794F2",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Phase Duration"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#705DA0",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "/.*/",
+          "limit": 1,
+          "values": true
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(e.name, 'Idle') AS \"Phase Event Name\", COALESCE(b.batch_id, 'No Active Batch') AS \"Active Batch\", COALESCE(to_char(NOW() - e.started_at, 'HH24:MI:SS'), '00:00:00') AS \"Phase Duration\" FROM assets a LEFT JOIN LATERAL (SELECT id, batch_id FROM batches WHERE current_asset_id = a.id AND status = 'Running' ORDER BY started_at DESC LIMIT 1) b ON TRUE LEFT JOIN LATERAL (SELECT name, started_at FROM events WHERE asset_id = a.id AND batch_pk = b.id AND level = 'Phase' AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1) e ON TRUE WHERE a.code = 'R2' LIMIT 1;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 27
+      },
+      "id": 10,
+      "title": "R2 Product pH (pH) & N2 Blanket Status",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#EAB839",
+            "mode": "fixed"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "min": 0,
+          "max": 14,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1.5
+              },
+              {
+                "color": "red",
+                "value": 9.5
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "R2.N2_BLANKET"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "N2 Blanket (0:Lost, 1:OK)"
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "stepAfter"
+              },
+              {
+                "id": "min",
+                "value": -0.05
+              },
+              {
+                "id": "max",
+                "value": 1.15
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#8AB8FF",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT r.ts AS \"time\", r.value AS \"value\", t.name AS \"metric\" FROM readings r JOIN tags t ON r.tag_id = t.id JOIN assets a ON t.asset_id = a.id WHERE $__timeFilter(r.ts) AND a.code = 'R2' AND t.parameter IN ('PH', 'N2_BLANKET') ORDER BY r.ts ASC;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 27
+      },
+      "id": 11,
+      "title": "R2 Product Temperature (°C)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#F2495C",
+            "mode": "fixed"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "min": -10,
+          "max": 120,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          },
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT r.ts AS \"time\", r.value AS \"value\", 'R2.TEMP' AS \"metric\" FROM readings r JOIN tags t ON r.tag_id = t.id JOIN assets a ON t.asset_id = a.id WHERE $__timeFilter(r.ts) AND a.code = 'R2' AND t.parameter = 'TEMP' ORDER BY r.ts ASC;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 27
+      },
+      "id": 26,
+      "title": "R2 Liquid Volume (L) & Agitator Run State",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#73BF69",
+            "mode": "fixed"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "min": 0,
+          "max": 5000,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 4800
+              }
+            ]
+          },
+          "unit": "L"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "R2.AGIT_RUN"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Agitator State (0/1)"
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "stepAfter"
+              },
+              {
+                "id": "min",
+                "value": -0.05
+              },
+              {
+                "id": "max",
+                "value": 1.15
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3274D9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT r.ts AS \"time\", r.value AS \"value\", t.name AS \"metric\" FROM readings r JOIN tags t ON r.tag_id = t.id JOIN assets a ON t.asset_id = a.id WHERE $__timeFilter(r.ts) AND a.code = 'R2' AND t.parameter IN ('VOL', 'AGIT_RUN') ORDER BY r.ts ASC;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "id": 27,
+      "title": "R2 Reagent Dosing Flow (L/h) & Pump State",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#5794F2",
+            "mode": "fixed"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "min": 0,
+          "max": 500,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 400
+              }
+            ]
+          },
+          "unit": "flowlph"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "R2.DOSE_PUMP"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Pump State (0:Off, 1:On)"
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "stepAfter"
+              },
+              {
+                "id": "min",
+                "value": -0.05
+              },
+              {
+                "id": "max",
+                "value": 1.15
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT r.ts AS \"time\", r.value AS \"value\", t.name AS \"metric\" FROM readings r JOIN tags t ON r.tag_id = t.id JOIN assets a ON t.asset_id = a.id WHERE $__timeFilter(r.ts) AND a.code = 'R2' AND t.parameter IN ('DOSE_FLOW', 'DOSE_PUMP') ORDER BY r.ts ASC;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "id": 28,
+      "title": "R2 Cumulative Reagent Dosed (L)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#B877D9",
+            "mode": "fixed"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "min": 0,
+          "max": 2000,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1500
+              }
+            ]
+          },
+          "unit": "L"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT r.ts AS \"time\", r.value AS \"value\", 'R2.DOSE_TOTAL' AS \"metric\" FROM readings r JOIN tags t ON r.tag_id = t.id JOIN assets a ON t.asset_id = a.id WHERE $__timeFilter(r.ts) AND a.code = 'R2' AND t.parameter = 'DOSE_TOTAL' ORDER BY r.ts ASC;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 41
+      },
+      "id": 12,
+      "title": "Reactor 3 — Crystalliser (Glass-Lined Steel 3,000 L | Controlled Cooling & Seeding)",
+      "type": "row"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "id": 25,
+      "title": "R3 Current Working Phase",
+      "type": "stat",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#1F78C1",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Phase Event Name"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#EF843C",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Active Batch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#5794F2",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Phase Duration"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#705DA0",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "/.*/",
+          "limit": 1,
+          "values": true
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(e.name, 'Idle') AS \"Phase Event Name\", COALESCE(b.batch_id, 'No Active Batch') AS \"Active Batch\", COALESCE(to_char(NOW() - e.started_at, 'HH24:MI:SS'), '00:00:00') AS \"Phase Duration\" FROM assets a LEFT JOIN LATERAL (SELECT id, batch_id FROM batches WHERE current_asset_id = a.id AND status = 'Running' ORDER BY started_at DESC LIMIT 1) b ON TRUE LEFT JOIN LATERAL (SELECT name, started_at FROM events WHERE asset_id = a.id AND batch_pk = b.id AND level = 'Phase' AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1) e ON TRUE WHERE a.code = 'R3' LIMIT 1;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 45
+      },
+      "id": 13,
+      "title": "R3 Crystallisation Thermal Profile & Cooling Ramp State",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "unit": "celsius"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "R3.TEMP"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "left"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Product Temp (°C)"
+              },
+              {
+                "id": "min",
+                "value": -20
+              },
+              {
+                "id": "max",
+                "value": 120
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#5794F2",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "R3.COOL_RATE"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "celsius"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Cooling Rate (°C/h)"
+              },
+              {
+                "id": "min",
+                "value": -30
+              },
+              {
+                "id": "max",
+                "value": 30
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#00FFFF",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "R3.COOL_RAMP"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Cooling Ramp (0:Hold, 1:Ramp)"
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "stepAfter"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.spanNulls",
+                "value": true
+              },
+              {
+                "id": "min",
+                "value": -0.05
+              },
+              {
+                "id": "max",
+                "value": 1.15
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT r.ts AS \"time\", r.value AS \"value\", t.name AS \"metric\" FROM readings r JOIN tags t ON r.tag_id = t.id JOIN assets a ON t.asset_id = a.id WHERE $__timeFilter(r.ts) AND a.code = 'R3' AND t.parameter IN ('TEMP', 'COOL_RATE', 'COOL_RAMP') ORDER BY r.ts ASC;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 53
+      },
+      "id": 29,
+      "title": "R3 Crystalliser Turbidity (NTU) & Seed Addition Status",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#FF780A",
+            "mode": "fixed"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "min": 0,
+          "max": 1000,
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "R3.TURB"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "left"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Turbidity (NTU)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF780A",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "R3.SEEDED"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Seed Addition (0:No, 1:Yes)"
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "stepAfter"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.spanNulls",
+                "value": true
+              },
+              {
+                "id": "min",
+                "value": -0.05
+              },
+              {
+                "id": "max",
+                "value": 1.15
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#F2495C",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT r.ts AS \"time\", r.value AS \"value\", t.name AS \"metric\" FROM readings r JOIN tags t ON r.tag_id = t.id JOIN assets a ON t.asset_id = a.id WHERE $__timeFilter(r.ts) AND a.code = 'R3' AND t.parameter IN ('TURB', 'SEEDED') ORDER BY r.ts ASC;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 53
+      },
+      "id": 14,
+      "title": "R3 Agitator Speed (rpm) & Run State",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#F2CC0C",
+            "mode": "fixed"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "min": 0,
+          "max": 150,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 140
+              }
+            ]
+          },
+          "unit": "rotrpm"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "R3.AGIT"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "left"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Speed (rpm)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#F2CC0C",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "R3.AGIT_RUN"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Agitator State (0/1)"
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "stepAfter"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.spanNulls",
+                "value": true
+              },
+              {
+                "id": "min",
+                "value": -0.05
+              },
+              {
+                "id": "max",
+                "value": 1.15
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT r.ts AS \"time\", r.value AS \"value\", t.name AS \"metric\" FROM readings r JOIN tags t ON r.tag_id = t.id JOIN assets a ON t.asset_id = a.id WHERE $__timeFilter(r.ts) AND a.code = 'R3' AND t.parameter IN ('AGIT', 'AGIT_RUN') ORDER BY r.ts ASC;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 53
+      },
+      "id": 30,
+      "title": "R3 Slurry Volume (L)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#73BF69",
+            "mode": "fixed"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "min": 0,
+          "max": 3000,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 2850
+              }
+            ]
+          },
+          "unit": "L"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT r.ts AS \"time\", r.value AS \"value\", 'R3.VOL' AS \"metric\" FROM readings r JOIN tags t ON r.tag_id = t.id JOIN assets a ON t.asset_id = a.id WHERE $__timeFilter(r.ts) AND a.code = 'R3' AND t.parameter = 'VOL' ORDER BY r.ts ASC;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "id": 15,
+      "title": "ISA-88 Batch Tracking & Electronic Batch Record (EBR) Context",
+      "type": "row"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 61
+      },
+      "id": 16,
+      "title": "Batches in Train (R1 -> R2 -> R3 Material Flow)",
+      "type": "table",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Status"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "blue",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": "Completed"
+                    },
+                    {
+                      "color": "orange",
+                      "value": "Running"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT b.batch_id AS \"Batch ID\", b.product_code AS \"Product\", b.recipe_version AS \"Recipe\", COALESCE(a.code, 'Discharged') AS \"Current Reactor\", b.status AS \"Status\", b.started_at AS \"Started At\", to_char(COALESCE(b.ended_at, NOW()) - b.started_at, 'HH24:MI:SS') AS \"Elapsed Duration\" FROM batches b LEFT JOIN assets a ON b.current_asset_id = a.id ORDER BY b.started_at DESC LIMIT 15;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 61
+      },
+      "id": 17,
+      "title": "ISA-88 Events & Process Alarms Feed",
+      "type": "table",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Level"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT e.started_at AS \"Time\", a.code AS \"Reactor\", COALESCE(b.batch_id, 'None') AS \"Batch\", e.level AS \"Level\", e.name AS \"Event Name\", CASE WHEN e.ended_at IS NULL THEN 'In Progress' ELSE 'Completed' END AS \"State\", to_char(COALESCE(e.ended_at, NOW()) - e.started_at, 'MI:SS') AS \"Duration\" FROM events e JOIN assets a ON e.asset_id = a.id LEFT JOIN batches b ON e.batch_pk = b.id ORDER BY e.started_at DESC LIMIT 25;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 70
+      },
+      "id": 18,
+      "title": "Sensor Snapshots (1s Live Cache) & 1-Minute Rollups — Controlled by Table Filters",
+      "type": "row"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 12,
+        "w": 12,
+        "x": 0,
+        "y": 71
+      },
+      "id": 19,
+      "title": "24-Tag Live Sensor Cache (Filtered by Table Filters)",
+      "type": "table",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Type"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#299c46",
+                      "value": null
+                    },
+                    {
+                      "color": "#3274D9",
+                      "value": "★ CPP"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Quality"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": "Bad"
+                    },
+                    {
+                      "color": "orange",
+                      "value": "Questionable"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT a.code AS \"Reactor\", t.name AS \"Tag\", CASE WHEN t.is_cpp THEN '★ CPP' ELSE 'Standard' END AS \"Type\", CASE WHEN t.point_type = 'integer' THEN COALESCE(sl.label, s.value::text) ELSE ROUND(s.value::numeric, t.display_digits)::text END AS \"Current Value\", COALESCE(t.units, '') AS \"Units\", CASE s.quality WHEN 0 THEN 'Good' WHEN 1 THEN 'Questionable' WHEN 2 THEN 'Bad' WHEN 3 THEN 'Substituted' END AS \"Quality\", s.ts AS \"Last Updated\" FROM snapshots s JOIN tags t ON s.tag_id = t.id JOIN assets a ON t.asset_id = a.id LEFT JOIN tag_state_labels sl ON sl.tag_id = t.id AND sl.state_value = s.value::smallint WHERE a.code IN (${reactor:singlequote}) AND t.name IN (${tag:singlequote}) ORDER BY a.id, t.id;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 12,
+        "w": 12,
+        "x": 12,
+        "y": 71
+      },
+      "id": 20,
+      "title": "1-Minute Rollup Audit & Data Verification (Filtered by Table Filters)",
+      "type": "table",
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "% Good"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "#EAB839",
+                      "value": 80
+                    },
+                    {
+                      "color": "green",
+                      "value": 99
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT r.bucket AS \"Time\", a.code AS \"Reactor\", t.name AS \"Tag\", ROUND(r.avg_value::numeric, 2) AS \"Avg Value\", ROUND(r.min_value::numeric, 2) AS \"Min Value\", ROUND(r.max_value::numeric, 2) AS \"Max Value\", r.sample_count AS \"Total Samples\", r.good_count AS \"Good Samples\", ROUND((r.good_count::numeric / NULLIF(r.sample_count, 0) * 100), 1) AS \"% Good\" FROM readings_1min r JOIN tags t ON r.tag_id = t.id JOIN assets a ON t.asset_id = a.id WHERE $__timeFilter(r.bucket) AND a.code IN (${reactor:singlequote}) AND t.name IN (${tag:singlequote}) ORDER BY r.bucket DESC, a.code ASC, t.name ASC LIMIT 100;",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": [
+    "reactor",
+    "historian",
+    "api-pharma",
+    "batchline"
+  ],
+  "templating": {
+    "list": [
+      {
+        "allValue": null,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "postgres",
+          "uid": "timescaledb"
+        },
+        "definition": "SELECT code FROM assets ORDER BY id;",
+        "description": "Filter bottom tables (Snapshots & Rollups) by Reactor",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Table Filter: Reactor",
+        "multi": true,
+        "name": "reactor",
+        "options": [],
+        "query": "SELECT code FROM assets ORDER BY id;",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": null,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "postgres",
+          "uid": "timescaledb"
+        },
+        "definition": "SELECT t.name FROM tags t JOIN assets a ON t.asset_id = a.id WHERE a.code IN (${reactor:singlequote}) ORDER BY t.name;",
+        "description": "Filter bottom tables (Snapshots & Rollups) by Tag",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Table Filter: Tag",
+        "multi": true,
+        "name": "tag",
+        "options": [],
+        "query": "SELECT t.name FROM tags t JOIN assets a ON t.asset_id = a.id WHERE a.code IN (${reactor:singlequote}) ORDER BY t.name;",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "1s",
+      "5s",
+      "10s",
+      "30s"
+    ]
+  },
+  "timezone": "browser",
+  "title": "Reactor Plant Overview (API Synthesis Train)",
+  "uid": "reactor-plant-overview",
+  "version": 22
 }

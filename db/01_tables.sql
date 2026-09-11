@@ -1,65 +1,85 @@
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
--- Assets
+-- 1. Assets (Plant Equipment)
 CREATE TABLE assets (
   id            SERIAL PRIMARY KEY,
   code          TEXT NOT NULL UNIQUE,
   display_name  TEXT NOT NULL,
   asset_type    TEXT NOT NULL DEFAULT 'Reactor',
+  role          TEXT NOT NULL,
+  material      TEXT NOT NULL,
   capacity_l    NUMERIC(10,1),
   parent_id     INTEGER REFERENCES assets(id),
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Tags
+-- 2. Tags (Sensor & Instrument Definitions)
 CREATE TABLE tags (
-  id             SERIAL PRIMARY KEY,
-  name           TEXT NOT NULL UNIQUE,
-  asset_id       INTEGER NOT NULL REFERENCES assets(id),
-  parameter      TEXT NOT NULL,
-  description    TEXT NOT NULL,
-  units          TEXT NOT NULL,
-  range_min      NUMERIC(12,4) NOT NULL,
-  range_max      NUMERIC(12,4) NOT NULL,
-  alarm_low      NUMERIC(12,4),
-  alarm_high     NUMERIC(12,4),
-  display_digits SMALLINT NOT NULL DEFAULT 2,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  id              SERIAL PRIMARY KEY,
+  name            TEXT NOT NULL UNIQUE,
+  asset_id        INTEGER NOT NULL REFERENCES assets(id),
+  parameter       TEXT NOT NULL,
+  description     TEXT NOT NULL,
+  point_type      TEXT NOT NULL DEFAULT 'float'
+                  CHECK (point_type IN ('float', 'float_calculated', 'integer')),
+  units           TEXT,
+  range_min       NUMERIC(12,4),
+  range_max       NUMERIC(12,4),
+  alarm_low       NUMERIC(12,4),
+  alarm_high      NUMERIC(12,4),
+  alarm_state_int SMALLINT,
+  display_digits  SMALLINT NOT NULL DEFAULT 2,
+  is_cpp          BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (asset_id, parameter)
 );
 
--- Batches
-CREATE TABLE batches (
-  id          SERIAL PRIMARY KEY,
-  batch_id    TEXT NOT NULL UNIQUE,
-  asset_id    INTEGER NOT NULL REFERENCES assets(id),
-  started_at  TIMESTAMPTZ NOT NULL,
-  ended_at    TIMESTAMPTZ,
-  status      TEXT NOT NULL DEFAULT 'Running'
-              CHECK (status IN ('Running','Completed','Aborted')),
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+-- 2b. Tag State Labels (Normalized 1:N discrete state enumeration for integer tags)
+CREATE TABLE tag_state_labels (
+  tag_id       INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  state_value  SMALLINT NOT NULL,
+  label        TEXT NOT NULL,
+  PRIMARY KEY (tag_id, state_value)
 );
-CREATE INDEX idx_batches_asset_time ON batches (asset_id, started_at DESC);
 
--- Events
+-- 3. Batches (ISA-88 Batch Execution Header)
+CREATE TABLE batches (
+  id               SERIAL PRIMARY KEY,
+  batch_id         TEXT NOT NULL UNIQUE,
+  product_code     TEXT NOT NULL DEFAULT 'API-7734',
+  recipe_version   TEXT NOT NULL DEFAULT 'v2.1',
+  current_asset_id INTEGER REFERENCES assets(id),
+  started_at       TIMESTAMPTZ NOT NULL,
+  ended_at         TIMESTAMPTZ,
+  status           TEXT NOT NULL DEFAULT 'Running'
+                   CHECK (status IN ('Running','Completed','Aborted')),
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_batches_time ON batches (started_at DESC);
+CREATE INDEX idx_batches_current_asset ON batches (current_asset_id, status);
+
+-- 4. Events (ISA-88 Unit Procedures, Phases, Alarms, and State Changes)
 CREATE TABLE events (
   id          SERIAL PRIMARY KEY,
-  batch_pk    INTEGER REFERENCES batches(id),
+  batch_pk    INTEGER REFERENCES batches(id) ON DELETE CASCADE,
   asset_id    INTEGER NOT NULL REFERENCES assets(id),
-  parent_id   INTEGER REFERENCES events(id),
+  parent_id   INTEGER REFERENCES events(id) ON DELETE CASCADE,
+  tag_id      INTEGER REFERENCES tags(id),
   name        TEXT NOT NULL,
   level       TEXT NOT NULL DEFAULT 'Phase'
-              CHECK (level IN ('Batch','Operation','Phase','Step')),
+              CHECK (level IN ('Batch','Unit Procedure','Phase','Step','Alarm','StateChange','QualityChange')),
   occurrence  SMALLINT NOT NULL DEFAULT 1,
   started_at  TIMESTAMPTZ NOT NULL,
   ended_at    TIMESTAMPTZ,
-  UNIQUE (batch_pk, name, occurrence)
+  details     JSONB
 );
 CREATE INDEX idx_events_batch    ON events (batch_pk);
 CREATE INDEX idx_events_asset_ts ON events (asset_id, started_at DESC);
 CREATE INDEX idx_events_lookup   ON events (batch_pk, name);
+CREATE INDEX idx_events_parent   ON events (parent_id);
+CREATE INDEX idx_events_tag      ON events (tag_id);
 
--- Raw Readings
+-- 5. Raw Readings (Time-series archive partitioned by TimescaleDB)
 CREATE TABLE readings (
   tag_id   INTEGER NOT NULL REFERENCES tags(id),
   ts       TIMESTAMPTZ NOT NULL,
@@ -68,7 +88,7 @@ CREATE TABLE readings (
   PRIMARY KEY (tag_id, ts)
 );
 
--- Snapshots (Current Value Cache)
+-- 6. Snapshots (Current Value Cache)
 CREATE TABLE snapshots (
   tag_id   INTEGER PRIMARY KEY REFERENCES tags(id),
   ts       TIMESTAMPTZ NOT NULL,
@@ -76,12 +96,11 @@ CREATE TABLE snapshots (
   quality  SMALLINT NOT NULL DEFAULT 0
 );
 
--- Monitoring Jobs & Outbox
+-- 7. Monitoring Jobs (Outbound Periodic Sampling Jobs)
 CREATE TABLE monitoring_jobs (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  batch_id      TEXT NOT NULL REFERENCES batches(batch_id),
+  batch_pk      INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
   asset_id      INTEGER NOT NULL REFERENCES assets(id),
-  tag_names     TEXT[] NOT NULL,
   interval_sec  INTEGER NOT NULL CHECK (interval_sec >= 5),
   kind          TEXT NOT NULL CHECK (kind IN ('fixed','manual')),
   started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -97,6 +116,14 @@ CREATE TABLE monitoring_jobs (
 );
 CREATE INDEX idx_jobs_due ON monitoring_jobs (next_fire_at) WHERE state = 'active';
 
+-- 7b. Monitoring Job Tags (Normalized Many-to-Many junction table for 3NF compliance)
+CREATE TABLE monitoring_job_tags (
+  job_id   UUID NOT NULL REFERENCES monitoring_jobs(id) ON DELETE CASCADE,
+  tag_id   INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  PRIMARY KEY (job_id, tag_id)
+);
+
+-- 8. Monitoring Outbox (Transactional Webhook Queue)
 CREATE TABLE monitoring_outbox (
   id            BIGSERIAL PRIMARY KEY,
   job_id        UUID NOT NULL REFERENCES monitoring_jobs(id) ON DELETE CASCADE,
@@ -112,17 +139,18 @@ CREATE TABLE monitoring_outbox (
 );
 CREATE INDEX idx_outbox_pending ON monitoring_outbox (job_id, sequence) WHERE delivered_at IS NULL;
 
--- Injected Faults & API Keys
+-- 9. Injected Faults (Simulation Chaos Engine)
 CREATE TABLE injected_faults (
   id          SERIAL PRIMARY KEY,
   tag_id      INTEGER NOT NULL REFERENCES tags(id),
-  kind        TEXT NOT NULL CHECK (kind IN ('stuck','drift','dropout','spike')),
+  kind        TEXT NOT NULL CHECK (kind IN ('stuck','drift','dropout','spike','quality','override')),
   magnitude   DOUBLE PRECISION,
   started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   cleared_at  TIMESTAMPTZ
 );
 CREATE INDEX idx_faults_active ON injected_faults (tag_id) WHERE cleared_at IS NULL;
 
+-- 10. API Keys (Authentication)
 CREATE TABLE api_keys (
   id            SERIAL PRIMARY KEY,
   label         TEXT NOT NULL,
@@ -132,6 +160,7 @@ CREATE TABLE api_keys (
   revoked_at    TIMESTAMPTZ
 );
 
+-- 11. Request Log (API Traffic Audit)
 CREATE TABLE request_log (
   id           BIGSERIAL PRIMARY KEY,
   ts           TIMESTAMPTZ NOT NULL DEFAULT now(),
