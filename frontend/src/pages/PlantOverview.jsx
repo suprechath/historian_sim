@@ -30,15 +30,20 @@ export default function PlantOverview() {
                     running={stream.running}
                     speed={stream.speed}
                 />
-                {/* <div className="lower">
+                <div className="lower">
                     <TrendCanvas
                         selectedReactor={selectedReactor}
                         onSelectReactor={setSelectedReactor}
                         clock={stream.clock}
                     />
-                    <TagTable tags={stream.tags} reactors={stream.reactors} />
+                    <div>
+                        <p className="shead">
+                            <b>Plant Telemetry & Tag Status (1-min archive)</b> Real-time vessel snapshots and signal quality
+                        </p>
+                        <TagTable tags={stream.tags} reactors={stream.reactors} />
+                    </div>
                 </div>
-                <DemoControls selectedReactor={selectedReactor} /> */}
+                {/* <DemoControls selectedReactor={selectedReactor} /> */}
             </main>
         </div>
     );

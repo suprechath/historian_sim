@@ -52,7 +52,7 @@ app.use((err, req, res, next) => {
 await ensureDefaultApiKey();
 startJobsWorker();
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     console.log(`\n======================================================`);
     console.log(` Historian API running on port ${PORT}`);
     console.log(` - External API (Logged): http://localhost:${PORT}/api/v1/*`);
