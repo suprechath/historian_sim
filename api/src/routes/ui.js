@@ -278,14 +278,54 @@ router.get('/events', async (req, res) => {
       WHERE 1=1
     `;
         const params = [];
-        if (asset) { params.push(asset); sql += ` AND a.code = $${params.length}`; }
-        if (level) { params.push(level); sql += ` AND e.level = $${params.length}`; }
+        if (asset && asset !== 'ALL') { params.push(asset); sql += ` AND a.code = $${params.length}`; }
+        if (level && level !== 'ALL') { params.push(level); sql += ` AND e.level = $${params.length}`; }
         if (from && to) {
             params.push(new Date(from));
             params.push(new Date(to));
             sql += ` AND e.started_at <= $${params.length} AND (e.ended_at IS NULL OR e.ended_at >= $${params.length - 1})`;
         }
         sql += ` ORDER BY e.started_at DESC LIMIT $${params.length + 1};`;
+        params.push(parseInt(limit, 10));
+
+        const { rows } = await query(sql, params);
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// 5. 1-Minute Rollup Audit & Data Verification (TimescaleDB readings_1min)
+// ---------------------------------------------------------------------------
+router.get('/rollups', async (req, res) => {
+    const { asset, limit = 60 } = req.query;
+    try {
+        let sql = `
+          SELECT 
+            r.bucket AS "time",
+            a.code AS "reactor",
+            t.name AS "tag",
+            t.description,
+            t.parameter,
+            t.units AS "unit",
+            ROUND(r.avg_value::numeric, COALESCE(t.display_digits, 2)) AS "avg",
+            ROUND(r.min_value::numeric, COALESCE(t.display_digits, 2)) AS "min",
+            ROUND(r.max_value::numeric, COALESCE(t.display_digits, 2)) AS "max",
+            r.sample_count AS "total_points",
+            r.good_count AS "good_points",
+            ROUND((r.good_count::numeric / NULLIF(r.sample_count, 0) * 100)::numeric, 1) AS "pct_good"
+          FROM readings_1min r
+          JOIN tags t ON r.tag_id = t.id
+          JOIN assets a ON t.asset_id = a.id
+          WHERE 1=1
+        `;
+        const params = [];
+        if (asset && asset !== 'ALL') {
+            params.push(asset);
+            sql += ` AND a.code = $${params.length}`;
+        }
+        sql += ` ORDER BY r.bucket DESC, t.name ASC LIMIT $${params.length + 1};`;
         params.push(parseInt(limit, 10));
 
         const { rows } = await query(sql, params);

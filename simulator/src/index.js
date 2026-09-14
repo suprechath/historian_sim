@@ -16,7 +16,7 @@ async function startEngine() {
     const { rows: assets } = await client.query('SELECT id, code, display_name, capacity_l, role, material FROM assets ORDER BY id');
     const { rows: tags } = await client.query(`
       SELECT id, name, asset_id, parameter, point_type, range_min, range_max, 
-             alarm_low, alarm_high, alarm_state_int, is_cpp 
+             alarm_low, alarm_high, alarm_state_int, is_cpp, display_digits
       FROM tags ORDER BY id
     `);
 
@@ -452,17 +452,21 @@ async function startEngine() {
             snapshotQualities.push(quality);
             snapshotTimes.push(now.toISOString());
 
-            // Check Process Alarms
+            // Check Process Alarms & Sensor Faults
             let isAlarmActive = false;
             let alarmMsg = '';
 
-            if (val !== null && quality === 0) {
+            if (quality === 2 || val === null) {
+              isAlarmActive = true;
+              alarmMsg = `${tag.name} Sensor Fault (Dropout / Disconnected)`;
+            } else {
+              const digits = tag.display_digits ?? 1;
               if (tag.alarm_high !== null && val > tag.alarm_high) {
                 isAlarmActive = true;
-                alarmMsg = `${tag.name} High Alarm (${val.toFixed(tag.display_digits)} > ${tag.alarm_high})`;
+                alarmMsg = `${tag.name} High Alarm (${val.toFixed(digits)} > ${tag.alarm_high})`;
               } else if (tag.alarm_low !== null && val < tag.alarm_low) {
                 isAlarmActive = true;
-                alarmMsg = `${tag.name} Low Alarm (${val.toFixed(tag.display_digits)} < ${tag.alarm_low})`;
+                alarmMsg = `${tag.name} Low Alarm (${val.toFixed(digits)} < ${tag.alarm_low})`;
               } else if (tag.alarm_state_int !== null && Math.round(val) === tag.alarm_state_int) {
                 isAlarmActive = true;
                 alarmMsg = `${tag.name} State Alarm (State = ${tag.alarm_state_int})`;
@@ -470,25 +474,42 @@ async function startEngine() {
             }
 
             const alarmKey = `${tag.id}`;
-            if (isAlarmActive && !activeAlarms.has(alarmKey)) {
-              // Open new Alarm Event
-              try {
-                const { rows: aRows } = await client.query(
-                  `INSERT INTO events (batch_pk, asset_id, parent_id, tag_id, name, level, started_at, details)
-                   VALUES ($1, $2, $3, $4, $5, 'Alarm', $6, $7) RETURNING id`,
-                  [sim.activeBatch ? sim.activeBatch.id : null, sim.asset.id, sim.activePhaseEventId, tag.id, alarmMsg, now, JSON.stringify({ val })]
-                );
-                activeAlarms.set(alarmKey, aRows[0].id);
-                console.log(`[ALARM TRIGGERED] ${alarmMsg}`);
-              } catch (e) {
-                console.error('Error logging alarm event:', e.message);
+            const existingAlarm = activeAlarms.get(alarmKey);
+
+            if (isAlarmActive) {
+              if (!existingAlarm) {
+                // Open new Alarm Event
+                try {
+                  const { rows: aRows } = await client.query(
+                    `INSERT INTO events (batch_pk, asset_id, parent_id, tag_id, name, level, started_at, details)
+                     VALUES ($1, $2, $3, $4, $5, 'Alarm', $6, $7) RETURNING id`,
+                    [sim.activeBatch ? sim.activeBatch.id : null, sim.asset.id, sim.activePhaseEventId, tag.id, alarmMsg, now, JSON.stringify({ val })]
+                  );
+                  activeAlarms.set(alarmKey, { id: aRows[0].id, msg: alarmMsg });
+                  console.log(`[ALARM TRIGGERED] ${alarmMsg}`);
+                } catch (e) {
+                  console.error('Error logging alarm event:', e.message);
+                }
+              } else if (existingAlarm.msg !== alarmMsg) {
+                // Alarm condition changed (e.g. Dropout to High Alarm) -> close old, open new
+                try {
+                  await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, existingAlarm.id]);
+                  const { rows: aRows } = await client.query(
+                    `INSERT INTO events (batch_pk, asset_id, parent_id, tag_id, name, level, started_at, details)
+                     VALUES ($1, $2, $3, $4, $5, 'Alarm', $6, $7) RETURNING id`,
+                    [sim.activeBatch ? sim.activeBatch.id : null, sim.asset.id, sim.activePhaseEventId, tag.id, alarmMsg, now, JSON.stringify({ val })]
+                  );
+                  activeAlarms.set(alarmKey, { id: aRows[0].id, msg: alarmMsg });
+                  console.log(`[ALARM CHANGED] ${existingAlarm.msg} -> ${alarmMsg}`);
+                } catch (e) {
+                  console.error('Error updating alarm event:', e.message);
+                }
               }
-            } else if (!isAlarmActive && activeAlarms.has(alarmKey)) {
+            } else if (existingAlarm) {
               // Clear active alarm event
-              const eventId = activeAlarms.get(alarmKey);
               activeAlarms.delete(alarmKey);
               try {
-                await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, eventId]);
+                await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, existingAlarm.id]);
                 console.log(`[ALARM CLEARED] ${tag.name} returned to normal.`);
               } catch (e) {
                 console.error('Error clearing alarm event:', e.message);

@@ -4,6 +4,7 @@ import ProcessMimic from '../components/ProcessMimic';
 import TrendCanvas from '../components/TrendCanvas';
 import TagTable from '../components/TagTable';
 import DemoControls from '../components/DemoControls';
+import EventsFeed from '../components/EventsFeed';
 import { useHistorianStream } from '../hooks/useHistorianStream';
 
 export default function PlantOverview() {
@@ -19,31 +20,59 @@ export default function PlantOverview() {
                 connected={stream.connected}
             />
             <main>
-                <p className="shead">
-                    <b>Process mimic</b> Click a vessel to trend it
-                </p>
-                <ProcessMimic
-                    reactors={stream.reactors}
-                    tags={stream.tags}
-                    selectedReactor={selectedReactor}
-                    onSelectReactor={setSelectedReactor}
-                    running={stream.running}
-                    speed={stream.speed}
-                />
-                <div className="lower">
+                <div className="mimic-deck">
+                    <div className="mimic-main-col">
+                        <p className="shead">
+                            <b>Process mimic</b> Click a vessel to trend it
+                        </p>
+                        <ProcessMimic
+                            reactors={stream.reactors}
+                            tags={stream.tags}
+                            selectedReactor={selectedReactor}
+                            onSelectReactor={setSelectedReactor}
+                            running={stream.running}
+                            speed={stream.speed}
+                        />
+                    </div>
+                    <div className="mimic-side-col">
+                        <p className="shead">
+                            <b> Controls</b> Injected faults & phase skip
+                        </p>
+                        <DemoControls
+                            selectedReactor={selectedReactor}
+                            onSelectReactor={setSelectedReactor}
+                        />
+                    </div>
+                </div>
+
+                <div style={{ marginTop: 14 }}>
                     <TrendCanvas
                         selectedReactor={selectedReactor}
                         onSelectReactor={setSelectedReactor}
                         clock={stream.clock}
                     />
-                    <div>
+                </div>
+
+                <div className="bottom-feed-grid">
+                    <div className="bottom-col">
                         <p className="shead">
-                            <b>Plant Telemetry & Tag Status (1-min archive)</b> Real-time vessel snapshots and signal quality
+                            <b>1-Minute Rollup Audit & Data Verification</b> Continuous aggregates · {selectedReactor}
                         </p>
-                        <TagTable tags={stream.tags} reactors={stream.reactors} />
+                        <TagTable
+                            selectedReactor={selectedReactor}
+                            onSelectReactor={setSelectedReactor}
+                        />
+                    </div>
+                    <div className="bottom-col">
+                        <p className="shead">
+                            <b>Events & Process Alarms Feed</b> Real-time transitions & alarms · {selectedReactor}
+                        </p>
+                        <EventsFeed
+                            selectedReactor={selectedReactor}
+                            onSelectReactor={setSelectedReactor}
+                        />
                     </div>
                 </div>
-                {/* <DemoControls selectedReactor={selectedReactor} /> */}
             </main>
         </div>
     );
