@@ -3,8 +3,8 @@ import { pool } from './db.js';
 import { PRNG } from './prng.js';
 import { ReactorSimulation } from './stateMachine.js';
 
-const SEED = parseInt(process.env.SIM_SEED || '20260908', 10);
-const DAYS_TO_SEED = parseInt(process.argv[2] || '7', 10); // Default 7 days
+const SEED = Date.now();
+const DAYS_TO_SEED = parseInt(process.argv[2] || '3', 10);
 const ARCHIVE_INTERVAL_SEC = 5;                           // 5-second archive persistence
 const BATCH_FLUSH_SIZE = 40000;                           // Multi-row array buffer size
 
@@ -74,7 +74,7 @@ async function seedHistory() {
 
     // Seed initial active batches for the 3 staggered reactors
     const year = startTime.getUTCFullYear();
-    
+
     // Batch 1 in R3
     const b1Str = `B-${year}-${String(batchSeq++).padStart(4, '0')}`;
     const { rows: b1Rows } = await client.query(

@@ -87,10 +87,30 @@ async function startEngine() {
       const now = new Date();
 
       try {
+        // 0. Poll simulation_control state
+        let simRunning = true;
+        let simSpeed = 1;
+        let phaseSkipAsset = null;
+
+        try {
+          const { rows: ctrl } = await client.query('SELECT running, speed, phase_skip_asset FROM simulation_control WHERE id = 1');
+          if (ctrl.length > 0) {
+            simRunning = ctrl[0].running;
+            simSpeed = ctrl[0].speed;
+            phaseSkipAsset = ctrl[0].phase_skip_asset;
+          }
+        } catch (ctrlErr) {
+          // Table may not yet be initialized
+        }
+
+        if (phaseSkipAsset) {
+          await client.query('UPDATE simulation_control SET phase_skip_asset = NULL WHERE id = 1').catch(() => {});
+        }
+
         // -------------------------------------------------------------
         // AUTONOMOUS CHAOS ENGINE: Auto-Clear & Autonomous Injection
         // -------------------------------------------------------------
-        if (CHAOS_ENABLED) {
+        if (CHAOS_ENABLED && simRunning) {
           // 1. Auto-clear expired autonomous faults
           for (const [faultId, faultInfo] of activeChaosFaults.entries()) {
             if (now.getTime() >= faultInfo.clearTime) {
@@ -203,7 +223,7 @@ async function startEngine() {
         // -------------------------------------------------------------
 
         // 1. Check if R1 needs to start a new batch
-        if (!r1.activeBatch && (r1.currentPhase === 'Idle' || r1.currentPhase === 'Charging')) {
+        if (simRunning && !r1.activeBatch && (r1.currentPhase === 'Idle' || r1.currentPhase === 'Charging')) {
           if (r1.currentPhase === 'Idle') {
             r1.transitionNextPhase('Charging');
           }
@@ -237,8 +257,10 @@ async function startEngine() {
         }
 
         // 2. Advance simulation ticks for R1, R2, R3
+        const deltaSec = simRunning ? simSpeed : 0;
         for (const sim of reactors) {
-          const phaseFinished = sim.tick(1);
+          const forcePhaseFinish = Boolean(phaseSkipAsset && sim.code === phaseSkipAsset);
+          const phaseFinished = (simRunning && sim.tick(deltaSec)) || forcePhaseFinish;
 
           // If phase just started without an open event, open it
           if (sim.activeBatch && sim.activeUnitProcedureId && !sim.activePhaseEventId && sim.currentPhase !== 'Idle') {

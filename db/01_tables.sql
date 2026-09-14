@@ -172,3 +172,12 @@ CREATE TABLE request_log (
   duration_ms  INTEGER NOT NULL
 );
 CREATE INDEX idx_request_log_ts ON request_log (ts DESC);
+
+-- 12. Simulation Control Plane (Live Play/Pause & Speed Multiplier)
+CREATE TABLE IF NOT EXISTS simulation_control (
+  id                INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  running           BOOLEAN NOT NULL DEFAULT true,
+  speed             INTEGER NOT NULL DEFAULT 1 CHECK (speed >= 1 AND speed <= 3600),
+  phase_skip_asset  TEXT,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);

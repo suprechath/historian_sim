@@ -88,3 +88,8 @@ JOIN (VALUES
 -- 3. Snapshots (Initialize with offline/bad defaults)
 INSERT INTO snapshots (tag_id, ts, value, quality)
 SELECT id, now(), NULL, 2 FROM tags;
+
+-- 4. Simulation Control Plane (Default to active at 1x real-time speed)
+INSERT INTO simulation_control (id, running, speed)
+VALUES (1, true, 1)
+ON CONFLICT (id) DO NOTHING;

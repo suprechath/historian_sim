@@ -1,5 +1,12 @@
+import path from 'path';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
 import { pool } from './db.js';
 import { spawnSync } from 'child_process';
+
+// Resolve and load root .env (two levels up from simulator/src)
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 async function bootstrap() {
   try {
@@ -10,7 +17,7 @@ async function bootstrap() {
     client.release();
 
     if (rows.length === 0) {
-      const daysToSeed = process.env.AUTO_SEED_DAYS || '3';
+      const daysToSeed = process.env.AUTO_SEED_DAYS;
       console.log(`--- Empty Database Detected: Automatically seeding ${daysToSeed}-day history ---`);
       const seedProcess = spawnSync('node', ['src/seeder.js', daysToSeed], {
         stdio: 'inherit',

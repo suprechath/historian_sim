@@ -107,6 +107,7 @@ export class ReactorSimulation {
 
   // First-order response helper with Gaussian sensor noise
   approach(current, target, rateSec, noiseStdev, deltaSec = 1) {
+    if (deltaSec === 0) return current; // Frozen in place when simulation is paused
     const step = (target - current) * (1 - Math.exp(-deltaSec / Math.max(1, rateSec)));
     const noise = this.prng.gaussian(0, noiseStdev);
     return current + step + noise;

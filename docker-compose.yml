@@ -25,7 +25,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}
-      SIM_SEED: ${SIM_SEED}
+      AUTO_SEED_DAYS: ${AUTO_SEED_DAYS}
     depends_on:
       timescaledb:
         condition: service_healthy
