@@ -262,4 +262,96 @@ router.delete('/faults', async (req, res) => {
     }
 });
 
+// ---------------------------------------------------------------------------
+// 4. UI Historical Events & Readings (Unauthenticated endpoints for TrendCanvas)
+// ---------------------------------------------------------------------------
+router.get('/events', async (req, res) => {
+    const { asset, level, from, to, limit = 100 } = req.query;
+    try {
+        let sql = `
+      SELECT e.id, e.name, e.occurrence, e.level, e.started_at, e.ended_at,
+             a.code AS asset, b.batch_id, t.name AS tag_name
+      FROM events e
+      JOIN assets a ON e.asset_id = a.id
+      LEFT JOIN batches b ON e.batch_pk = b.id
+      LEFT JOIN tags t ON e.tag_id = t.id
+      WHERE 1=1
+    `;
+        const params = [];
+        if (asset) { params.push(asset); sql += ` AND a.code = $${params.length}`; }
+        if (level) { params.push(level); sql += ` AND e.level = $${params.length}`; }
+        if (from && to) {
+            params.push(new Date(from));
+            params.push(new Date(to));
+            sql += ` AND e.started_at <= $${params.length} AND (e.ended_at IS NULL OR e.ended_at >= $${params.length - 1})`;
+        }
+        sql += ` ORDER BY e.started_at DESC LIMIT $${params.length + 1};`;
+        params.push(parseInt(limit, 10));
+
+        const { rows } = await query(sql, params);
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.get('/readings', async (req, res) => {
+    const { tags, from, to, resolution = 'auto' } = req.query;
+    if (!tags || !from || !to) {
+        return res.status(400).json({ error: 'Parameters "tags", "from", and "to" are required' });
+    }
+
+    const tagList = tags.split(',').map(t => t.trim());
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+    const spanHours = (toDate - fromDate) / (1000 * 3600);
+
+    let targetRes = resolution;
+    let downsampled = false;
+
+    if (targetRes === 'auto') {
+        if (spanHours <= 4) targetRes = 'raw';
+        else if (spanHours <= 24) { targetRes = '1m'; downsampled = true; }
+        else if (spanHours <= 168) { targetRes = '5m'; downsampled = true; }
+        else { targetRes = '1h'; downsampled = true; }
+    }
+
+    try {
+        let sql = '';
+        if (targetRes === 'raw') {
+            sql = `
+        SELECT r.ts AS "time", t.name AS "tag", r.value, r.quality
+        FROM readings r
+        JOIN tags t ON r.tag_id = t.id
+        WHERE t.name = ANY($1::text[]) AND r.ts >= $2 AND r.ts <= $3
+        ORDER BY r.ts ASC;
+      `;
+        } else if (targetRes === '1m') {
+            sql = `
+        SELECT r.bucket AS "time", t.name AS "tag", r.avg_value AS value, 0 AS quality
+        FROM readings_1min r
+        JOIN tags t ON r.tag_id = t.id
+        WHERE t.name = ANY($1::text[]) AND r.bucket >= $2 AND r.bucket <= $3
+        ORDER BY r.bucket ASC;
+      `;
+        } else {
+            const bucket = targetRes === '5m' ? '5 minutes' : '1 hour';
+            sql = `
+        SELECT time_bucket('${bucket}', r.ts) AS "time", t.name AS "tag",
+               avg(r.value) AS value, min(r.quality) AS quality
+        FROM readings r
+        JOIN tags t ON r.tag_id = t.id
+        WHERE t.name = ANY($1::text[]) AND r.ts >= $2 AND r.ts <= $3
+        GROUP BY 1, 2
+        ORDER BY 1 ASC;
+      `;
+        }
+
+        const { rows } = await query(sql, [tagList, fromDate, toDate]);
+        res.json({ resolution: targetRes, autoDownsampled: downsampled, count: rows.length, data: rows });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 export default router;

@@ -123,6 +123,8 @@ async function seedHistory() {
     console.log(`Backfilling timeline from ${startTime.toISOString()} to ${now.toISOString()}...`);
     let lastLoggedDay = -1;
 
+    let isInitialBoot = true;
+
     // Advance timeline in 5-second archive increments
     while (currentTime <= now) {
       const daysElapsed = Math.floor((currentTime - startTime) / (24 * 60 * 60 * 1000));
@@ -132,8 +134,11 @@ async function seedHistory() {
       }
 
       // Check if R1 needs a new batch
-      if (!r1.activeBatch && (r1.currentPhase === 'Charging' || r1.currentPhase === 'Idle')) {
-        if (r1.currentPhase === 'Idle') r1.transitionNextPhase('Charging');
+      if (!r1.activeBatch && (r1.currentPhase === 'Charging' || (isInitialBoot && r1.currentPhase === 'Idle'))) {
+        if (isInitialBoot && r1.currentPhase === 'Idle') {
+          isInitialBoot = false;
+          r1.transitionNextPhase('Charging');
+        }
         const bStr = `B-${currentTime.getUTCFullYear()}-${String(batchSeq++).padStart(4, '0')}`;
         const { rows } = await client.query(
           `INSERT INTO batches (batch_id, product_code, recipe_version, current_asset_id, started_at, status)
@@ -161,11 +166,11 @@ async function seedHistory() {
       for (const sim of reactors) {
         const phaseFinished = sim.tick(ARCHIVE_INTERVAL_SEC);
 
-        if (sim.activeBatch && sim.activeUnitProcedureId && !sim.activePhaseEventId && sim.currentPhase !== 'Idle') {
+        if (!sim.activePhaseEventId) {
           const { rows } = await client.query(
             `INSERT INTO events (batch_pk, asset_id, parent_id, name, level, occurrence, started_at)
              VALUES ($1, $2, $3, $4, 'Phase', $5, $6) RETURNING id`,
-            [sim.activeBatch.id, sim.asset.id, sim.activeUnitProcedureId, sim.currentPhase, sim.phaseOccurrence, currentTime]
+            [sim.activeBatch?.id || null, sim.asset.id, sim.activeUnitProcedureId || null, sim.currentPhase, sim.phaseOccurrence || 1, currentTime]
           );
           sim.activePhaseEventId = rows[0].id;
         }
@@ -186,6 +191,11 @@ async function seedHistory() {
             sim.transitionNextPhase('Clean');
 
             if (transferred && r2) {
+              if (r2.activePhaseEventId) {
+                await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [currentTime, r2.activePhaseEventId]);
+                r2.activePhaseEventId = null;
+              }
+
               r2.activeBatch = transferred;
               await client.query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [r2.asset.id, transferred.id]);
 
@@ -215,6 +225,11 @@ async function seedHistory() {
             sim.transitionNextPhase('Clean');
 
             if (transferred && r3) {
+              if (r3.activePhaseEventId) {
+                await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [currentTime, r3.activePhaseEventId]);
+                r3.activePhaseEventId = null;
+              }
+
               r3.activeBatch = transferred;
               await client.query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [r3.asset.id, transferred.id]);
 

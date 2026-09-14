@@ -59,3 +59,16 @@ app.listen(PORT, () => {
     console.log(` - UI & Streaming:        http://localhost:${PORT}/ui/*`);
     console.log(`======================================================\n`);
 });
+
+// Graceful termination handling
+const shutdown = () => {
+    console.log('\n[Historian Service] Gracefully terminating HTTP server & DB pool...');
+    server.close(async () => {
+        await pool.end();
+        console.log('[Historian Service] DB connection pool closed. Process terminated.');
+        process.exit(0);
+    });
+};
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

@@ -26,6 +26,8 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}
       AUTO_SEED_DAYS: ${AUTO_SEED_DAYS}
+    volumes:
+      - ./simulator/src:/app/src
     depends_on:
       timescaledb:
         condition: service_healthy

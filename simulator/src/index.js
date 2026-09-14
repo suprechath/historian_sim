@@ -80,6 +80,11 @@ async function startEngine() {
 
     // Monotonic clock timer with drift compensation
     let expectedNextTick = Date.now() + 1000;
+    let isInitialBoot = true;
+    try {
+      const { rows: runningBatches } = await client.query("SELECT id FROM batches WHERE status = 'Running'");
+      if (runningBatches.length > 0) isInitialBoot = false;
+    } catch (e) {}
 
     console.log(`Simulation ready. Managing 3 reactors in train with ${tags.length} tags.`);
 
@@ -223,8 +228,9 @@ async function startEngine() {
         // -------------------------------------------------------------
 
         // 1. Check if R1 needs to start a new batch
-        if (simRunning && !r1.activeBatch && (r1.currentPhase === 'Idle' || r1.currentPhase === 'Charging')) {
-          if (r1.currentPhase === 'Idle') {
+        if (simRunning && !r1.activeBatch && (r1.currentPhase === 'Charging' || (isInitialBoot && r1.currentPhase === 'Idle'))) {
+          if (isInitialBoot && r1.currentPhase === 'Idle') {
+            isInitialBoot = false;
             r1.transitionNextPhase('Charging');
           }
 
@@ -262,12 +268,12 @@ async function startEngine() {
           const forcePhaseFinish = Boolean(phaseSkipAsset && sim.code === phaseSkipAsset);
           const phaseFinished = (simRunning && sim.tick(deltaSec)) || forcePhaseFinish;
 
-          // If phase just started without an open event, open it
-          if (sim.activeBatch && sim.activeUnitProcedureId && !sim.activePhaseEventId && sim.currentPhase !== 'Idle') {
+          // If phase just started without an open event, open it (including Clean and Idle)
+          if (!sim.activePhaseEventId) {
             const { rows: pRows } = await client.query(
               `INSERT INTO events (batch_pk, asset_id, parent_id, name, level, occurrence, started_at)
                VALUES ($1, $2, $3, $4, 'Phase', $5, $6) RETURNING id`,
-              [sim.activeBatch.id, sim.asset.id, sim.activeUnitProcedureId, sim.currentPhase, sim.phaseOccurrence, now]
+              [sim.activeBatch?.id || null, sim.asset.id, sim.activeUnitProcedureId || null, sim.currentPhase, sim.phaseOccurrence || 1, now]
             );
             sim.activePhaseEventId = pRows[0].id;
           }
@@ -296,6 +302,12 @@ async function startEngine() {
 
               // If R2 is idle or ready, hand off batch to R2
               if (transferredBatch && r2) {
+                // Close any open phase event on R2 (e.g. Idle or Clean) before starting Receive
+                if (r2.activePhaseEventId) {
+                  await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, r2.activePhaseEventId]);
+                  r2.activePhaseEventId = null;
+                }
+
                 r2.activeBatch = transferredBatch;
                 await client.query(
                   'UPDATE batches SET current_asset_id = $1 WHERE id = $2',
@@ -337,6 +349,12 @@ async function startEngine() {
 
               // If R3 is ready, hand off batch to R3
               if (transferredBatch && r3) {
+                // Close any open phase event on R3 (e.g. Idle or Clean) before starting Receive
+                if (r3.activePhaseEventId) {
+                  await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, r3.activePhaseEventId]);
+                  r3.activePhaseEventId = null;
+                }
+
                 r3.activeBatch = transferredBatch;
                 await client.query(
                   'UPDATE batches SET current_asset_id = $1 WHERE id = $2',

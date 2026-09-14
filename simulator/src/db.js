@@ -19,4 +19,8 @@ export const pool = new Pool({
     idleTimeoutMillis: 30000,
 });
 
+pool.on('error', (err) => {
+    console.error('Unexpected error on idle pg client:', err.message);
+});
+
 export const query = (text, params) => pool.query(text, params);
