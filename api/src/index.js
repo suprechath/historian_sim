@@ -3,7 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { query, ensureDefaultApiKey } from './db.js';
+import { query, ensureDefaultApiKey, pool } from './db.js';
 import { authAndAudit } from './middleware/authAndAudit.js';
 import externalRoutes from './routes/external.js';
 import uiRoutes from './routes/ui.js';
@@ -30,10 +30,24 @@ app.get('/health', async (req, res) => {
 });
 
 // 2. Mount External Integration Layer (Authenticated + Audited)
-app.use('/api/v1', authAndAudit, externalRoutes);
+// Open for external systems (Batchline / MES / ERP) via X-API-Key
+app.use(['/api/v1', '/external'], authAndAudit, externalRoutes);
+
+// Middleware: Restrict /ui routes exclusively to the frontend gateway proxy
+const requireFrontendGateway = (req, res, next) => {
+    const secret = req.headers['x-internal-gateway-secret'];
+    const expectedSecret = process.env.INTERNAL_UI_SECRET;
+
+    if (secret !== expectedSecret) {
+        return res.status(403).json({
+            error: 'Forbidden: /ui routes are strictly reserved for the Historian frontend. External systems must use /api/v1 or /external with an authorized X-API-Key.'
+        });
+    }
+    next();
+};
 
 // 3. Mount UI & Telemetry Layer (Stream + Demo Controls)
-app.use('/ui', uiRoutes);
+app.use('/ui', requireFrontendGateway, uiRoutes);
 
 // 404 Handler
 app.use((req, res) => {

@@ -190,6 +190,7 @@ router.post('/simulation/phase/skip', async (req, res) => {
     }
 });
 
+// not used yet
 router.post('/simulation/override-status', async (req, res) => {
     const { tag, state, release = false } = req.body;
     try {
@@ -212,6 +213,7 @@ router.post('/simulation/override-status', async (req, res) => {
     }
 });
 
+// not used yet
 router.get('/faults', async (req, res) => {
     try {
         const { rows } = await query(`

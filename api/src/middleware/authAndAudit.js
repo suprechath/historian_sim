@@ -5,7 +5,21 @@ export async function authAndAudit(req, res, next) {
     const start = performance.now();
     const apiKey = req.headers['x-api-key'];
 
+    const isWebhookRoute = req.path === '/instruction' || req.path === '/status';
+
     if (!apiKey) {
+        if (isWebhookRoute) {
+            res.on('finish', () => {
+                const durationMs = Math.round(performance.now() - start);
+                const queryString = Object.keys(req.query).length ? JSON.stringify(req.query) : null;
+                query(`
+                    INSERT INTO request_log (api_key_id, method, path, query, status, duration_ms)
+                    VALUES ($1, $2, $3, $4, $5, $6);
+                `, [null, req.method, req.originalUrl.split('?')[0], queryString, res.statusCode, durationMs])
+                    .catch(err => console.error('Failed to write request_log:', err.message));
+            });
+            return next();
+        }
         return res.status(401).json({ error: 'Missing required X-API-Key header' });
     }
 

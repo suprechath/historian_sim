@@ -39,9 +39,17 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=FT1234
+      - GF_SECURITY_ADMIN_USER=${GF_ID}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_pass}
       - GF_USERS_ALLOW_SIGN_UP=false
+      # Lightweight optimizations: disable heavy background alerting
+      - GF_ALERTING_ENABLED=false
+      - GF_UNIFIED_ALERTING_ENABLED=false
+      # Disable external telemetry and update checks
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      # Keep Explore mode enabled for SQL data querying
+      - GF_EXPLORE_ENABLED=true
     volumes:
       - grafanadata:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
