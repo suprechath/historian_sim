@@ -90,6 +90,91 @@ function formatReadingValue(value, displayDigits) {
     return String(Math.round(num));
 }
 
+function formatBatchLineDate(date) {
+    if (!date) return null;
+    const d = new Date(date);
+    if (isNaN(d.getTime())) return null;
+
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const month = months[d.getUTCMonth()];
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    const year = d.getUTCFullYear();
+    const hours = String(d.getUTCHours()).padStart(2, '0');
+    const minutes = String(d.getUTCMinutes()).padStart(2, '0');
+    const seconds = String(d.getUTCSeconds()).padStart(2, '0');
+
+    return `${month} ${day}, ${year} ${hours}:${minutes}:${seconds}`;
+}
+
+function formatExecutedTimestamp(date) {
+    if (!date) return null;
+    const d = new Date(date);
+    if (isNaN(d.getTime())) return null;
+    return d.toISOString().slice(0, 19) + '+00:00';
+}
+
+function extractAssetCode(str) {
+    if (!str) return null;
+    const match = String(str).match(/(?:Reactor\s*|R)(\d+)/i);
+    return match ? `R${match[1]}` : null;
+}
+
+async function findEventForBatch({ refRecipe, refEvent, refElement }) {
+    if (!refRecipe || !refEvent) return null;
+
+    const trimmedRecipe = String(refRecipe).trim();
+    const trimmedEvent = String(refEvent).trim();
+    const assetCode = extractAssetCode(refElement);
+
+    // 1. Primary lookup: join batches and assets
+    let sql = `
+        SELECT e.id, e.name, e.level, e.started_at, e.ended_at, a.code AS asset_code, b.batch_id
+        FROM events e
+        JOIN batches b ON e.batch_pk = b.id
+        JOIN assets a ON e.asset_id = a.id
+        WHERE (LOWER(TRIM(b.batch_id)) = LOWER($1) OR b.id::text = $1)
+          AND (
+            LOWER(TRIM(e.name)) = LOWER($2)
+            OR REPLACE(LOWER(TRIM(e.name)), '_', ' ') = REPLACE(LOWER(TRIM($2)), '_', ' ')
+            OR LOWER(TRIM(e.level)) = LOWER($2)
+            OR (e.level = 'Phase' AND LOWER(e.name) LIKE LOWER($3))
+          )
+    `;
+    const params = [trimmedRecipe, trimmedEvent, `%${trimmedEvent}%`];
+
+    if (assetCode) {
+        params.push(assetCode);
+        sql += ` ORDER BY CASE WHEN LOWER(a.code) = LOWER($${params.length}) THEN 0 ELSE 1 END, e.started_at DESC LIMIT 1;`;
+    } else {
+        sql += ` ORDER BY e.started_at DESC LIMIT 1;`;
+    }
+
+    let { rows } = await query(sql, params);
+    if (rows.length > 0) return rows[0];
+
+    // 2. Fallback lookup: if asset code is known, check events table directly
+    if (assetCode) {
+        ({ rows } = await query(`
+            SELECT e.id, e.name, e.level, e.started_at, e.ended_at, a.code AS asset_code, null AS batch_id
+            FROM events e
+            JOIN assets a ON e.asset_id = a.id
+            WHERE LOWER(a.code) = LOWER($1)
+              AND (
+                LOWER(TRIM(e.name)) = LOWER($2)
+                OR REPLACE(LOWER(TRIM(e.name)), '_', ' ') = REPLACE(LOWER(TRIM($2)), '_', ' ')
+                OR LOWER(TRIM(e.level)) = LOWER($2)
+                OR (e.level = 'Phase' AND LOWER(e.name) LIKE LOWER($3))
+              )
+            ORDER BY e.started_at DESC
+            LIMIT 1;
+        `, [assetCode, trimmedEvent, `%${trimmedEvent}%`]));
+
+        if (rows.length > 0) return rows[0];
+    }
+
+    return null;
+}
+
 async function sendBatchLineInstructionUpdate({ refInstruction, batchId, actualResult }) {
     if (!refInstruction || !batchId || !actualResult) return null;
 
@@ -161,6 +246,9 @@ router.post('/instruction', async (req, res) => {
         const refElement = instruction.RefElement || body.RefElement;
         const refTime = instruction.RefTime || body.RefTime;
         const refInstruction = instruction.RefInstruction || body.RefInstruction;
+        const refRecipe = instruction.RefRecipe || body.RefRecipe;
+        const refEvent = instruction.RefEvent || body.RefEvent;
+        const refType = instruction.RefType || body.RefType;
         const callbackKey = body.CallbackKey;
 
         if (rawEventType === undefined || rawEventType === null || rawEventType === '' || Number.isNaN(Number(rawEventType))) {
@@ -169,13 +257,13 @@ router.post('/instruction', async (req, res) => {
         }
         const eventType = Number(rawEventType);
 
-        if (!refElement) {
-            console.error('[BatchLine Callback Error]: Missing required RefElement in instruction payload');
-            return res.status(400).json({ error: 'Missing required RefElement in instruction payload' });
-        }
-
         // Case 1: Point-in-time value lookup
         if (eventType === 1) {
+            if (!refElement) {
+                console.error('[BatchLine Callback Error]: Missing required RefElement in instruction payload');
+                return res.status(400).json({ error: 'Missing required RefElement in instruction payload' });
+            }
+
             const tag = await resolveTag(refElement);
             if (!tag) {
                 return res.status(404).json({ error: `Could not resolve tag for RefElement: "${refElement}"` });
@@ -187,6 +275,7 @@ router.post('/instruction', async (req, res) => {
             }
 
             const formattedValue = formatReadingValue(reading.value, tag.display_digits);
+            const executedTimestamp = formatExecutedTimestamp(reading.ts);
 
             // Post back to BatchLine using reusable function
             const callbackResult = await sendBatchLineInstructionUpdate({
@@ -196,10 +285,18 @@ router.post('/instruction', async (req, res) => {
                     {
                         repeat_no: 1,
                         value: formattedValue,
+                        executed_timestamp: executedTimestamp,
                         executed_user_email: instruction.TriggeredByEmail || null
                     }
                 ]
             });
+
+            if (callbackResult.ok) {
+                console.log('Successfully updated BatchLine case 1 instruction', callbackResult.data);
+            }
+            else {
+                console.error('Failed to update BatchLine case 1 instruction', JSON.stringify(callbackResult.data.error.detail));
+            }
 
             return res.json({
                 status: 'success',
@@ -211,7 +308,107 @@ router.post('/instruction', async (req, res) => {
                     ts: reading.ts,
                     raw_value: reading.value,
                     formatted_value: formattedValue,
+                    executed_timestamp: executedTimestamp,
                     quality: reading.quality
+                },
+                callback: callbackResult
+            });
+        }
+
+        // Case 2: Start time / End time phase lookup
+        if (eventType === 2) {
+            const recipeBatchId = refRecipe || batchId;
+            if (!recipeBatchId) {
+                console.error('[BatchLine Callback Error]: Missing required RefRecipe in instruction payload');
+                return res.status(400).json({ error: 'Missing required RefRecipe in instruction payload' });
+            }
+            if (!refEvent) {
+                console.error('[BatchLine Callback Error]: Missing required RefEvent in instruction payload');
+                return res.status(400).json({ error: 'Missing required RefEvent in instruction payload' });
+            }
+            if (!refType) {
+                console.error('[BatchLine Callback Error]: Missing required RefType in instruction payload');
+                return res.status(400).json({ error: 'Missing required RefType in instruction payload' });
+            }
+
+            const normalizedType = String(refType).trim().toLowerCase();
+            const isStart = /^(starttime|started_at|start)$/i.test(normalizedType);
+            const isEnd = /^(endtime|ended_at|end)$/i.test(normalizedType);
+
+            if (!isStart && !isEnd) {
+                return res.status(400).json({
+                    error: `Invalid RefType: "${refType}". Expected "StartTime" or "EndTime"`
+                });
+            }
+
+            const event = await findEventForBatch({
+                refRecipe: recipeBatchId,
+                refEvent,
+                refElement
+            });
+
+            if (!event) {
+                return res.status(404).json({
+                    error: `Could not find phase/event "${refEvent}" for batch "${recipeBatchId}"`
+                });
+            }
+
+            const selectedField = isStart ? 'started_at' : 'ended_at';
+            const targetTime = isStart ? event.started_at : event.ended_at;
+
+            if (!targetTime) {
+                return res.status(400).json({
+                    error: `Phase "${event.name}" for batch "${recipeBatchId}" has no ${selectedField} yet (phase may still be in progress)`,
+                    event: {
+                        id: event.id,
+                        name: event.name,
+                        level: event.level,
+                        asset: event.asset_code,
+                        started_at: event.started_at,
+                        ended_at: event.ended_at
+                    }
+                });
+            }
+
+            const formattedTime = formatBatchLineDate(targetTime);
+
+            // Post back to BatchLine using reusable function
+            const callbackResult = await sendBatchLineInstructionUpdate({
+                refInstruction,
+                batchId,
+                actualResult: [
+                    {
+                        repeat_no: 1,
+                        value: formattedTime,
+                        executed_user_email: instruction.TriggeredByEmail || null
+                    }
+                ]
+            });
+
+            if (callbackResult.ok) {
+                console.log('Successfully updated BatchLine Case 2 instruction', callbackResult.data);
+            }
+            else {
+                console.error('Failed to update BatchLine Case 2 instruction', JSON.stringify(callbackResult.data.error.detail));
+            }
+
+            return res.json({
+                status: 'success',
+                case: 2,
+                batch_id: batchId,
+                ref_recipe: recipeBatchId,
+                ref_event: refEvent,
+                ref_type: refType,
+                event: {
+                    id: event.id,
+                    name: event.name,
+                    level: event.level,
+                    asset: event.asset_code,
+                    started_at: event.started_at,
+                    ended_at: event.ended_at,
+                    selected_field: selectedField,
+                    selected_time: targetTime,
+                    formatted_value: formattedTime
                 },
                 callback: callbackResult
             });
