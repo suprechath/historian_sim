@@ -228,6 +228,32 @@ async function sendBatchLineInstructionUpdate({ refInstruction, batchId, actualR
     }
 }
 
+const STAT_OPERATIONS = {
+    MAX: 'max',
+    MAXIMUM: 'max',
+    MIN: 'min',
+    MINIMUM: 'min',
+    AVG: 'avg',
+    AVERAGE: 'avg',
+    MEAN: 'avg',
+    SUM: 'sum',
+    TOTAL: 'sum',
+    COUNT: 'sample_count',
+    SAMPLES: 'sample_count',
+    STDDEV: 'stddev',
+    STD: 'stddev',
+    STDEV: 'stddev',
+    STANDARD_DEVIATION: 'stddev',
+    VARIANCE: 'variance',
+    VAR: 'variance',
+    RANGE: 'range',
+    MEDIAN: 'median',
+    FIRST: 'first',
+    LAST: 'last',
+    RECORD: 'record',
+    RECORDS: 'record'
+};
+
 // ---------------------------------------------------------------------------
 // BatchLine Instruction Webhook Endpoint (/instruction)
 // ---------------------------------------------------------------------------
@@ -243,12 +269,15 @@ router.post('/instruction', async (req, res) => {
         const instruction = step.Instruction || {};
 
         const rawEventType = instruction.EventType !== undefined ? instruction.EventType : body.EventType;
+        const instructionDescription = instruction.InstructionDescription || body.InstructionDescription || '';
         const refElement = instruction.RefElement || body.RefElement;
         const refTime = instruction.RefTime || body.RefTime;
         const refInstruction = instruction.RefInstruction || body.RefInstruction;
         const refRecipe = instruction.RefRecipe || body.RefRecipe;
         const refEvent = instruction.RefEvent || body.RefEvent;
         const refType = instruction.RefType || body.RefType;
+        const refStartTime = instruction.RefStartTime || body.RefStartTime;
+        const refEndTime = instruction.RefEndTime || body.RefEndTime;
         const callbackKey = body.CallbackKey;
 
         if (rawEventType === undefined || rawEventType === null || rawEventType === '' || Number.isNaN(Number(rawEventType))) {
@@ -409,6 +438,290 @@ router.post('/instruction', async (req, res) => {
                     selected_field: selectedField,
                     selected_time: targetTime,
                     formatted_value: formattedTime
+                },
+                callback: callbackResult
+            });
+        }
+
+        // Case 3: Calculated / Aggregate statistic over a time range
+        if (eventType === 3) {
+            if (!refElement) {
+                console.error('[BatchLine Callback Error]: Missing required RefElement in instruction payload');
+                return res.status(400).json({ error: 'Missing required RefElement in instruction payload' });
+            }
+
+            if (!refStartTime || !refEndTime) {
+                console.error('[BatchLine Callback Error]: Missing required RefStartTime or RefEndTime in instruction payload');
+                return res.status(400).json({ error: 'Missing required RefStartTime or RefEndTime in instruction payload' });
+            }
+
+            const startDate = new Date(refStartTime);
+            const endDate = new Date(refEndTime);
+
+            if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+                return res.status(400).json({
+                    error: `Invalid date format for RefStartTime ("${refStartTime}") or RefEndTime ("${refEndTime}")`
+                });
+            }
+
+            const [actualStart, actualEnd] = startDate > endDate ? [endDate, startDate] : [startDate, endDate];
+
+            // Trigger special "record" mode if InstructionDescription contains exact "[RECORD]" (all caps) or RefType is "record"
+            const hasRecordTag = typeof instructionDescription === 'string' && instructionDescription.includes('[RECORD]');
+            const isRecordType = String(refType || '').trim().toUpperCase() === 'RECORD';
+            const isRecordMode = hasRecordTag || isRecordType;
+
+            let statField = null;
+            if (!isRecordMode) {
+                if (!refType) {
+                    console.error('[BatchLine Callback Error]: Missing required RefType in instruction payload');
+                    return res.status(400).json({ error: 'Missing required RefType in instruction payload' });
+                }
+
+                const statKey = String(refType).trim().toUpperCase();
+                statField = STAT_OPERATIONS[statKey];
+
+                if (!statField) {
+                    return res.status(400).json({
+                        error: `Unsupported RefType operation: "${refType}". Supported operations: MAX, MIN, AVG, SUM, COUNT, STDDEV, VARIANCE, RANGE, MEDIAN, FIRST, LAST.`
+                    });
+                }
+            }
+
+            const tag = await resolveTag(refElement);
+            if (!tag) {
+                return res.status(404).json({ error: `Could not resolve tag for RefElement: "${refElement}"` });
+            }
+
+            // Special Mode: "record" - Send values within time range (up to 10 values, downsampled via 10 time buckets)
+            if (isRecordMode) {
+                const countRes = await query(`
+                    SELECT COUNT(*)::int AS total_count
+                    FROM readings
+                    WHERE tag_id = $1
+                      AND ts >= $2::timestamptz
+                      AND ts <= $3::timestamptz;
+                `, [tag.id, actualStart, actualEnd]);
+
+                const totalCount = countRes.rows[0]?.total_count || 0;
+                if (totalCount === 0) {
+                    return res.status(404).json({
+                        error: `No readings found for tag "${tag.name}" between ${actualStart.toISOString()} and ${actualEnd.toISOString()}`
+                    });
+                }
+
+                let valuesToSend = [];
+
+                if (totalCount <= 10) {
+                    // Send all values if not more than 10
+                    const { rows } = await query(`
+                        SELECT ts, value
+                        FROM readings
+                        WHERE tag_id = $1
+                          AND ts >= $2::timestamptz
+                          AND ts <= $3::timestamptz
+                        ORDER BY ts ASC;
+                    `, [tag.id, actualStart, actualEnd]);
+
+                    valuesToSend = rows.map((r, idx) => ({
+                        repeat_no: idx + 1,
+                        value: formatReadingValue(r.value, tag.display_digits),
+                        raw_value: r.value,
+                        ts: r.ts
+                    }));
+                } else {
+                    // Split into 10 time ranges and compute average of each
+                    const { rows } = await query(`
+                        WITH bounds AS (
+                            SELECT $2::timestamptz AS t_start, $3::timestamptz AS t_end
+                        ),
+                        buckets AS (
+                            SELECT 
+                                i AS bucket_no,
+                                t_start + (i * (t_end - t_start) / 10) AS b_start,
+                                t_start + ((i + 1) * (t_end - t_start) / 10) AS b_end
+                            FROM bounds, generate_series(0, 9) AS i
+                        )
+                        SELECT 
+                            b.bucket_no,
+                            b.b_start,
+                            b.b_end,
+                            AVG(r.value) AS avg_value,
+                            COUNT(r.value)::int AS samples
+                        FROM buckets b
+                        LEFT JOIN readings r 
+                          ON r.tag_id = $1 
+                         AND r.ts >= b.b_start 
+                         AND (CASE WHEN b.bucket_no = 9 THEN r.ts <= b.b_end ELSE r.ts < b.b_end END)
+                        GROUP BY b.bucket_no, b.b_start, b.b_end
+                        ORDER BY b.bucket_no;
+                    `, [tag.id, actualStart, actualEnd]);
+
+                    // Fill forward / backward in case any bucket had zero samples (e.g. data gaps)
+                    let lastKnown = null;
+                    const bucketList = rows.map(r => {
+                        const avg = r.avg_value !== null && r.avg_value !== undefined ? Number(r.avg_value) : null;
+                        if (avg !== null) lastKnown = avg;
+                        return {
+                            bucket_no: r.bucket_no,
+                            b_start: r.b_start,
+                            b_end: r.b_end,
+                            value: avg ?? lastKnown,
+                            samples: r.samples
+                        };
+                    });
+
+                    const firstKnown = bucketList.find(b => b.value !== null)?.value ?? 0;
+                    valuesToSend = bucketList.map((b, idx) => {
+                        const resolvedVal = b.value !== null ? b.value : firstKnown;
+                        return {
+                            repeat_no: idx + 1,
+                            value: formatReadingValue(resolvedVal, tag.display_digits),
+                            raw_value: resolvedVal,
+                            bucket_start: b.b_start,
+                            bucket_end: b.b_end,
+                            samples: b.samples
+                        };
+                    });
+                }
+
+                // Send each value to BatchLine in a loop with 1-second delay between pushes
+                const callbackResults = [];
+                for (let i = 0; i < valuesToSend.length; i++) {
+                    const item = valuesToSend[i];
+                    const cbResult = await sendBatchLineInstructionUpdate({
+                        refInstruction,
+                        batchId,
+                        actualResult: [
+                            {
+                                repeat_no: item.repeat_no,
+                                value: item.value,
+                                executed_user_email: instruction.TriggeredByEmail || null
+                            }
+                        ]
+                    });
+
+                    if (cbResult?.ok) {
+                        console.log(`Successfully updated BatchLine Case 3 record (repeat_no: ${item.repeat_no})`);
+                    } else {
+                        console.error(`Failed to update BatchLine Case 3 record (repeat_no: ${item.repeat_no})`, JSON.stringify(cbResult?.data?.error?.detail || cbResult?.error));
+                    }
+
+                    callbackResults.push({
+                        repeat_no: item.repeat_no,
+                        value: item.value,
+                        callback: cbResult
+                    });
+
+                    // Delay 1 second before the next push
+                    if (i < valuesToSend.length - 1) {
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                    }
+                }
+
+                return res.json({
+                    status: 'success',
+                    case: 3,
+                    mode: 'record',
+                    batch_id: batchId,
+                    tag: tag.name,
+                    ref_type: refType,
+                    ref_start_time: refStartTime,
+                    ref_end_time: refEndTime,
+                    total_samples: totalCount,
+                    records_sent: valuesToSend.length,
+                    records: valuesToSend,
+                    callbacks: callbackResults
+                });
+            }
+
+            const { rows } = await query(`
+                SELECT 
+                    COUNT(*)::int AS sample_count,
+                    MIN(r.value) AS min,
+                    MAX(r.value) AS max,
+                    AVG(r.value) AS avg,
+                    SUM(r.value) AS sum,
+                    STDDEV(r.value) AS stddev,
+                    VARIANCE(r.value) AS variance,
+                    (MAX(r.value) - MIN(r.value)) AS range,
+                    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY r.value) AS median,
+                    first(r.value, r.ts) AS first,
+                    last(r.value, r.ts) AS last,
+                    (last(r.value, r.ts) - first(r.value, r.ts)) AS diff
+                FROM readings r
+                WHERE r.tag_id = $1
+                  AND r.ts >= $2::timestamptz
+                  AND r.ts <= $3::timestamptz;
+            `, [tag.id, actualStart, actualEnd]);
+
+            const stats = rows[0] || {};
+            if (!stats.sample_count || Number(stats.sample_count) === 0) {
+                return res.status(404).json({
+                    error: `No readings found for tag "${tag.name}" between ${actualStart.toISOString()} and ${actualEnd.toISOString()}`
+                });
+            }
+
+            let rawResult = stats[statField];
+            if (rawResult === null || rawResult === undefined) {
+                if (statField === 'stddev' || statField === 'variance') {
+                    rawResult = 0;
+                } else {
+                    return res.status(404).json({
+                        error: `Unable to compute "${refType}" for tag "${tag.name}" in the specified time range.`
+                    });
+                }
+            }
+
+            const formattedValue = (statField === 'sample_count')
+                ? String(rawResult)
+                : formatReadingValue(rawResult, tag.display_digits);
+
+            // Post back to BatchLine using reusable function
+            const callbackResult = await sendBatchLineInstructionUpdate({
+                refInstruction,
+                batchId,
+                actualResult: [
+                    {
+                        repeat_no: 1,
+                        value: formattedValue,
+                        executed_user_email: instruction.TriggeredByEmail || null
+                    }
+                ]
+            });
+
+            if (callbackResult?.ok) {
+                console.log('Successfully updated BatchLine Case 3 instruction', callbackResult.data);
+            }
+            else {
+                console.error('Failed to update BatchLine Case 3 instruction', JSON.stringify(callbackResult?.data?.error?.detail || callbackResult?.error));
+            }
+
+            return res.json({
+                status: 'success',
+                case: 3,
+                batch_id: batchId,
+                tag: tag.name,
+                ref_type: refType,
+                operation: statField,
+                ref_start_time: refStartTime,
+                ref_end_time: refEndTime,
+                sample_count: stats.sample_count,
+                raw_value: rawResult,
+                formatted_value: formattedValue,
+                statistics: {
+                    min: stats.min,
+                    max: stats.max,
+                    avg: stats.avg,
+                    sum: stats.sum,
+                    stddev: stats.stddev,
+                    variance: stats.variance,
+                    range: stats.range,
+                    median: stats.median,
+                    first: stats.first,
+                    last: stats.last,
+                    diff: stats.diff,
+                    sample_count: stats.sample_count
                 },
                 callback: callbackResult
             });
