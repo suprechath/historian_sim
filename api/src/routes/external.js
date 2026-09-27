@@ -227,10 +227,11 @@ async function resolveTag(refElement, ctx = null) {
         JOIN assets a ON t.asset_id = a.id 
         WHERE LOWER(t.name) = LOWER($1);
     `, [tagCandidate]);
-    console.log("tag ID", rows[0].id);
-    console.log("tag name", rows[0].name);
-
-    if (rows.length > 0) return rows[0];
+    if (rows.length > 0) {
+        console.log("tag ID", rows[0].id);
+        console.log("tag name", rows[0].name);
+        return rows[0];
+    }
     await reportError(`[Tag Resolution Error]: Tag not found for candidate "${tagCandidate}"`, ctx);
     return null;
 }
@@ -399,6 +400,11 @@ async function sendBatchLineInstructionUpdate({ refInstruction, batchId, actualR
             const cbText = await cbRes.text();
             let cbData;
             try { cbData = JSON.parse(cbText); } catch { cbData = cbText; }
+
+            if (cbRes.ok) {
+                console.log("Instruction updated successfully")
+                console.log("The Number of Actual result sent to Batchline: ", cbData.actual_result.length)
+            }
 
             if (cbRes.status >= 500 && attempt < maxRetries) {
                 attempt++;
@@ -656,8 +662,9 @@ function buildIntervalConsolidatedValues(rows, windowStart, windowEnd, intervalM
     }
 
     let intervalCount = Math.max(1, Math.ceil(windowDurationMs / intervalMs));
-    if (intervalCount > CONFIG.MAX_PERIODIC_REPEATS) {
-        intervalCount = CONFIG.MAX_PERIODIC_REPEATS;
+    const maxAllowed = CONFIG.MAX_PROFILE_SAMPLES || CONFIG.MAX_PERIODIC_REPEATS || 50;
+    if (intervalCount > maxAllowed) {
+        intervalCount = maxAllowed;
     }
 
     let lastKnown = (rows && rows.length > 0) ? Number(rows[0].value) : ((fallbackVal !== null && fallbackVal !== undefined) ? Number(fallbackVal) : 0);
@@ -1348,6 +1355,466 @@ async function handleCase3TimeRange(ctx, res) {
 }
 
 // ===========================================================================
+// PRINT LABEL INSTRUCTION (EBR USER RECORD TRIGGER) HELPERS
+// ===========================================================================
+
+function parseBatchLineDate(dateStr) {
+    if (!dateStr) return null;
+    const str = String(dateStr).trim();
+    const utcMatch = str.match(/^UTC\((.*?)\)$/i);
+    if (utcMatch) {
+        const d = new Date(utcMatch[1].trim() + ' UTC');
+        if (!isNaN(d.getTime())) return d;
+    }
+    const d = new Date(str);
+    return isNaN(d.getTime()) ? null : d;
+}
+
+// ✅
+function mapInstructionKey(instructionId = '') {
+    const id = String(instructionId).trim().toUpperCase();
+    if (id.includes('[PARM')) return 'RefElement';
+    if (id.includes('[REF')) return 'RefInstruction';
+    if (id.includes('[AGG')) return 'RefType';
+    if (id.includes('[STH')) return 'START';
+    if (id.includes('[ETH')) return 'STOP';
+    if (id.includes('[INV')) return 'INTERVAL';
+    if (id.includes('[DUR')) return 'DURATION';
+    if (id.includes('[DIR')) return 'DIRECTION';
+    if (id.includes('[NT')) return 'RefEndTime';
+    if (id.includes('[ST')) return 'RefStartTime';
+    return null;
+}
+
+// ✅
+function parsePrintLabelPayload(body = {}) {
+    const data = body.Data || {};
+    const batch = data.Batch || {};
+    const batchId = batch.BatchId || body.batch_id || body.batchid || null;
+    const callbackKey = body.CallbackKey || data.CallbackKey || body.callbackkey || null;
+
+    const parameters = {
+        RefElement: null,
+        RefInstruction: null,
+        RefStartTime: null,
+        RefEndTime: null,
+        RefType: null,
+        START: null,
+        STOP: null,
+        INTERVAL: null,
+        DURATION: null,
+        DIRECTION: null
+    };
+
+    let executedUserEmail = null;
+
+    const phases = Array.isArray(batch.Phases) ? batch.Phases : (batch.Phase ? [batch.Phase] : []);
+    for (const phase of phases) {
+        const steps = Array.isArray(phase.Steps) ? phase.Steps : (phase.Step ? [phase.Step] : []);
+        for (const step of steps) {
+            const instructions = Array.isArray(step.Instructions) ? step.Instructions : (step.Instruction ? [step.Instruction] : []);
+            for (const inst of instructions) {
+                const key = mapInstructionKey(inst.InstructionId);
+                if (!key) continue;
+
+                const result = Array.isArray(inst.ActualResult) ? inst.ActualResult[inst.ActualResult.length - 1] : inst.ActualResult;
+                const val = result?.Value ? String(result.Value).trim() : null;
+
+                if (val && val.toLowerCase() !== 'skip instruction') {
+                    parameters[key] = val;
+                }
+                if (result?.ExecutedUserEmail) {
+                    executedUserEmail = result.ExecutedUserEmail;
+                }
+            }
+        }
+    }
+
+    const startDate = parameters.RefStartTime ? parseBatchLineDate(parameters.RefStartTime) : null;
+    const endDate = parameters.RefEndTime ? parseBatchLineDate(parameters.RefEndTime) : null;
+
+    return {
+        topic: body.Topic || null,
+        batchId,
+        callbackKey,
+        refInstruction: parameters.RefInstruction || batch.RefInstruction || body.RefInstruction || null,
+        user: executedUserEmail ? { executedUserEmail } : null,
+        parameters,
+        parsedDates: {
+            startDate: startDate ? startDate.toISOString() : null,
+            endDate: endDate ? endDate.toISOString() : null
+        }
+    };
+}
+
+function parseIntervalString(intervalStr) {
+    if (!intervalStr) return null;
+    const str = String(intervalStr).trim();
+    if (str.toLowerCase() === 'skip instruction' || str === '') return null;
+    const match = str.match(/^([+-]?\d+(?:\.\d+)?)\s*(s|m|h)?/i);
+    if (!match) return null;
+    const val = parseFloat(match[1]);
+    if (isNaN(val) || val <= 0) return null;
+    const unit = (match[2] || 'm').toLowerCase();
+    let intervalMs;
+    let intervalMinutes;
+    if (unit === 's') {
+        intervalMs = Math.round(val * 1000);
+        intervalMinutes = val / 60;
+    } else if (unit === 'h') {
+        intervalMs = Math.round(val * 3600 * 1000);
+        intervalMinutes = val * 60;
+    } else {
+        intervalMs = Math.round(val * 60 * 1000);
+        intervalMinutes = val;
+    }
+    return {
+        rawInterval: str,
+        intervalMinutes,
+        intervalMs: Math.max(intervalMs, 1000)
+    };
+}
+
+function parseDurationString(durationStr) {
+    if (!durationStr) return null;
+    const str = String(durationStr).trim();
+    if (str.toLowerCase() === 'skip instruction' || str === '') return null;
+    const match = str.match(/^([+-]?\d+(?:\.\d+)?)\s*(s|m|h)?/i);
+    if (!match) return null;
+    const val = parseFloat(match[1]);
+    if (isNaN(val) || val <= 0) return null;
+    const unit = (match[2] || 'm').toLowerCase();
+    if (unit === 's') return val / 60;
+    if (unit === 'h') return val * 60;
+    return val;
+}
+
+// Active background jobs for PrintLabel future interval recordings
+const activeFutureIntervalJobs = new Map();
+
+/**
+ * Handles PrintLabel Instruction when INTERVAL is specified and RefEndTime is set in the future.
+ * Immediately acknowledges HTTP webhook and starts a progressive 30-second cadence dispatcher,
+ * sending sets of bucketed values to BatchLine every 30 seconds until RefEndTime.
+ */
+async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig) {
+    const metric = resolveMetric(ctx.refType);
+    const intervalMs = intervalConfig.intervalMs;
+    const startMs = actualStart.getTime();
+    const endMs = actualEnd.getTime();
+    const durationMs = endMs - startMs;
+
+    if (durationMs <= 0) {
+        const errMsg = `RefEndTime (${actualEnd.toISOString()}) must be after RefStartTime (${actualStart.toISOString()})`;
+        await reportError(`[BatchLine PrintLabel]: ${errMsg}`, ctx);
+        return res.status(400).json({ error: errMsg });
+    }
+
+    let totalExpectedBuckets = Math.max(1, Math.ceil(durationMs / intervalMs));
+    if (totalExpectedBuckets > CONFIG.MAX_PERIODIC_REPEATS) {
+        console.warn(`[BatchLine PrintLabel Warning]: Capping expected buckets from ${totalExpectedBuckets} to max ${CONFIG.MAX_PERIODIC_REPEATS}`);
+        totalExpectedBuckets = CONFIG.MAX_PERIODIC_REPEATS;
+    }
+
+    const jobKey = ctx.refInstruction || `${ctx.batchId}_${ctx.refElement}`;
+
+    // Cancel previous job for this instruction if running
+    if (activeFutureIntervalJobs.has(jobKey)) {
+        console.log(`[BatchLine PrintLabel]: Cancelling previous future interval job for ${jobKey}`);
+        const prevJob = activeFutureIntervalJobs.get(jobKey);
+        if (prevJob.startTimeoutId) clearTimeout(prevJob.startTimeoutId);
+        if (prevJob.intervalId) clearInterval(prevJob.intervalId);
+        if (prevJob.endTimeoutId) clearTimeout(prevJob.endTimeoutId);
+        activeFutureIntervalJobs.delete(jobKey);
+    }
+
+    // Determine initial lastKnown reading
+    const { rows: initialRows } = await query(`
+        SELECT value FROM readings
+        WHERE tag_id = $1 AND ts <= $2::timestamptz
+        ORDER BY ts DESC LIMIT 1;
+    `, [tag.id, actualStart]);
+
+    let lastKnown = 0;
+    if (initialRows.length > 0 && initialRows[0].value !== null) {
+        lastKnown = Number(initialRows[0].value);
+    } else {
+        const { rows: snapRows } = await query(`
+            SELECT value FROM snapshots WHERE tag_id = $1 LIMIT 1;
+        `, [tag.id]);
+        if (snapRows.length > 0 && snapRows[0].value !== null) {
+            lastKnown = Number(snapRows[0].value);
+        }
+    }
+
+    const nowMs = Date.now();
+    const isScenario2 = (startMs < nowMs && nowMs < endMs);
+    const isScenario3 = (nowMs <= startMs);
+    const scenarioNum = isScenario2 ? 2 : 3;
+
+    // Acknowledge BatchLine webhook immediately with HTTP 200
+    if (!res.headersSent) {
+        res.json({
+            status: 'scheduled',
+            case: 3,
+            scenario: scenarioNum,
+            mode: 'record_interval_future',
+            message: isScenario2
+                ? `Scenario 2: RefStartTime is in past, RefEndTime in future. Initial past data pushed immediately; subsequent intervals pushed every 30s until ${actualEnd.toISOString()}.`
+                : `Scenario 3: RefStartTime and RefEndTime are in future. Scheduled to begin at ${actualStart.toISOString()} and push intervals every 30s until ${actualEnd.toISOString()}.`,
+            batch_id: ctx.batchId,
+            tag: tag.name,
+            ref_instruction: ctx.refInstruction,
+            ref_start_time: ctx.refStartTime,
+            ref_end_time: ctx.refEndTime,
+            interval: intervalConfig.rawInterval,
+            interval_ms: intervalMs,
+            metric: metric.toUpperCase(),
+            total_expected_buckets: totalExpectedBuckets,
+            transmission_cadence_sec: 30
+        });
+    }
+
+    let nextBucketIndex = 0;
+    let isProcessing = false;
+
+    const processCompletedBuckets = async () => {
+        if (isProcessing) return;
+        isProcessing = true;
+
+        try {
+            const currentNowMs = Date.now();
+
+            const bucketsToProcess = [];
+            while (nextBucketIndex < totalExpectedBuckets) {
+                const bStartMs = startMs + nextBucketIndex * intervalMs;
+                const bEndMs = Math.min(startMs + (nextBucketIndex + 1) * intervalMs, endMs);
+
+                // Bucket is ready if its window has completed or now >= endMs
+                if (currentNowMs >= bEndMs || currentNowMs >= endMs) {
+                    bucketsToProcess.push({
+                        index: nextBucketIndex,
+                        bStartMs,
+                        bEndMs
+                    });
+                    nextBucketIndex++;
+                } else {
+                    break;
+                }
+            }
+
+            if (bucketsToProcess.length === 0) {
+                if (nextBucketIndex >= totalExpectedBuckets || currentNowMs >= endMs) {
+                    cleanupJob();
+                }
+                return;
+            }
+
+            const rangeStart = new Date(bucketsToProcess[0].bStartMs);
+            const rangeEnd = new Date(bucketsToProcess[bucketsToProcess.length - 1].bEndMs);
+
+            const { rows: readings } = await query(`
+                SELECT ts, value
+                FROM readings
+                WHERE tag_id = $1
+                  AND ts >= $2::timestamptz
+                  AND ts <= $3::timestamptz
+                ORDER BY ts ASC;
+            `, [tag.id, rangeStart, rangeEnd]);
+
+            const setOfValues = [];
+            for (const b of bucketsToProcess) {
+                const isLast = (b.index === totalExpectedBuckets - 1);
+                const bucketReadings = readings.filter(r => {
+                    const rMs = new Date(r.ts).getTime();
+                    return rMs >= b.bStartMs && (isLast ? (rMs <= b.bEndMs) : (rMs < b.bEndMs));
+                });
+
+                let resolvedVal;
+                if (bucketReadings.length > 0) {
+                    resolvedVal = computeMetricValue(bucketReadings.map(r => Number(r.value)), metric);
+                    lastKnown = resolvedVal;
+                } else {
+                    resolvedVal = lastKnown;
+                }
+
+                setOfValues.push({
+                    repeat_no: b.index + 1,
+                    value: formatReadingValue(resolvedVal, tag.display_digits),
+                    executed_timestamp: formatExecutedTimestamp(new Date(b.bStartMs)),
+                    executed_user_email: ctx.triggeredByEmail || null
+                });
+            }
+
+            console.log(`[BatchLine PrintLabel 30s]: Dispatching set of ${setOfValues.length} bucketed values (repeats ${setOfValues[0].repeat_no}..${setOfValues[setOfValues.length - 1].repeat_no}) for tag "${tag.name}" (batch: ${ctx.batchId})...`);
+
+            const cbResult = await sendBatchLineInstructionUpdate({
+                refInstruction: ctx.refInstruction,
+                batchId: ctx.batchId,
+                callbackKey: ctx.callbackKey,
+                actualResult: setOfValues
+            });
+
+            if (!cbResult?.ok) {
+                await reportError(`[BatchLine PrintLabel 30s]: Failed to push set of ${setOfValues.length} bucketed values`, ctx, cbResult?.data?.error?.detail || cbResult?.error);
+            }
+
+            if (nextBucketIndex >= totalExpectedBuckets || currentNowMs >= endMs) {
+                cleanupJob();
+            }
+        } catch (err) {
+            console.error('[BatchLine PrintLabel 30s Error]:', err);
+            await reportError(`[BatchLine PrintLabel 30s Error]: ${err.message}`, ctx, err.stack);
+        } finally {
+            isProcessing = false;
+        }
+    };
+
+    let intervalId = null;
+    let startTimeoutId = null;
+    let endTimeoutId = null;
+
+    const cleanupJob = () => {
+        console.log(`[BatchLine PrintLabel 30s]: Completed future interval recording for instruction ${ctx.refInstruction} (${tag.name}). Total repeats sent: ${nextBucketIndex}.`);
+        if (startTimeoutId) clearTimeout(startTimeoutId);
+        if (intervalId) clearInterval(intervalId);
+        if (endTimeoutId) clearTimeout(endTimeoutId);
+        activeFutureIntervalJobs.delete(jobKey);
+    };
+
+    const CADENCE_MS = 30000;
+
+    if (isScenario2) {
+        // Scenario 2: RefStartTime < Request time < RefEndTime
+        // 1. Immediately push query between RefStartTime and Request time
+        console.log(`[BatchLine PrintLabel Scenario 2]: Pushing initial past readings between ${actualStart.toISOString()} and now (${new Date(nowMs).toISOString()})...`);
+        setImmediate(processCompletedBuckets);
+
+        // 2. Await to push the rest every 30 seconds until RefEndTime
+        intervalId = setInterval(processCompletedBuckets, CADENCE_MS);
+    } else {
+        // Scenario 3: Request time < RefStartTime and RefEndTime
+        // Wait until RefStartTime arrives before starting the 30-second cadence
+        const msUntilStart = Math.max(0, startMs - Date.now());
+        console.log(`[BatchLine PrintLabel Scenario 3]: Waiting ${Math.round(msUntilStart / 1000)}s until RefStartTime (${actualStart.toISOString()}) to start 30s cadence...`);
+        startTimeoutId = setTimeout(() => {
+            console.log(`[BatchLine PrintLabel Scenario 3]: RefStartTime reached (${actualStart.toISOString()}). Starting 30s cadence dispatcher.`);
+            intervalId = setInterval(processCompletedBuckets, CADENCE_MS);
+        }, msUntilStart);
+    }
+
+    const msUntilEnd = Math.max(0, endMs - Date.now() + 1500);
+    endTimeoutId = setTimeout(processCompletedBuckets, msUntilEnd);
+
+    const jobRecord = {
+        jobKey,
+        refInstruction: ctx.refInstruction,
+        batchId: ctx.batchId,
+        tagId: tag.id,
+        tagName: tag.name,
+        get startTimeoutId() { return startTimeoutId; },
+        get intervalId() { return intervalId; },
+        get endTimeoutId() { return endTimeoutId; },
+        startedAt: new Date()
+    };
+
+    activeFutureIntervalJobs.set(jobKey, jobRecord);
+}
+
+async function handlePrintLabelInstruction(req, res) {
+    let ctx = null;
+    try {
+        const parsed = parsePrintLabelPayload(req.body);
+
+        console.log('================================================================================');
+        console.log('[BatchLine Webhook]: Parsed parameters summary:', JSON.stringify({
+            batch_id: parsed.batchId,
+            callback_key: parsed.callbackKey,
+            ref_instruction: parsed.refInstruction,
+            parameters: parsed.parameters,
+            parsed_dates: parsed.parsedDates
+        }, null, 2));
+
+        if (!parsed.parameters.RefElement) {
+            await reportError('[BatchLine PrintLabel]: Missing required RefElement in instruction parameters', { batchId: parsed.batchId, callbackKey: parsed.callbackKey });
+            return res.status(400).json({ error: 'Missing required RefElement in instruction parameters' });
+        }
+
+        if (!parsed.parameters.RefStartTime || !parsed.parameters.RefEndTime) {
+            await reportError('[BatchLine PrintLabel]: Missing required RefStartTime or RefEndTime in instruction parameters', { batchId: parsed.batchId, callbackKey: parsed.callbackKey });
+            return res.status(400).json({ error: 'Missing required RefStartTime or RefEndTime in instruction parameters' });
+        }
+
+        const startDate = parseBatchLineDate(parsed.parameters.RefStartTime);
+        const endDate = parseBatchLineDate(parsed.parameters.RefEndTime);
+
+        if (!startDate || !endDate || isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+            const errMsg = `Invalid date format for RefStartTime ("${parsed.parameters.RefStartTime}") or RefEndTime ("${parsed.parameters.RefEndTime}")`;
+            await reportError(`[BatchLine PrintLabel]: ${errMsg}`, { batchId: parsed.batchId, callbackKey: parsed.callbackKey });
+            return res.status(400).json({ error: errMsg });
+        }
+
+        const [actualStart, actualEnd] = startDate > endDate ? [endDate, startDate] : [startDate, endDate];
+
+        ctx = {
+            topic: parsed.topic,
+            batchId: parsed.batchId,
+            callbackKey: parsed.callbackKey,
+            refElement: parsed.parameters.RefElement,
+            refInstruction: parsed.refInstruction,
+            refStartTime: actualStart.toISOString(),
+            refEndTime: actualEnd.toISOString(),
+            refType: parsed.parameters.RefType,
+            triggeredByEmail: parsed.user?.executedUserEmail || req.body.TriggeredByEmail || null,
+            instructionDescription: '',
+            parsedParameters: parsed.parameters,
+            instruction: req.body
+        };
+
+        const tag = await resolveTag(ctx.refElement, ctx);
+        if (!tag) {
+            await reportError(`[BatchLine PrintLabel]: Could not resolve tag for RefElement: "${ctx.refElement}"`, ctx);
+            return res.status(404).json({ error: `Could not resolve tag for RefElement: "${ctx.refElement}"` });
+        }
+
+        const rawStart = parsed.parameters.START;
+        const hasStart = rawStart !== null && rawStart !== '' && !isNaN(parseFloat(rawStart));
+        const rawStop = parsed.parameters.STOP;
+        const hasStop = rawStop !== null && rawStop !== '' && !isNaN(parseFloat(rawStop));
+
+        const intervalConfig = parseIntervalString(parsed.parameters.INTERVAL);
+        const durationMinutes = parseDurationString(parsed.parameters.DURATION);
+
+        // Mode 1: Profile Mode (START is specified)
+        if (hasStart) {
+            const profileConfig = {
+                start: parseFloat(rawStart),
+                stop: hasStop ? parseFloat(rawStop) : null,
+                durationMinutes,
+                direction: parsed.parameters.DIRECTION ? String(parsed.parameters.DIRECTION).trim().toLowerCase() : null,
+                metric: resolveMetric(ctx.refType)
+            };
+            console.log(`[BatchLine PrintLabel]: Identified Profile Mode for tag "${tag.name}" (batch: ${ctx.batchId}, START=${profileConfig.start}, STOP=${profileConfig.stop}, INTERVAL=${intervalConfig?.rawInterval || 'none'}, Metric=${profileConfig.metric})`);
+            return await handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileConfig, intervalConfig);
+        }
+
+        // Mode 2: Future Interval Record Mode (INTERVAL specified and RefEndTime is in future)
+        if (intervalConfig && actualEnd.getTime() > Date.now()) {
+            console.log(`[BatchLine PrintLabel]: Identified Future Interval Record Mode for tag "${tag.name}" (batch: ${ctx.batchId}, INTERVAL=${intervalConfig.rawInterval}, RefEndTime in future: ${actualEnd.toISOString()})`);
+            return await handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig);
+        }
+
+        // Mode 3: Record Mode (Default when START is omitted; uses interval if specified, or downsamples to MAX_PROFILE_SAMPLES)
+        console.log(`[BatchLine PrintLabel]: Identified Record Mode for tag "${tag.name}" (batch: ${ctx.batchId}, INTERVAL=${intervalConfig?.rawInterval || 'none'}, Metric=${resolveMetric(ctx.refType)})`);
+        return await handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig);
+    } catch (err) {
+        console.error('[Print Label Instruction Webhook Error]:', err);
+        await reportError('[Print Label Webhook Fatal Error]: ' + err.message, ctx || {}, err.stack);
+        return res.status(500).json({ error: err.message });
+    }
+}
+
+// ===========================================================================
 // MAIN WEBHOOK ROUTES
 // ===========================================================================
 
@@ -1357,6 +1824,14 @@ async function handleCase3TimeRange(ctx, res) {
 router.post('/instruction', async (req, res) => {
     let ctx = null;
     try {
+        const body = req.body || {};
+        const topic = body.Topic || '';
+
+        // Check if this is the print_label_instruction hook
+        if (topic === 'print_label_instruction.update' || (body.Data?.Batch?.Phases && !body.Data?.Batch?.Phase)) {
+            return await handlePrintLabelInstruction(req, res);
+        }
+
         ctx = extractInstructionPayload(req.body);
 
         if (ctx.rawEventType === undefined || ctx.rawEventType === null || ctx.rawEventType === '' || Number.isNaN(Number(ctx.rawEventType))) {
