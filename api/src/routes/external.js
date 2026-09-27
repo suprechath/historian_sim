@@ -1,214 +1,28 @@
 import { Router } from 'express';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
 import { query } from '../db.js';
+
+// Resolve and load root .env (three levels up from api/src/routes)
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
 const router = Router();
 
-// ---------------------------------------------------------------------------
-// Helpers: Tag Resolution & Reading Retrieval for BatchLine
-// ---------------------------------------------------------------------------
-async function resolveTag(refElement) {
-    if (!refElement) return null;
-    const trimmed = refElement.trim();
-    const dotIndex = trimmed.indexOf('.');
-    const assetStr = trimmed.slice(0, dotIndex).trim();
-    const paramStr = trimmed.slice(dotIndex + 1).trim();
-    let assetCodeCandidate = assetStr.toUpperCase();
-    const match = assetStr.match(/reactor\s*(\d+)/i);
-    if (match) {
-        assetCodeCandidate = `R${match[1]}`;
-    }
-    const tagCandidate = `${assetCodeCandidate}.${paramStr}`;
-
-    // 1. Direct tag name match (e.g. "R1.TEMP")
-    let { rows } = await query(`
-        SELECT t.id, t.name, t.parameter, t.display_digits, t.units, a.code as asset_code 
-        FROM tags t 
-        JOIN assets a ON t.asset_id = a.id 
-        WHERE LOWER(t.name) = LOWER($1);
-    `, [tagCandidate]);
-    if (rows.length > 0) return rows[0];
-    console.error("Tag not found", tagCandidate, rows);
-    return null;
-}
-
-async function getNearestReading(tagId, refTime) {
-    const targetDate = refTime ? new Date(refTime) : new Date();
-
-    // 1. Query readings table for nearest timestamp
-    const { rows } = await query(`
-        SELECT r.ts, r.value, r.quality
-        FROM readings r
-        WHERE r.tag_id = $1
-        ORDER BY ABS(EXTRACT(EPOCH FROM (r.ts - $2::timestamptz))) ASC
-        LIMIT 1;
-    `, [tagId, targetDate]);
-
-    if (rows.length > 0) {
-        return rows[0];
-    }
-
-    // 2. Fallback to latest snapshot
-    const { rows: snapshotRows } = await query(`
-        SELECT s.ts, s.value, s.quality
-        FROM snapshots s
-        WHERE s.tag_id = $1
-        LIMIT 1;
-    `, [tagId]);
-
-    return snapshotRows.length > 0 ? snapshotRows[0] : null;
-}
-
-function formatReadingValue(value, displayDigits) {
-    if (value === null || value === undefined) return '0';
-    const num = Number(value);
-    if (isNaN(num)) return String(value);
-    if (displayDigits !== null && displayDigits !== undefined) {
-        if (displayDigits === 0) {
-            return String(Math.round(num));
-        }
-        return String(Number(num.toFixed(displayDigits)));
-    }
-    return String(Math.round(num));
-}
-
-function formatBatchLineDate(date) {
-    if (!date) return null;
-    const d = new Date(date);
-    if (isNaN(d.getTime())) return null;
-
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const month = months[d.getUTCMonth()];
-    const day = String(d.getUTCDate()).padStart(2, '0');
-    const year = d.getUTCFullYear();
-    const hours = String(d.getUTCHours()).padStart(2, '0');
-    const minutes = String(d.getUTCMinutes()).padStart(2, '0');
-    const seconds = String(d.getUTCSeconds()).padStart(2, '0');
-
-    return `${month} ${day}, ${year} ${hours}:${minutes}:${seconds}`;
-}
-
-function formatExecutedTimestamp(date) {
-    if (!date) return null;
-    const d = new Date(date);
-    if (isNaN(d.getTime())) return null;
-    return d.toISOString().slice(0, 19) + '+00:00';
-}
-
-function extractAssetCode(str) {
-    if (!str) return null;
-    const match = String(str).match(/(?:Reactor\s*|R)(\d+)/i);
-    return match ? `R${match[1]}` : null;
-}
-
-async function findEventForBatch({ refRecipe, refEvent, refElement }) {
-    if (!refRecipe || !refEvent) return null;
-
-    const trimmedRecipe = String(refRecipe).trim();
-    const trimmedEvent = String(refEvent).trim();
-    const assetCode = extractAssetCode(refElement);
-
-    // 1. Primary lookup: join batches and assets
-    let sql = `
-        SELECT e.id, e.name, e.level, e.started_at, e.ended_at, a.code AS asset_code, b.batch_id
-        FROM events e
-        JOIN batches b ON e.batch_pk = b.id
-        JOIN assets a ON e.asset_id = a.id
-        WHERE (LOWER(TRIM(b.batch_id)) = LOWER($1) OR b.id::text = $1)
-          AND (
-            LOWER(TRIM(e.name)) = LOWER($2)
-            OR REPLACE(LOWER(TRIM(e.name)), '_', ' ') = REPLACE(LOWER(TRIM($2)), '_', ' ')
-            OR LOWER(TRIM(e.level)) = LOWER($2)
-            OR (e.level = 'Phase' AND LOWER(e.name) LIKE LOWER($3))
-          )
-    `;
-    const params = [trimmedRecipe, trimmedEvent, `%${trimmedEvent}%`];
-
-    if (assetCode) {
-        params.push(assetCode);
-        sql += ` ORDER BY CASE WHEN LOWER(a.code) = LOWER($${params.length}) THEN 0 ELSE 1 END, e.started_at DESC LIMIT 1;`;
-    } else {
-        sql += ` ORDER BY e.started_at DESC LIMIT 1;`;
-    }
-
-    let { rows } = await query(sql, params);
-    if (rows.length > 0) return rows[0];
-
-    // 2. Fallback lookup: if asset code is known, check events table directly
-    if (assetCode) {
-        ({ rows } = await query(`
-            SELECT e.id, e.name, e.level, e.started_at, e.ended_at, a.code AS asset_code, null AS batch_id
-            FROM events e
-            JOIN assets a ON e.asset_id = a.id
-            WHERE LOWER(a.code) = LOWER($1)
-              AND (
-                LOWER(TRIM(e.name)) = LOWER($2)
-                OR REPLACE(LOWER(TRIM(e.name)), '_', ' ') = REPLACE(LOWER(TRIM($2)), '_', ' ')
-                OR LOWER(TRIM(e.level)) = LOWER($2)
-                OR (e.level = 'Phase' AND LOWER(e.name) LIKE LOWER($3))
-              )
-            ORDER BY e.started_at DESC
-            LIMIT 1;
-        `, [assetCode, trimmedEvent, `%${trimmedEvent}%`]));
-
-        if (rows.length > 0) return rows[0];
-    }
-
-    return null;
-}
-
-async function sendBatchLineInstructionUpdate({ refInstruction, batchId, actualResult }) {
-    if (!refInstruction || !batchId || !actualResult) return null;
-
-    const baseUrl = process.env.BATCHLINE_BASE_URL || 'https://batch-demo.bl-client.com';
-    const callbackUrl = `${baseUrl.replace(/\/+$/, '')}/api/v1/batch/instruction/update/${encodeURIComponent(refInstruction)}`;
-    const apiKey = process.env.BATCHLINE_API_KEY || '';
-
-    const headers = { 'Content-Type': 'application/json' };
-    if (apiKey) {
-        headers['x-api-key'] = apiKey;
-    } else {
-        console.error('[BatchLine Callback Error]: Missing BATCHLINE_API_KEY in environment variables');
-        return null;
-    }
-
-    // Ensure actual_result is properly formatted as an array
-    const normalizedActualResult = Array.isArray(actualResult)
-        ? actualResult
-        : [
-            typeof actualResult === 'object' && actualResult !== null
-                ? actualResult
-                : { repeat_no: 1, value: String(actualResult), executed_user_email: null }
-        ];
-
-    const payload = {
-        batch_id: batchId,
-        actual_result: normalizedActualResult
-    };
-
-    try {
-        const cbRes = await fetch(callbackUrl, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(payload),
-            signal: AbortSignal.timeout(15000)
-        });
-        const cbText = await cbRes.text();
-        let cbData;
-        try { cbData = JSON.parse(cbText); } catch { cbData = cbText; }
-        return {
-            targetUrl: callbackUrl,
-            status: cbRes.status,
-            ok: cbRes.ok,
-            data: cbData
-        };
-    } catch (cbErr) {
-        console.error('[BatchLine Callback Error]:', cbErr.message);
-        return {
-            targetUrl: callbackUrl,
-            error: cbErr.message
-        };
-    }
-}
+// ===========================================================================
+// CONFIGURATION & CONSTANTS
+// ===========================================================================
+const CONFIG = {
+    BATCHLINE_BASE_URL: process.env.BATCHLINE_BASE_URL || 'https://batch-demo.bl-client.com',
+    BATCHLINE_NOTIFICATION_URL: process.env.BATCHLINE_NOTIFICATION_URL || 'https://demo.bl-client.com/Notification/push',
+    BATCHLINE_API_KEY: process.env.BATCHLINE_API_KEY || '',
+    HTTP_TIMEOUT_MS: parseInt(process.env.BATCHLINE_TIMEOUT_MS || '15000', 10),
+    PUSH_DELAY_MS: parseInt(process.env.BATCHLINE_PUSH_DELAY_MS || process.env.PUSH_DELAY_MS || '200', 10),
+    MAX_PERIODIC_REPEATS: parseInt(process.env.MAX_PERIODIC_REPEATS || '100', 10),
+    DEFAULT_PERIODIC_INTERVAL_MIN: parseInt(process.env.DEFAULT_PERIODIC_INTERVAL_MIN || '5', 10),
+    MAX_PROFILE_SAMPLES: parseInt(process.env.MAX_PROFILE_SAMPLES || '30', 10),
+};
 
 const STAT_OPERATIONS = {
     MAX: 'max',
@@ -231,819 +45,1356 @@ const STAT_OPERATIONS = {
     RANGE: 'range',
     MEDIAN: 'median',
     FIRST: 'first',
-    LAST: 'last',
-    RECORD: 'record',
-    RECORDS: 'record'
+    LAST: 'last'
 };
 
-// ---------------------------------------------------------------------------
-// BatchLine Instruction Webhook Endpoint (/instruction)
-// ---------------------------------------------------------------------------
-router.post('/instruction', async (req, res) => {
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// ===========================================================================
+// UTILITY HELPERS
+// ===========================================================================
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// ✅
+function formatReadingValue(value, displayDigits) {
+    if (value === null || value === undefined) return '0';
+    const num = Number(value);
+    if (isNaN(num)) return String(value);
+    if (displayDigits !== null && displayDigits !== undefined) {
+        if (displayDigits === 0) return String(Math.round(num));
+        return String(Number(num.toFixed(displayDigits)));
+    }
+    return String(Math.round(num));
+}
+
+// ✅
+function formatBatchLineDate(date) {
+    if (!date) return null;
+    const d = new Date(date);
+    if (isNaN(d.getTime())) return null;
+
+    const month = MONTH_NAMES[d.getUTCMonth()];
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    const year = d.getUTCFullYear();
+    const hours = String(d.getUTCHours()).padStart(2, '0');
+    const minutes = String(d.getUTCMinutes()).padStart(2, '0');
+    const seconds = String(d.getUTCSeconds()).padStart(2, '0');
+
+    return `${month} ${day}, ${year} ${hours}:${minutes}:${seconds}`;
+}
+
+// ✅
+function formatExecutedTimestamp(date) {
+    if (!date) return null;
+    const d = new Date(date);
+    if (isNaN(d.getTime())) return null;
+    return d.toISOString().slice(0, 19) + '+00:00';
+}
+
+// ✅
+function extractInstructionPayload(body = {}) {
+    const data = body.Data || {};
+    const batch = data.Batch || {};
+    const phase = batch.Phase || {};
+    const step = phase.Step || {};
+    const instruction = step.Instruction || {};
+
+    return {
+        topic: body.Topic || null,
+        batchId: batch.BatchId || body.batch_id || body.batchid || null,
+        rawEventType: instruction.EventType !== undefined ? instruction.EventType : body.EventType,
+        instructionDescription: instruction.InstructionDescription || body.InstructionDescription || '',
+        refElement: instruction.RefElement || body.RefElement || null,
+        refTime: instruction.RefTime || body.RefTime || null,
+        refInstruction: instruction.RefInstruction || body.RefInstruction || null,
+        refRecipe: instruction.RefRecipe || body.RefRecipe || null,
+        refEvent: instruction.RefEvent || body.RefEvent || null,
+        refType: instruction.RefType || body.RefType || null,
+        refStartTime: instruction.RefStartTime || body.RefStartTime || null,
+        refEndTime: instruction.RefEndTime || body.RefEndTime || null,
+        callbackKey: body.CallbackKey || instruction.CallbackKey || body.callbackkey || null,
+        triggeredByEmail: instruction.TriggeredByEmail || body.TriggeredByEmail || null,
+        instruction
+    };
+}
+
+// ===========================================================================
+// BATCHLINE ERROR NOTIFICATION SENDER
+// ===========================================================================
+
+/**
+ * Sends error notifications to BatchLine via POST /Notification/push
+ * Header: x-api-key: <API_KEY>
+ * Body: { batchid, message, callbackkey }
+ */
+// ✅
+async function sendBatchLineNotification({ batchId, message, callbackKey }) {
+    if (!message) return null;
+
+    const notificationUrl = CONFIG.BATCHLINE_NOTIFICATION_URL;
+    const apiKey = CONFIG.BATCHLINE_API_KEY;
+
+    if (!apiKey) {
+        console.warn('[BatchLine Notification Warning]: Missing BATCHLINE_API_KEY in environment variables');
+        return null;
+    }
+
+    const payload = {
+        batchid: batchId,
+        message: String(message),
+        callbackkey: callbackKey
+    };
+
     try {
-        const body = req.body || {};
-        const topic = body.Topic;
-        const data = body.Data || {};
-        const batch = data.Batch || {};
-        const batchId = batch.BatchId || body.batch_id;
-        const phase = batch.Phase || {};
-        const step = phase.Step || {};
-        const instruction = step.Instruction || {};
+        const res = await fetch(notificationUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': apiKey
+            },
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(CONFIG.HTTP_TIMEOUT_MS)
+        });
 
-        const rawEventType = instruction.EventType !== undefined ? instruction.EventType : body.EventType;
-        const instructionDescription = instruction.InstructionDescription || body.InstructionDescription || '';
-        const refElement = instruction.RefElement || body.RefElement;
-        const refTime = instruction.RefTime || body.RefTime;
-        const refInstruction = instruction.RefInstruction || body.RefInstruction;
-        const refRecipe = instruction.RefRecipe || body.RefRecipe;
-        const refEvent = instruction.RefEvent || body.RefEvent;
-        const refType = instruction.RefType || body.RefType;
-        const refStartTime = instruction.RefStartTime || body.RefStartTime;
-        const refEndTime = instruction.RefEndTime || body.RefEndTime;
-        const callbackKey = body.CallbackKey;
+        const text = await res.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = text; }
 
-        if (rawEventType === undefined || rawEventType === null || rawEventType === '' || Number.isNaN(Number(rawEventType))) {
-            console.error('[BatchLine Callback Error]: Missing required EventType in instruction payload');
-            return res.status(400).json({ error: 'Missing required EventType in instruction payload' });
-        }
-        const eventType = Number(rawEventType);
-
-        // Case 1: Point-in-time value lookup
-        if (eventType === 1) {
-            if (!refElement) {
-                console.error('[BatchLine Callback Error]: Missing required RefElement in instruction payload');
-                return res.status(400).json({ error: 'Missing required RefElement in instruction payload' });
-            }
-
-            const tag = await resolveTag(refElement);
-            if (!tag) {
-                return res.status(404).json({ error: `Could not resolve tag for RefElement: "${refElement}"` });
-            }
-
-            const reading = await getNearestReading(tag.id, refTime);
-            if (!reading) {
-                return res.status(404).json({ error: `No reading or snapshot found for tag "${tag.name}"` });
-            }
-
-            const formattedValue = formatReadingValue(reading.value, tag.display_digits);
-            const executedTimestamp = formatExecutedTimestamp(reading.ts);
-
-            // Post back to BatchLine using reusable function
-            const callbackResult = await sendBatchLineInstructionUpdate({
-                refInstruction,
-                batchId,
-                actualResult: [
-                    {
-                        repeat_no: 1,
-                        value: formattedValue,
-                        executed_timestamp: executedTimestamp,
-                        executed_user_email: instruction.TriggeredByEmail || null
-                    }
-                ]
-            });
-
-            if (callbackResult.ok) {
-                console.log('Successfully updated BatchLine case 1 instruction', callbackResult.data);
-            }
-            else {
-                console.error('Failed to update BatchLine case 1 instruction', JSON.stringify(callbackResult.data.error.detail));
-            }
-
-            return res.json({
-                status: 'success',
-                case: 1,
-                batch_id: batchId,
-                tag: tag.name,
-                ref_time: refTime,
-                reading: {
-                    ts: reading.ts,
-                    raw_value: reading.value,
-                    formatted_value: formattedValue,
-                    executed_timestamp: executedTimestamp,
-                    quality: reading.quality
-                },
-                callback: callbackResult
-            });
+        if (!res.ok) {
+            console.warn(`[BatchLine Notification Warning]: API returned status ${res.status}:`, data);
+        } else {
+            console.log('[BatchLine Notification]: Successfully pushed error notification to BatchLine');
         }
 
-        // Case 2: Start time / End time phase lookup
-        if (eventType === 2) {
-            const recipeBatchId = refRecipe || batchId;
-            if (!recipeBatchId) {
-                console.error('[BatchLine Callback Error]: Missing required RefRecipe in instruction payload');
-                return res.status(400).json({ error: 'Missing required RefRecipe in instruction payload' });
-            }
-            if (!refEvent) {
-                console.error('[BatchLine Callback Error]: Missing required RefEvent in instruction payload');
-                return res.status(400).json({ error: 'Missing required RefEvent in instruction payload' });
-            }
-            if (!refType) {
-                console.error('[BatchLine Callback Error]: Missing required RefType in instruction payload');
-                return res.status(400).json({ error: 'Missing required RefType in instruction payload' });
-            }
+        return { ok: res.ok, status: res.status };
+    } catch (err) {
+        console.warn('[BatchLine Notification Error]: Failed to push notification:', err.message);
+        return { ok: false, error: err.message };
+    }
+}
 
-            const normalizedType = String(refType).trim().toLowerCase();
-            const isStart = /^(starttime|started_at|start)$/i.test(normalizedType);
-            const isEnd = /^(endtime|ended_at|end)$/i.test(normalizedType);
+/**
+ * Centralized error reporting function:
+ * 1. Logs to console.error
+ * 2. Asynchronously pushes notification to BatchLine
+ */
+// ✅
+async function reportError(message, ctx = {}, extraDetail = null) {
+    if (extraDetail !== null && extraDetail !== undefined) {
+        console.error(message, extraDetail);
+    } else {
+        console.error(message);
+    }
 
-            if (!isStart && !isEnd) {
-                return res.status(400).json({
-                    error: `Invalid RefType: "${refType}". Expected "StartTime" or "EndTime"`
-                });
-            }
+    const detailStr = extraDetail
+        ? (typeof extraDetail === 'object' ? JSON.stringify(extraDetail) : String(extraDetail))
+        : '';
+    const fullMessage = detailStr ? `${message}: ${detailStr}` : message;
 
-            const event = await findEventForBatch({
-                refRecipe: recipeBatchId,
-                refEvent,
-                refElement
-            });
+    await sendBatchLineNotification({
+        batchId: ctx?.batchId || null,
+        message: fullMessage,
+        callbackKey: ctx?.callbackKey || null
+    }).catch(err => {
+        console.warn('[BatchLine Notification Dispatch Failure]:', err.message);
+    });
+}
 
-            if (!event) {
-                return res.status(404).json({
-                    error: `Could not find phase/event "${refEvent}" for batch "${recipeBatchId}"`
-                });
-            }
+// ===========================================================================
+// DATA ACCESS LAYER (HIGH PERFORMANCE / INDEX-OPTIMIZED)
+// ===========================================================================
 
-            const selectedField = isStart ? 'started_at' : 'ended_at';
-            const targetTime = isStart ? event.started_at : event.ended_at;
+/**
+ * Resolves a tag record from refElement (e.g. "R1.TEMP" or "Reactor 1.TEMP").
+ */
+// ✅
+async function resolveTag(refElement, ctx = null) {
+    if (!refElement) return null;
+    const trimmed = String(refElement).trim();
+    const dotIndex = trimmed.indexOf('.');
+    const assetStr = trimmed.slice(0, dotIndex).trim();
+    const paramStr = trimmed.slice(dotIndex + 1).trim();
+    let assetCodeCandidate = assetStr.toUpperCase();
+    const match = assetStr.match(/reactor\s*(\d+)/i);
+    if (match) {
+        assetCodeCandidate = `R${match[1]}`;
+    }
+    const tagCandidate = `${assetCodeCandidate}.${paramStr}`;
 
-            if (!targetTime) {
-                return res.status(400).json({
-                    error: `Phase "${event.name}" for batch "${recipeBatchId}" has no ${selectedField} yet (phase may still be in progress)`,
-                    event: {
-                        id: event.id,
-                        name: event.name,
-                        level: event.level,
-                        asset: event.asset_code,
-                        started_at: event.started_at,
-                        ended_at: event.ended_at
-                    }
-                });
-            }
+    const { rows } = await query(`
+        SELECT t.id, t.name, t.parameter, t.display_digits, t.units, a.code as asset_code 
+        FROM tags t 
+        JOIN assets a ON t.asset_id = a.id 
+        WHERE LOWER(t.name) = LOWER($1);
+    `, [tagCandidate]);
+    console.log("tag ID", rows[0].id);
+    console.log("tag name", rows[0].name);
 
-            const formattedTime = formatBatchLineDate(targetTime);
+    if (rows.length > 0) return rows[0];
+    await reportError(`[Tag Resolution Error]: Tag not found for candidate "${tagCandidate}"`, ctx);
+    return null;
+}
 
-            // Post back to BatchLine using reusable function
-            const callbackResult = await sendBatchLineInstructionUpdate({
-                refInstruction,
-                batchId,
-                actualResult: [
-                    {
-                        repeat_no: 1,
-                        value: formattedTime,
-                        executed_user_email: instruction.TriggeredByEmail || null
-                    }
-                ]
-            });
+/**
+ * High-performance dual index-seek to fetch nearest reading to target timestamp.
+ * Avoids full-table/chunk scans caused by ORDER BY ABS(EXTRACT(...)).
+ */
+// ✅
+async function getNearestReading(tagId, refTime) {
+    const targetDate = refTime ? new Date(refTime) : new Date();
 
-            if (callbackResult.ok) {
-                console.log('Successfully updated BatchLine Case 2 instruction', callbackResult.data);
-            }
-            else {
-                console.error('Failed to update BatchLine Case 2 instruction', JSON.stringify(callbackResult.data.error.detail));
-            }
+    const { rows } = await query(`
+        WITH candidates AS (
+            (
+                SELECT r.ts, r.value, r.quality
+                FROM readings r
+                WHERE r.tag_id = $1 AND r.ts <= $2::timestamptz
+                ORDER BY r.ts DESC
+                LIMIT 1
+            )
+            UNION ALL
+            (
+                SELECT r.ts, r.value, r.quality
+                FROM readings r
+                WHERE r.tag_id = $1 AND r.ts > $2::timestamptz
+                ORDER BY r.ts ASC
+                LIMIT 1
+            )
+        )
+        SELECT ts, value, quality
+        FROM candidates
+        ORDER BY ABS(EXTRACT(EPOCH FROM (ts - $2::timestamptz))) ASC
+        LIMIT 1;
+    `, [tagId, targetDate]);
 
-            return res.json({
-                status: 'success',
-                case: 2,
-                batch_id: batchId,
-                ref_recipe: recipeBatchId,
-                ref_event: refEvent,
-                ref_type: refType,
-                event: {
-                    id: event.id,
-                    name: event.name,
-                    level: event.level,
-                    asset: event.asset_code,
-                    started_at: event.started_at,
-                    ended_at: event.ended_at,
-                    selected_field: selectedField,
-                    selected_time: targetTime,
-                    formatted_value: formattedTime
-                },
-                callback: callbackResult
-            });
-        }
+    if (rows.length > 0) return rows[0];
 
-        // Case 3: Calculated / Aggregate statistic over a time range
-        if (eventType === 3) {
-            if (!refElement) {
-                console.error('[BatchLine Callback Error]: Missing required RefElement in instruction payload');
-                return res.status(400).json({ error: 'Missing required RefElement in instruction payload' });
-            }
+    // Fallback to latest snapshot
+    const { rows: snapshotRows } = await query(`
+        SELECT s.ts, s.value, s.quality
+        FROM snapshots s
+        WHERE s.tag_id = $1
+        LIMIT 1;
+    `, [tagId]);
 
-            if (!refStartTime || !refEndTime) {
-                console.error('[BatchLine Callback Error]: Missing required RefStartTime or RefEndTime in instruction payload');
-                return res.status(400).json({ error: 'Missing required RefStartTime or RefEndTime in instruction payload' });
-            }
+    return snapshotRows.length > 0 ? snapshotRows[0] : null;
+}
 
-            const startDate = new Date(refStartTime);
-            const endDate = new Date(refEndTime);
-
-            if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-                return res.status(400).json({
-                    error: `Invalid date format for RefStartTime ("${refStartTime}") or RefEndTime ("${refEndTime}")`
-                });
-            }
-
-            const [actualStart, actualEnd] = startDate > endDate ? [endDate, startDate] : [startDate, endDate];
-
-            // 1. Check special profile mode:
-            // Supports:
-            // [RECORD_PROFILE: START=80, STOP=30]
-            // [RECORD_PROFILE: START=70, DURATION= 200 DIRECTION=Fall]
-            // [RECORD_PROFILE: START=30, DURATION= 200 DIRECTION=Rise]
-            const profileBlockMatch = typeof instructionDescription === 'string'
-                ? instructionDescription.match(/\[RECORD_PROFILE:\s*([^\]]+)\]/i)
-                : null;
-            let isProfileMode = false;
-            let profileConfig = null;
-
-            if (profileBlockMatch) {
-                const content = profileBlockMatch[1];
-                const startMatch = content.match(/\bSTART\s*=\s*([+-]?\d+(?:\.\d+)?)/i);
-                const stopMatch = content.match(/\bSTOP\s*=\s*([+-]?\d+(?:\.\d+)?)/i);
-                const durationMatch = content.match(/\bDURATION\s*=\s*(\d+(?:\.\d+)?)/i);
-                const directionMatch = content.match(/\bDIRECTION\s*=\s*(Rise|Fall)/i);
-
-                if (startMatch) {
-                    isProfileMode = true;
-                    profileConfig = {
-                        start: parseFloat(startMatch[1]),
-                        stop: stopMatch ? parseFloat(stopMatch[1]) : null,
-                        durationMinutes: durationMatch ? parseFloat(durationMatch[1]) : null,
-                        direction: directionMatch ? directionMatch[1].toLowerCase() : null
-                    };
-                }
-            }
-            const hasRecordTag = typeof instructionDescription === 'string' && /\[RECORD(?::|\s|\])/i.test(instructionDescription);
-            const isRecordType = String(refType || '').trim().toUpperCase() === 'RECORD';
-            const isRecordMode = !isProfileMode && (hasRecordTag || isRecordType);
-
-            let statField = null;
-            let profileMetric = 'avg';
-
-            if (isProfileMode) {
-                if (refType) {
-                    const rTypeUpper = String(refType).trim().toUpperCase();
-                    if (rTypeUpper === 'MIN' || rTypeUpper === 'MINIMUM') profileMetric = 'min';
-                    else if (rTypeUpper === 'AVG' || rTypeUpper === 'AVERAGE' || rTypeUpper === 'MEAN') profileMetric = 'avg';
-                    else profileMetric = 'max';
-                }
-            } else if (!isRecordMode) {
-                if (!refType) {
-                    console.error('[BatchLine Callback Error]: Missing required RefType in instruction payload');
-                    return res.status(400).json({ error: 'Missing required RefType in instruction payload' });
-                }
-
-                const statKey = String(refType).trim().toUpperCase();
-                statField = STAT_OPERATIONS[statKey];
-
-                if (!statField) {
-                    return res.status(400).json({
-                        error: `Unsupported RefType operation: "${refType}". Supported operations: MAX, MIN, AVG, SUM, COUNT, STDDEV, VARIANCE, RANGE, MEDIAN, FIRST, LAST.`
-                    });
-                }
-            }
-
-            const tag = await resolveTag(refElement);
-            if (!tag) {
-                return res.status(404).json({ error: `Could not resolve tag for RefElement: "${refElement}"` });
-            }
-            console.log("tag.name", tag.name);
-            console.log("tag.id", tag.id);
-
-            // Special Mode: "record_profile"
-            // Captures the first wave between START and STOP (or DURATION). If multiple waves exist, rids them off and retains ONLY the first wave.
-            // If <= 30 values found, pushes directly to BatchLine.
-            // If > 30 values found, downsamples and averages into exactly 30 consolidated values.
-            if (isProfileMode) {
-                const startThreshold = profileConfig.start;
-                const stopThreshold = profileConfig.stop;
-
-                // 1. Fetch readings within [actualStart, actualEnd] in chronological order
-                const { rows } = await query(`
-                    SELECT ts, value
-                    FROM readings
-                    WHERE tag_id = $1
-                      AND ts >= $2::timestamptz
-                      AND ts <= $3::timestamptz
-                    ORDER BY ts ASC;
-                `, [tag.id, actualStart, actualEnd]);
-
-                if (rows.length === 0) {
-                    return res.status(404).json({
-                        error: `No readings found for tag "${tag.name}" between ${actualStart.toISOString()} and ${actualEnd.toISOString()}`
-                    });
-                }
-
-                // 2. Resolve start & stop directions
-                let startDirection = profileConfig.direction;
-                if (!startDirection) {
-                    if (stopThreshold !== null) {
-                        startDirection = (stopThreshold >= startThreshold) ? 'rise' : 'fall';
-                    } else {
-                        const firstValidRow = rows.find(r => r.value !== null && r.value !== undefined && !Number.isNaN(Number(r.value)));
-                        const initialVal = firstValidRow ? Number(firstValidRow.value) : startThreshold;
-                        startDirection = (initialVal <= startThreshold) ? 'rise' : 'fall';
-                    }
-                }
-                const isFall = (startDirection === 'fall');
-                const stopDirection = (stopThreshold !== null) ? ((stopThreshold >= startThreshold) ? 'rise' : 'fall') : null;
-
-                // 3. Capture the FIRST wave between START and STOP (or DURATION) with edge/crossing detection
-                let armed = false;
-                let waveStartTs = null;
-                let waveStopTs = null;
-
-                const firstValidRow = rows.find(r => r.value !== null && r.value !== undefined && !Number.isNaN(Number(r.value)));
-                const firstVal = firstValidRow ? Number(firstValidRow.value) : null;
-                if (firstVal !== null) {
-                    if (isFall && firstVal >= startThreshold) armed = true;
-                    if (!isFall && firstVal <= startThreshold) armed = true;
-                }
-
-                for (let i = 0; i < rows.length; i++) {
-                    const r = rows[i];
-                    if (r.value === null || r.value === undefined) continue;
-                    const val = Number(r.value);
-                    if (Number.isNaN(val)) continue;
-
-                    if (!armed) {
-                        if (isFall && val >= startThreshold) armed = true;
-                        if (!isFall && val <= startThreshold) armed = true;
-                    }
-
-                    if (armed && !waveStartTs) {
-                        let reachedStart = false;
-                        if (i === 0) {
-                            reachedStart = isFall ? (val <= startThreshold) : (val >= startThreshold);
-                        } else {
-                            const prevVal = Number(rows[i - 1].value);
-                            reachedStart = isFall ? (val <= startThreshold && prevVal >= startThreshold)
-                                : (val >= startThreshold && prevVal <= startThreshold);
-                        }
-
-                        if (reachedStart) {
-                            waveStartTs = r.ts;
-                        }
-                    } else if (waveStartTs && !waveStopTs) {
-                        // Wave has started, detect completion of the first wave
-                        if (profileConfig.durationMinutes !== null && profileConfig.durationMinutes > 0) {
-                            const durationMs = profileConfig.durationMinutes * 60 * 1000;
-                            if (new Date(r.ts).getTime() - new Date(waveStartTs).getTime() >= durationMs) {
-                                waveStopTs = r.ts;
-                                break; // First wave achieved, discard subsequent waves!
-                            }
-                        } else if (stopThreshold !== null) {
-                            const reachedStop = (stopDirection === 'rise') ? (val >= stopThreshold) : (val <= stopThreshold);
-                            if (reachedStop) {
-                                waveStopTs = r.ts;
-                                break; // Stop at first wave, discard any subsequent waves!
-                            }
-
-                            // If wave aborted / reversed back past startThreshold before reaching stopThreshold:
-                            // Reset so we capture the actual wave that successfully reaches stopThreshold!
-                            const aborted = isFall ? (val > startThreshold) : (val < startThreshold);
-                            if (aborted) {
-                                waveStartTs = null;
-                                armed = false;
-                            }
-                        }
-                    }
-                }
-
-                if (!waveStartTs) {
-                    // Fallback to first matching point in range
-                    for (const r of rows) {
-                        if (r.value === null || r.value === undefined) continue;
-                        const val = Number(r.value);
-                        if (Number.isNaN(val)) continue;
-                        const match = isFall ? (val <= startThreshold) : (val >= startThreshold);
-                        if (match) {
-                            waveStartTs = r.ts;
-                            break;
-                        }
-                    }
-                }
-
-                if (!waveStartTs) {
-                    return res.status(404).json({
-                        error: `Reading value for tag "${tag.name}" never ${startDirection === 'rise' ? 'rose to or above' : 'fell to or below'} START threshold (${startThreshold}) between ${actualStart.toISOString()} and ${actualEnd.toISOString()}`
-                    });
-                }
-
-                if (!waveStopTs) {
-                    if (profileConfig.durationMinutes !== null && profileConfig.durationMinutes > 0) {
-                        const targetStop = new Date(new Date(waveStartTs).getTime() + profileConfig.durationMinutes * 60 * 1000);
-                        const lastTs = new Date(rows[rows.length - 1].ts);
-                        waveStopTs = (targetStop < lastTs) ? targetStop.toISOString() : lastTs.toISOString();
-                    } else {
-                        waveStopTs = rows[rows.length - 1].ts;
-                    }
-                }
-
-                const waveStart = new Date(waveStartTs);
-                const waveStop = new Date(waveStopTs);
-
-                // 4. Retain ONLY the first wave readings, ridding off any other waves
-                const waveRows = rows.filter(r => {
-                    if (r.value === null || r.value === undefined || Number.isNaN(Number(r.value))) return false;
-                    const t = new Date(r.ts).getTime();
-                    return t >= waveStart.getTime() && t <= waveStop.getTime();
-                });
-
-                const totalCount = waveRows.length;
-                if (totalCount === 0) {
-                    return res.status(404).json({
-                        error: `No readings found for tag "${tag.name}" in the captured wave between ${waveStart.toISOString()} and ${waveStop.toISOString()}`
-                    });
-                }
-
-                let valuesToSend = [];
-                const durationMs = waveStop.getTime() - waveStart.getTime();
-
-                // 5. If 30 or fewer values, or duration <= 1s, send raw readings directly
-                if (totalCount <= 30 || durationMs <= 1000) {
-                    valuesToSend = waveRows.slice(0, 30).map((r, idx) => ({
-                        repeat_no: idx + 1,
-                        value: formatReadingValue(r.value, tag.display_digits),
-                        raw_value: r.value,
-                        ts: r.ts,
-                        executed_timestamp: formatExecutedTimestamp(r.ts)
-                    }));
-                } else {
-                    // If exceed 30 values, downsample and average into exactly 30 time buckets
-                    const { rows: bucketRows } = await query(`
-                        WITH bounds AS (
-                            SELECT $2::timestamptz AS t_start, $3::timestamptz AS t_end
-                        ),
-                        buckets AS (
-                            SELECT 
-                                i AS bucket_no,
-                                t_start + (i * (t_end - t_start) / 30) AS b_start,
-                                t_start + ((i + 1) * (t_end - t_start) / 30) AS b_end
-                            FROM bounds, generate_series(0, 29) AS i
-                        )
-                        SELECT 
-                            b.bucket_no,
-                            b.b_start,
-                            b.b_end,
-                            AVG(r.value) AS avg_val,
-                            MIN(r.value) AS min_val,
-                            MAX(r.value) AS max_val,
-                            COUNT(r.value)::int AS samples
-                        FROM buckets b
-                        LEFT JOIN readings r 
-                          ON r.tag_id = $1 
-                         AND r.ts >= b.b_start 
-                         AND (CASE WHEN b.bucket_no = 29 THEN r.ts <= b.b_end ELSE r.ts < b.b_end END)
-                        GROUP BY b.bucket_no, b.b_start, b.b_end
-                        ORDER BY b.bucket_no;
-                    `, [tag.id, waveStart, waveStop]);
-
-                    // Fill forward / backward in case of any empty bucket
-                    let lastKnown = null;
-                    const bucketList = bucketRows.map(r => {
-                        let metricVal = null;
-                        if (profileMetric === 'min') metricVal = r.min_val;
-                        else if (profileMetric === 'max') metricVal = r.max_val;
-                        else metricVal = r.avg_val;
-
-                        if (metricVal !== null && metricVal !== undefined) {
-                            lastKnown = Number(metricVal);
-                        }
-                        return {
-                            bucket_no: r.bucket_no,
-                            b_start: r.b_start,
-                            b_end: r.b_end,
-                            value: (metricVal !== null && metricVal !== undefined) ? Number(metricVal) : lastKnown,
-                            samples: r.samples
-                        };
-                    });
-
-                    const firstKnown = bucketList.find(b => b.value !== null)?.value ?? startThreshold;
-                    valuesToSend = bucketList.map((b, idx) => {
-                        const resolvedVal = b.value !== null ? b.value : firstKnown;
-                        return {
-                            repeat_no: idx + 1,
-                            value: formatReadingValue(resolvedVal, tag.display_digits),
-                            raw_value: resolvedVal,
-                            bucket_start: b.b_start,
-                            bucket_end: b.b_end,
-                            samples: b.samples,
-                            executed_timestamp: formatExecutedTimestamp(b.b_start)
-                        };
-                    });
-                }
-
-                // 6. Push to BatchLine with delay between pushes
-                console.log(`[BatchLine Callback Profile]: Pushing ${valuesToSend.length} values for captured first wave...`);
-                const callbackResults = [];
-                for (let i = 0; i < valuesToSend.length; i++) {
-                    const item = valuesToSend[i];
-                    const executedTimestamp = item.executed_timestamp || formatExecutedTimestamp(item.bucket_start || item.ts);
-                    const cbResult = await sendBatchLineInstructionUpdate({
-                        refInstruction,
-                        batchId,
-                        actualResult: [
-                            {
-                                repeat_no: item.repeat_no,
-                                value: item.value,
-                                executed_timestamp: executedTimestamp,
-                                executed_user_email: instruction.TriggeredByEmail || null
-                            }
-                        ]
-                    });
-
-                    if (cbResult?.ok) {
-                        console.log(`Successfully updated BatchLine Case 3 profile (repeat_no: ${item.repeat_no}/${valuesToSend.length})`);
-                    } else {
-                        console.error(`Failed to update BatchLine Case 3 profile (repeat_no: ${item.repeat_no}/${valuesToSend.length})`, JSON.stringify(cbResult?.data?.error?.detail || cbResult?.error));
-                    }
-
-                    callbackResults.push({
-                        repeat_no: item.repeat_no,
-                        value: item.value,
-                        executed_timestamp: executedTimestamp,
-                        callback: cbResult
-                    });
-
-                    // Deploy delay between pushes
-                    if (i < valuesToSend.length - 1) {
-                        await new Promise(resolve => setTimeout(resolve, 200));
-                    }
-                }
-
-                return res.json({
-                    status: 'success',
-                    case: 3,
-                    mode: 'record_profile',
-                    batch_id: batchId,
-                    tag: tag.name,
-                    metric: profileMetric.toUpperCase(),
-                    start_threshold: startThreshold,
-                    stop_threshold: profileConfig.stop ?? null,
-                    duration_minutes: profileConfig.durationMinutes ?? null,
-                    direction: startDirection,
-                    wave_start: waveStart.toISOString(),
-                    wave_stop: waveStop.toISOString(),
-                    wave_duration_sec: Math.max(1, (waveStop - waveStart) / 1000),
-                    total_samples: totalCount,
-                    records_sent: valuesToSend.length,
-                    records: valuesToSend,
-                    callbacks: callbackResults
-                });
-            }
-
-            // Special Mode: "record" - Send values within time range (consolidated into 30 values, deployed with 0.5s delay)
-            if (isRecordMode) {
-                // 1. Fetch all raw readings within [actualStart, actualEnd]
-                const { rows: allRows } = await query(`
-                    SELECT ts, value
-                    FROM readings
-                    WHERE tag_id = $1
-                      AND ts >= $2::timestamptz
-                      AND ts <= $3::timestamptz
-                    ORDER BY ts ASC;
-                `, [tag.id, actualStart, actualEnd]);
-
-                if (allRows.length === 0) {
-                    return res.status(404).json({
-                        error: `No readings found for tag "${tag.name}" between ${actualStart.toISOString()} and ${actualEnd.toISOString()}`
-                    });
-                }
-
-                const totalCount = allRows.length;
-                let valuesToSend = [];
-                const durationMs = actualEnd.getTime() - actualStart.getTime();
-
-                // 2. If 30 or fewer values, or duration <= 1s, send raw values directly
-                if (totalCount <= 30 || durationMs <= 1000) {
-                    valuesToSend = allRows.slice(0, 30).map((r, idx) => ({
-                        repeat_no: idx + 1,
-                        value: formatReadingValue(r.value, tag.display_digits),
-                        raw_value: r.value,
-                        ts: r.ts,
-                        executed_timestamp: formatExecutedTimestamp(r.ts)
-                    }));
-                } else {
-                    // If exceed 30 values, downsample and average into exactly 30 time buckets
-                    const { rows: bucketRows } = await query(`
-                        WITH bounds AS (
-                            SELECT $2::timestamptz AS t_start, $3::timestamptz AS t_end
-                        ),
-                        buckets AS (
-                            SELECT 
-                                i AS bucket_no,
-                                t_start + (i * (t_end - t_start) / 30) AS b_start,
-                                t_start + ((i + 1) * (t_end - t_start) / 30) AS b_end
-                            FROM bounds, generate_series(0, 29) AS i
-                        )
-                        SELECT 
-                            b.bucket_no,
-                            b.b_start,
-                            b.b_end,
-                            AVG(r.value) AS avg_value,
-                            COUNT(r.value)::int AS samples
-                        FROM buckets b
-                        LEFT JOIN readings r 
-                          ON r.tag_id = $1 
-                         AND r.ts >= b.b_start 
-                         AND (CASE WHEN b.bucket_no = 29 THEN r.ts <= b.b_end ELSE r.ts < b.b_end END)
-                        GROUP BY b.bucket_no, b.b_start, b.b_end
-                        ORDER BY b.bucket_no;
-                    `, [tag.id, actualStart, actualEnd]);
-
-                    // Fill forward / backward in case any bucket had zero samples (e.g. data gaps)
-                    let lastKnown = null;
-                    const bucketList = bucketRows.map(r => {
-                        const avg = r.avg_value !== null && r.avg_value !== undefined ? Number(r.avg_value) : null;
-                        if (avg !== null) lastKnown = avg;
-                        return {
-                            bucket_no: r.bucket_no,
-                            b_start: r.b_start,
-                            b_end: r.b_end,
-                            value: avg ?? lastKnown,
-                            samples: r.samples
-                        };
-                    });
-
-                    const firstKnown = bucketList.find(b => b.value !== null)?.value ?? 0;
-                    valuesToSend = bucketList.map((b, idx) => {
-                        const resolvedVal = b.value !== null ? b.value : firstKnown;
-                        return {
-                            repeat_no: idx + 1,
-                            value: formatReadingValue(resolvedVal, tag.display_digits),
-                            raw_value: resolvedVal,
-                            bucket_start: b.b_start,
-                            bucket_end: b.b_end,
-                            samples: b.samples,
-                            executed_timestamp: formatExecutedTimestamp(b.b_start)
-                        };
-                    });
-                }
-
-                // 3. Send each value to BatchLine in a loop with 0.5s delay between pushes
-                console.log(`[BatchLine Callback Record]: Pushing ${valuesToSend.length} consolidated values (with 0.5s interval)...`);
-                const callbackResults = [];
-                for (let i = 0; i < valuesToSend.length; i++) {
-                    const item = valuesToSend[i];
-                    const executedTimestamp = item.executed_timestamp || formatExecutedTimestamp(item.ts || item.bucket_start);
-                    const cbResult = await sendBatchLineInstructionUpdate({
-                        refInstruction,
-                        batchId,
-                        actualResult: [
-                            {
-                                repeat_no: item.repeat_no,
-                                value: item.value,
-                                executed_timestamp: executedTimestamp,
-                                executed_user_email: instruction.TriggeredByEmail || null
-                            }
-                        ]
-                    });
-
-                    if (cbResult?.ok) {
-                        console.log(`Successfully updated BatchLine Case 3 record (repeat_no: ${item.repeat_no}/30)`);
-                    } else {
-                        console.error(`Failed to update BatchLine Case 3 record (repeat_no: ${item.repeat_no}/30)`, JSON.stringify(cbResult?.data?.error?.detail || cbResult?.error));
-                    }
-
-                    callbackResults.push({
-                        repeat_no: item.repeat_no,
-                        value: item.value,
-                        executed_timestamp: executedTimestamp,
-                        callback: cbResult
-                    });
-
-                    // Deploy 0.5 sec delay for every push
-                    if (i < valuesToSend.length - 1) {
-                        await new Promise(resolve => setTimeout(resolve, 200));
-                    }
-                }
-
-                return res.json({
-                    status: 'success',
-                    case: 3,
-                    mode: 'record',
-                    batch_id: batchId,
-                    tag: tag.name,
-                    ref_type: refType,
-                    ref_start_time: refStartTime,
-                    ref_end_time: refEndTime,
-                    total_samples: totalCount,
-                    records_sent: valuesToSend.length,
-                    records: valuesToSend,
-                    callbacks: callbackResults
-                });
-            }
-
-            const { rows } = await query(`
-                SELECT 
-                    COUNT(*)::int AS sample_count,
-                    MIN(r.value) AS min,
-                    MAX(r.value) AS max,
-                    AVG(r.value) AS avg,
-                    SUM(r.value) AS sum,
-                    STDDEV(r.value) AS stddev,
-                    VARIANCE(r.value) AS variance,
-                    (MAX(r.value) - MIN(r.value)) AS range,
-                    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY r.value) AS median,
-                    first(r.value, r.ts) AS first,
-                    last(r.value, r.ts) AS last,
-                    (last(r.value, r.ts) - first(r.value, r.ts)) AS diff
+/**
+ * Fetches the reading nearest to target timestamp within a strict tolerance window.
+ * Avoids table scans using bounded dual index-seeks.
+ */
+async function getReadingNearTimestamp(tagId, targetDate, toleranceMs) {
+    const { rows } = await query(`
+        WITH bounded_candidates AS (
+            (
+                SELECT r.ts, r.value, r.quality
                 FROM readings r
                 WHERE r.tag_id = $1
-                  AND r.ts >= $2::timestamptz
-                  AND r.ts <= $3::timestamptz;
-            `, [tag.id, actualStart, actualEnd]);
+                  AND r.ts <= $2::timestamptz
+                  AND r.ts >= ($2::timestamptz - ($3 || ' milliseconds')::interval)
+                ORDER BY r.ts DESC
+                LIMIT 1
+            )
+            UNION ALL
+            (
+                SELECT r.ts, r.value, r.quality
+                FROM readings r
+                WHERE r.tag_id = $1
+                  AND r.ts > $2::timestamptz
+                  AND r.ts <= ($2::timestamptz + ($3 || ' milliseconds')::interval)
+                ORDER BY r.ts ASC
+                LIMIT 1
+            )
+        )
+        SELECT ts, value, quality
+        FROM bounded_candidates
+        ORDER BY ABS(EXTRACT(EPOCH FROM (ts - $2::timestamptz))) ASC
+        LIMIT 1;
+    `, [tagId, targetDate, toleranceMs]);
 
-            const stats = rows[0] || {};
-            if (!stats.sample_count || Number(stats.sample_count) === 0) {
-                return res.status(404).json({
-                    error: `No readings found for tag "${tag.name}" between ${actualStart.toISOString()} and ${actualEnd.toISOString()}`
-                });
+    if (rows.length > 0) return rows[0];
+
+    // Fallback check on snapshot if within tolerance window
+    const { rows: snapRows } = await query(`
+        SELECT s.ts, s.value, s.quality
+        FROM snapshots s
+        WHERE s.tag_id = $1
+          AND ABS(EXTRACT(EPOCH FROM (s.ts - $2::timestamptz))) <= ($3 / 1000.0)
+        LIMIT 1;
+    `, [tagId, targetDate, toleranceMs]);
+
+    return snapRows.length > 0 ? snapRows[0] : null;
+}
+
+// ✅
+async function findEventForBatch({ refRecipe, refEvent }) {
+    if (!refRecipe || !refEvent) return null;
+
+    const trimmedRecipe = String(refRecipe).trim();
+    const trimmedEvent = String(refEvent).trim();
+
+    const sql = `
+        SELECT e.id, e.name, e.level, e.started_at, e.ended_at, a.code AS asset_code, b.batch_id
+        FROM events e
+        JOIN batches b ON e.batch_pk = b.id
+        JOIN assets a ON e.asset_id = a.id
+        WHERE (LOWER(TRIM(b.batch_id)) = LOWER($1) OR b.id::text = $1)
+          AND (
+            LOWER(TRIM(e.name)) = LOWER($2)
+            OR REPLACE(LOWER(TRIM(e.name)), '_', ' ') = REPLACE(LOWER(TRIM($2)), '_', ' ')
+            OR LOWER(TRIM(e.level)) = LOWER($2)
+          )
+        ORDER BY e.started_at DESC
+        LIMIT 1;
+    `;
+    const params = [trimmedRecipe, trimmedEvent];
+
+    const { rows } = await query(sql, params);
+    return rows.length > 0 ? rows[0] : null;
+}
+
+// ===========================================================================
+// OUTBOUND BATCHLINE CLIENT (RESILIENT WITH EXPONENTIAL RETRY)
+// ===========================================================================
+// ✅
+async function sendBatchLineInstructionUpdate({ refInstruction, batchId, actualResult, callbackKey, maxRetries = 2 }) {
+    if (!refInstruction || !batchId || !actualResult) return null;
+
+    const baseUrl = CONFIG.BATCHLINE_BASE_URL;
+    const callbackUrl = `${baseUrl.replace(/\/+$/, '')}/api/v1/batch/instruction/update/${encodeURIComponent(refInstruction)}`;
+    const apiKey = CONFIG.BATCHLINE_API_KEY;
+
+    if (!apiKey) {
+        await reportError('[BatchLine Callback Error]: Missing BATCHLINE_API_KEY in environment variables', { batchId, callbackKey });
+        return { targetUrl: callbackUrl, error: 'Missing BATCHLINE_API_KEY' };
+    }
+
+    const normalizedActualResult = Array.isArray(actualResult)
+        ? actualResult
+        : [
+            typeof actualResult === 'object' && actualResult !== null
+                ? actualResult
+                : { repeat_no: 1, value: String(actualResult), executed_user_email: null }
+        ];
+
+    const payload = {
+        batch_id: batchId,
+        actual_result: normalizedActualResult
+    };
+
+    let attempt = 0;
+    while (attempt <= maxRetries) {
+        try {
+            const cbRes = await fetch(callbackUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': apiKey
+                },
+                body: JSON.stringify(payload),
+                signal: AbortSignal.timeout(CONFIG.HTTP_TIMEOUT_MS)
+            });
+
+            const cbText = await cbRes.text();
+            let cbData;
+            try { cbData = JSON.parse(cbText); } catch { cbData = cbText; }
+
+            if (cbRes.status >= 500 && attempt < maxRetries) {
+                attempt++;
+                console.warn(`[BatchLine Callback Warning]: Server error ${cbRes.status}. Retrying attempt ${attempt}/${maxRetries}...`);
+                await sleep(500 * Math.pow(2, attempt));
+                continue;
             }
 
-            let rawResult = stats[statField];
-            if (rawResult === null || rawResult === undefined) {
-                if (statField === 'stddev' || statField === 'variance') {
-                    rawResult = 0;
-                } else {
-                    return res.status(404).json({
-                        error: `Unable to compute "${refType}" for tag "${tag.name}" in the specified time range.`
-                    });
+            return {
+                targetUrl: callbackUrl,
+                status: cbRes.status,
+                ok: cbRes.ok,
+                data: cbData
+            };
+        } catch (cbErr) {
+            if (attempt < maxRetries) {
+                attempt++;
+                console.warn(`[BatchLine Callback Warning]: Network error (${cbErr.message}). Retrying attempt ${attempt}/${maxRetries}...`);
+                await sleep(500 * Math.pow(2, attempt));
+                continue;
+            }
+            await reportError(`[BatchLine Callback Error]: ${cbErr.message}`, { batchId, callbackKey });
+            return {
+                targetUrl: callbackUrl,
+                error: cbErr.message
+            };
+        }
+    }
+}
+
+// ===========================================================================
+// CASE HANDLERS (SEPARATION OF CONCERNS)
+// ===========================================================================
+
+/**
+ * Case 1: Point-in-time value lookup
+ */
+// ✅
+async function handleCase1PointInTime(ctx, res) {
+    if (!ctx.refElement) {
+        await reportError('[BatchLine Case 1]: Missing required RefElement in instruction payload', ctx);
+        return res.status(400).json({ error: 'Missing required RefElement in instruction payload' });
+    }
+
+    const tag = await resolveTag(ctx.refElement, ctx);
+    if (!tag) {
+        await reportError(`[BatchLine Case 1]: Could not resolve tag for RefElement: "${ctx.refElement}"`, ctx);
+        return res.status(404).json({ error: `Could not resolve tag for RefElement: "${ctx.refElement}"` });
+    }
+
+    const reading = await getNearestReading(tag.id, ctx.refTime);
+    if (!reading) {
+        await reportError(`[BatchLine Case 1]: No reading or snapshot found for tag "${tag.name}"`, ctx);
+        return res.status(404).json({ error: `No reading or snapshot found for tag "${tag.name}"` });
+    }
+
+    const formattedValue = formatReadingValue(reading.value, tag.display_digits);
+    const executedTimestamp = formatExecutedTimestamp(reading.ts);
+
+    const callbackResult = await sendBatchLineInstructionUpdate({
+        refInstruction: ctx.refInstruction,
+        batchId: ctx.batchId,
+        callbackKey: ctx.callbackKey,
+        actualResult: [
+            {
+                repeat_no: 1,
+                value: formattedValue,
+                executed_timestamp: executedTimestamp,
+                executed_user_email: ctx.triggeredByEmail
+            }
+        ]
+    });
+
+    if (callbackResult?.ok) {
+        console.log(`[BatchLine Case 1]: Successfully updated instruction for tag ${tag.name}`);
+    } else {
+        await reportError('[BatchLine Case 1]: Failed to update instruction', ctx, callbackResult?.data.error.detail);
+    }
+
+    return res.json({
+        status: 'success',
+        case: 1,
+        batch_id: ctx.batchId,
+        tag: tag.name,
+        ref_time: ctx.refTime,
+        reading: {
+            ts: reading.ts,
+            raw_value: reading.value,
+            formatted_value: formattedValue,
+            executed_timestamp: executedTimestamp,
+            quality: reading.quality
+        },
+        callback: callbackResult
+    });
+}
+
+/**
+ * Case 2: Start time / End time phase lookup
+ */
+// ✅
+async function handleCase2PhaseTimestamp(ctx, res) {
+    const recipeBatchId = ctx.refRecipe || ctx.batchId;
+    if (!recipeBatchId) {
+        await reportError('[BatchLine Case 2]: Missing required RefRecipe in instruction payload', ctx);
+        return res.status(400).json({ error: 'Missing required RefRecipe in instruction payload' });
+    }
+    if (!ctx.refEvent) {
+        await reportError('[BatchLine Case 2]: Missing required RefEvent in instruction payload', ctx);
+        return res.status(400).json({ error: 'Missing required RefEvent in instruction payload' });
+    }
+    if (!ctx.refType) {
+        await reportError('[BatchLine Case 2]: Missing required RefType in instruction payload', ctx);
+        return res.status(400).json({ error: 'Missing required RefType in instruction payload' });
+    }
+
+    const normalizedType = String(ctx.refType).trim().toLowerCase();
+    const isStart = /^(starttime|started_at|start)$/i.test(normalizedType);
+    const isEnd = /^(endtime|ended_at|end)$/i.test(normalizedType);
+
+    if (!isStart && !isEnd) {
+        await reportError(`[BatchLine Case 2]: Invalid RefType: "${ctx.refType}". Expected "StartTime" or "EndTime"`, ctx);
+        return res.status(400).json({
+            error: `Invalid RefType: "${ctx.refType}". Expected "StartTime" or "EndTime"`
+        });
+    }
+
+    // In Case 2, RefElement is always null (not considered)
+    const event = await findEventForBatch({
+        refRecipe: recipeBatchId,
+        refEvent: ctx.refEvent
+    });
+
+    if (!event) {
+        await reportError(`[BatchLine Case 2]: Could not find phase/event "${ctx.refEvent}" for batch "${recipeBatchId}"`, ctx);
+        return res.status(404).json({
+            error: `Could not find phase/event "${ctx.refEvent}" for batch "${recipeBatchId}"`
+        });
+    }
+
+    const selectedField = isStart ? 'started_at' : 'ended_at';
+    const targetTime = isStart ? event.started_at : event.ended_at;
+
+    if (!targetTime) {
+        await reportError(`[BatchLine Case 2]: Phase "${event.name}" for batch "${recipeBatchId}" has no ${selectedField} yet`, ctx);
+        return res.status(400).json({
+            error: `Phase "${event.name}" for batch "${recipeBatchId}" has no ${selectedField} yet (phase may still be in progress)`,
+            event: {
+                id: event.id,
+                name: event.name,
+                level: event.level,
+                asset: event.asset_code,
+                started_at: event.started_at,
+                ended_at: event.ended_at
+            }
+        });
+    }
+
+    const formattedTime = formatBatchLineDate(targetTime);
+
+    const callbackResult = await sendBatchLineInstructionUpdate({
+        refInstruction: ctx.refInstruction,
+        batchId: ctx.batchId,
+        callbackKey: ctx.callbackKey,
+        actualResult: [
+            {
+                repeat_no: 1,
+                value: formattedTime,
+                executed_user_email: ctx.triggeredByEmail
+            }
+        ]
+    });
+
+    if (callbackResult?.ok) {
+        console.log(`[BatchLine Case 2]: Successfully updated phase time for ${event.name}`);
+    } else {
+        await reportError('[BatchLine Case 2]: Failed to update phase time', ctx, callbackResult?.data || callbackResult?.error);
+    }
+
+    return res.json({
+        status: 'success',
+        case: 2,
+        batch_id: ctx.batchId,
+        ref_recipe: recipeBatchId,
+        ref_event: ctx.refEvent,
+        ref_type: ctx.refType,
+        event: {
+            id: event.id,
+            name: event.name,
+            level: event.level,
+            asset: event.asset_code,
+            started_at: event.started_at,
+            ended_at: event.ended_at,
+            selected_field: selectedField,
+            selected_time: targetTime,
+            formatted_value: formattedTime
+        },
+        callback: callbackResult
+    });
+}
+
+/**
+ * Resolves aggregation metric from RefType
+ */
+// ✅
+function resolveMetric(refType) {
+    if (!refType) return 'avg';
+    const rUpper = String(refType).trim().toUpperCase();
+    if (rUpper === 'MIN' || rUpper === 'MINIMUM') return 'min';
+    if (rUpper === 'MAX' || rUpper === 'MAXIMUM') return 'max';
+    if (rUpper === 'SUM') return 'sum';
+    if (rUpper === 'FIRST') return 'first';
+    if (rUpper === 'LAST') return 'last';
+    return 'avg';
+}
+
+/**
+ * Computes single aggregated metric value from an array of numbers
+ */
+// ✅
+function computeMetricValue(vals, metric) {
+    if (!vals || vals.length === 0) return 0;
+    if (metric === 'min') return Math.min(...vals);
+    if (metric === 'max') return Math.max(...vals);
+    if (metric === 'sum') return vals.reduce((acc, v) => acc + v, 0);
+    if (metric === 'first') return vals[0];
+    if (metric === 'last') return vals[vals.length - 1];
+    return vals.reduce((acc, v) => acc + v, 0) / vals.length;
+}
+
+/**
+ * Consolidates readings within a window into intervals of intervalMs,
+ * aggregating each interval's readings using the specified metric (min, max, avg, sum, first, last).
+ */
+// ✅
+function buildIntervalConsolidatedValues(rows, windowStart, windowEnd, intervalMs, metric, displayDigits, fallbackVal = 0) {
+    const startMs = windowStart.getTime();
+    const endMs = windowEnd.getTime();
+    const windowDurationMs = Math.max(0, endMs - startMs);
+
+    // Rule: Window < Interval or Zero duration -> single point
+    if (windowDurationMs < intervalMs || startMs === endMs) {
+        let singleVal = fallbackVal;
+        if (rows && rows.length > 0) {
+            singleVal = computeMetricValue(rows.map(r => Number(r.value)), metric);
+        }
+        return [{
+            repeat_no: 1,
+            value: formatReadingValue(singleVal, displayDigits),
+            raw_value: singleVal,
+            bucket_start: windowStart.toISOString(),
+            bucket_end: windowEnd.toISOString(),
+            samples: rows ? rows.length : 0,
+            executed_timestamp: formatExecutedTimestamp(windowStart)
+        }];
+    }
+
+    let intervalCount = Math.max(1, Math.ceil(windowDurationMs / intervalMs));
+    if (intervalCount > CONFIG.MAX_PERIODIC_REPEATS) {
+        intervalCount = CONFIG.MAX_PERIODIC_REPEATS;
+    }
+
+    let lastKnown = (rows && rows.length > 0) ? Number(rows[0].value) : ((fallbackVal !== null && fallbackVal !== undefined) ? Number(fallbackVal) : 0);
+
+    const values = [];
+
+    for (let i = 0; i < intervalCount; i++) {
+        const bStartMs = startMs + i * intervalMs;
+        const bEndMs = Math.min(startMs + (i + 1) * intervalMs, endMs);
+        const bStart = new Date(bStartMs);
+        const bEnd = new Date(bEndMs);
+
+        const isLast = (i === intervalCount - 1);
+        const bucketVals = [];
+
+        if (rows && rows.length > 0) {
+            for (let j = 0; j < rows.length; j++) {
+                const rTs = new Date(rows[j].ts).getTime();
+                if (rTs >= bStartMs && (isLast ? (rTs <= bEndMs) : (rTs < bEndMs))) {
+                    const val = Number(rows[j].value);
+                    if (!Number.isNaN(val)) bucketVals.push(val);
                 }
             }
-
-            const formattedValue = (statField === 'sample_count')
-                ? String(rawResult)
-                : formatReadingValue(rawResult, tag.display_digits);
-
-            // Post back to BatchLine using reusable function
-            const callbackResult = await sendBatchLineInstructionUpdate({
-                refInstruction,
-                batchId,
-                actualResult: [
-                    {
-                        repeat_no: 1,
-                        value: formattedValue,
-                        executed_user_email: instruction.TriggeredByEmail || null
-                    }
-                ]
-            });
-
-            if (callbackResult?.ok) {
-                console.log('Successfully updated BatchLine Case 3 instruction', callbackResult.data);
-            }
-            else {
-                console.error('Failed to update BatchLine Case 3 instruction', JSON.stringify(callbackResult?.data?.error?.detail || callbackResult?.error));
-            }
-
-            return res.json({
-                status: 'success',
-                case: 3,
-                batch_id: batchId,
-                tag: tag.name,
-                ref_type: refType,
-                operation: statField,
-                ref_start_time: refStartTime,
-                ref_end_time: refEndTime,
-                sample_count: stats.sample_count,
-                raw_value: rawResult,
-                formatted_value: formattedValue,
-                statistics: {
-                    min: stats.min,
-                    max: stats.max,
-                    avg: stats.avg,
-                    sum: stats.sum,
-                    stddev: stats.stddev,
-                    variance: stats.variance,
-                    range: stats.range,
-                    median: stats.median,
-                    first: stats.first,
-                    last: stats.last,
-                    diff: stats.diff,
-                    sample_count: stats.sample_count
-                },
-                callback: callbackResult
-            });
         }
 
+        let resolvedVal;
+        if (bucketVals.length > 0) {
+            resolvedVal = computeMetricValue(bucketVals, metric);
+            lastKnown = resolvedVal;
+        } else {
+            resolvedVal = lastKnown;
+        }
+
+        values.push({
+            repeat_no: i + 1,
+            value: formatReadingValue(resolvedVal, displayDigits),
+            raw_value: resolvedVal,
+            bucket_start: bStart.toISOString(),
+            bucket_end: bEnd.toISOString(),
+            samples: bucketVals.length,
+            executed_timestamp: formatExecutedTimestamp(bStart)
+        });
+    }
+
+    return values;
+}
+
+/**
+ * Case 3 - Submode: Profile Wave Detection & Downsampling
+ */
+// ✅
+async function handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileConfig, intervalConfig = null) {
+    const startThreshold = profileConfig.start;
+    const stopThreshold = profileConfig.stop;
+
+    const { rows } = await query(`
+        SELECT ts, value
+        FROM readings
+        WHERE tag_id = $1
+          AND ts >= $2::timestamptz
+          AND ts <= $3::timestamptz
+        ORDER BY ts ASC;
+    `, [tag.id, actualStart, actualEnd]);
+
+    if (rows.length === 0) {
+        const errMsg = `No readings found for tag "${tag.name}" between ${actualStart.toISOString()} and ${actualEnd.toISOString()}`;
+        await reportError(`[BatchLine Profile]: ${errMsg}`, ctx);
+        return res.status(404).json({ error: errMsg });
+    }
+
+    // Direction resolution
+    let startDirection = profileConfig.direction;
+    if (!startDirection) {
+        if (stopThreshold !== null) {
+            startDirection = (stopThreshold >= startThreshold) ? 'rise' : 'fall';
+        } else {
+            const firstValidRow = rows.find(r => r.value !== null && r.value !== undefined && !Number.isNaN(Number(r.value)));
+            const initialVal = firstValidRow ? Number(firstValidRow.value) : startThreshold;
+            startDirection = (initialVal <= startThreshold) ? 'rise' : 'fall';
+        }
+    }
+    const isFall = (startDirection === 'fall');
+    const stopDirection = (stopThreshold !== null) ? ((stopThreshold >= startThreshold) ? 'rise' : 'fall') : null;
+
+    let armed = false;
+    let waveStartTs = null;
+    let waveStopTs = null;
+
+    const firstValidRow = rows.find(r => r.value !== null && r.value !== undefined && !Number.isNaN(Number(r.value)));
+    const firstVal = firstValidRow ? Number(firstValidRow.value) : null;
+    if (firstVal !== null) {
+        if (isFall && firstVal >= startThreshold) armed = true;
+        if (!isFall && firstVal <= startThreshold) armed = true;
+    }
+
+    for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        if (r.value === null || r.value === undefined) continue;
+        const val = Number(r.value);
+        if (Number.isNaN(val)) continue;
+
+        if (!armed) {
+            if (isFall && val >= startThreshold) armed = true;
+            if (!isFall && val <= startThreshold) armed = true;
+        }
+
+        if (armed && !waveStartTs) {
+            let reachedStart = false;
+            if (i === 0) {
+                reachedStart = isFall ? (val <= startThreshold) : (val >= startThreshold);
+            } else {
+                const prevVal = Number(rows[i - 1].value);
+                reachedStart = isFall ? (val <= startThreshold && prevVal >= startThreshold)
+                    : (val >= startThreshold && prevVal <= startThreshold);
+            }
+
+            if (reachedStart) waveStartTs = r.ts;
+        } else if (waveStartTs && !waveStopTs) {
+            if (profileConfig.durationMinutes !== null && profileConfig.durationMinutes > 0) {
+                const durationMs = profileConfig.durationMinutes * 60 * 1000;
+                if (new Date(r.ts).getTime() - new Date(waveStartTs).getTime() >= durationMs) {
+                    waveStopTs = r.ts;
+                    break;
+                }
+            } else if (stopThreshold !== null) {
+                const reachedStop = (stopDirection === 'rise') ? (val >= stopThreshold) : (val <= stopThreshold);
+                if (reachedStop) {
+                    waveStopTs = r.ts;
+                    break;
+                }
+
+                // If wave aborted back past startThreshold before stop: reset
+                const aborted = isFall ? (val > startThreshold) : (val < startThreshold);
+                if (aborted) {
+                    waveStartTs = null;
+                    armed = false;
+                }
+            }
+        }
+    }
+
+    // Fallback search if waveStart not armed
+    if (!waveStartTs) {
+        for (const r of rows) {
+            if (r.value === null || r.value === undefined) continue;
+            const val = Number(r.value);
+            if (Number.isNaN(val)) continue;
+            if (isFall ? (val <= startThreshold) : (val >= startThreshold)) {
+                waveStartTs = r.ts;
+                break;
+            }
+        }
+    }
+
+    if (!waveStartTs) {
+        const errMsg = `Reading value for tag "${tag.name}" never ${startDirection === 'rise' ? 'rose to or above' : 'fell to or below'} START threshold (${startThreshold}) between ${actualStart.toISOString()} and ${actualEnd.toISOString()}`;
+        await reportError(`[BatchLine Profile]: ${errMsg}`, ctx);
+        return res.status(404).json({ error: errMsg });
+    }
+
+    if (!waveStopTs) {
+        if (profileConfig.durationMinutes !== null && profileConfig.durationMinutes > 0) {
+            const targetStop = new Date(new Date(waveStartTs).getTime() + profileConfig.durationMinutes * 60 * 1000);
+            const lastTs = new Date(rows[rows.length - 1].ts);
+            waveStopTs = (targetStop < lastTs) ? targetStop.toISOString() : lastTs.toISOString();
+        } else {
+            waveStopTs = rows[rows.length - 1].ts;
+        }
+    }
+
+    const waveStart = new Date(waveStartTs);
+    const waveStop = new Date(waveStopTs);
+
+    const waveRows = rows.filter(r => {
+        if (r.value === null || r.value === undefined || Number.isNaN(Number(r.value))) return false;
+        const t = new Date(r.ts).getTime();
+        return t >= waveStart.getTime() && t <= waveStop.getTime();
+    });
+
+    const totalCount = waveRows.length;
+    if (totalCount === 0) {
+        const errMsg = `No readings found for tag "${tag.name}" in the captured wave between ${waveStart.toISOString()} and ${waveStop.toISOString()}`;
+        await reportError(`[BatchLine Profile]: ${errMsg}`, ctx);
+        return res.status(404).json({ error: errMsg });
+    }
+
+    let valuesToSend = [];
+    const durationMs = waveStop.getTime() - waveStart.getTime();
+
+    if (intervalConfig && intervalConfig.intervalMs) {
+        valuesToSend = buildIntervalConsolidatedValues(
+            waveRows,
+            waveStart,
+            waveStop,
+            intervalConfig.intervalMs,
+            profileConfig.metric || 'avg',
+            tag.display_digits,
+            startThreshold
+        );
+    } else if (totalCount <= CONFIG.MAX_PROFILE_SAMPLES || durationMs <= 1000) {
+        valuesToSend = waveRows.slice(0, CONFIG.MAX_PROFILE_SAMPLES).map((r, idx) => ({
+            repeat_no: idx + 1,
+            value: formatReadingValue(r.value, tag.display_digits),
+            raw_value: r.value,
+            ts: r.ts,
+            executed_timestamp: formatExecutedTimestamp(r.ts)
+        }));
+    } else {
+        const sampleCount = CONFIG.MAX_PROFILE_SAMPLES || 30;
+        const lastBucketIndex = sampleCount - 1;
+
+        const { rows: bucketRows } = await query(`
+            WITH bounds AS (
+                SELECT $2::timestamptz AS t_start, $3::timestamptz AS t_end
+            ),
+            buckets AS (
+                SELECT 
+                    i AS bucket_no,
+                    t_start + (i * (t_end - t_start) / $4) AS b_start,
+                    t_start + ((i + 1) * (t_end - t_start) / $4) AS b_end
+                FROM bounds, generate_series(0, $5) AS i
+            )
+            SELECT 
+                b.bucket_no,
+                b.b_start,
+                b.b_end,
+                AVG(r.value) AS avg_val,
+                MIN(r.value) AS min_val,
+                MAX(r.value) AS max_val,
+                COUNT(r.value)::int AS samples
+            FROM buckets b
+            LEFT JOIN readings r 
+              ON r.tag_id = $1 
+             AND r.ts >= b.b_start 
+             AND (CASE WHEN b.bucket_no = $5 THEN r.ts <= b.b_end ELSE r.ts < b.b_end END)
+            GROUP BY b.bucket_no, b.b_start, b.b_end
+            ORDER BY b.bucket_no;
+        `, [tag.id, waveStart, waveStop, sampleCount, lastBucketIndex]);
+
+        let lastKnown = null;
+        const bucketList = bucketRows.map(r => {
+            let metricVal = null;
+            if (profileConfig.metric === 'min') metricVal = r.min_val;
+            else if (profileConfig.metric === 'max') metricVal = r.max_val;
+            else metricVal = r.avg_val;
+
+            if (metricVal !== null && metricVal !== undefined) {
+                lastKnown = Number(metricVal);
+            }
+            return {
+                bucket_no: r.bucket_no,
+                b_start: r.b_start,
+                b_end: r.b_end,
+                value: (metricVal !== null && metricVal !== undefined) ? Number(metricVal) : lastKnown,
+                samples: r.samples
+            };
+        });
+
+        const firstKnown = bucketList.find(b => b.value !== null)?.value ?? startThreshold;
+        valuesToSend = bucketList.map((b, idx) => {
+            const resolvedVal = b.value !== null ? b.value : firstKnown;
+            return {
+                repeat_no: idx + 1,
+                value: formatReadingValue(resolvedVal, tag.display_digits),
+                raw_value: resolvedVal,
+                bucket_start: b.b_start,
+                bucket_end: b.b_end,
+                samples: b.samples,
+                executed_timestamp: formatExecutedTimestamp(b.b_start)
+            };
+        });
+    }
+
+    console.log(`[BatchLine Profile]: Pushing ${valuesToSend.length} values for captured first wave...`);
+    const actualResult = valuesToSend.map((item, idx) => ({
+        repeat_no: item.repeat_no || (idx + 1),
+        value: item.value,
+        executed_timestamp: item.executed_timestamp || formatExecutedTimestamp(item.bucket_start || item.ts),
+        executed_user_email: ctx.triggeredByEmail || null
+    }));
+
+    const cbResult = await sendBatchLineInstructionUpdate({
+        refInstruction: ctx.refInstruction,
+        batchId: ctx.batchId,
+        callbackKey: ctx.callbackKey,
+        actualResult
+    });
+
+    if (!cbResult?.ok) {
+        await reportError(`Failed to update BatchLine Case 3 profile (${valuesToSend.length} items)`, ctx, cbResult?.data?.error?.detail || cbResult?.error);
+    }
+
+    return res.json({
+        status: 'success',
+        case: 3,
+        mode: 'record_profile',
+        batch_id: ctx.batchId,
+        tag: tag.name,
+        metric: (profileConfig.metric || 'avg').toUpperCase(),
+        ref_type: ctx.refType,
+        start_threshold: startThreshold,
+        stop_threshold: profileConfig.stop ?? null,
+        duration_minutes: profileConfig.durationMinutes ?? null,
+        direction: startDirection,
+        interval: intervalConfig ? intervalConfig.rawInterval : null,
+        interval_minutes: intervalConfig ? intervalConfig.intervalMinutes : null,
+        wave_start: waveStart.toISOString(),
+        wave_stop: waveStop.toISOString(),
+        wave_duration_sec: Math.max(1, (waveStop - waveStart) / 1000),
+        total_samples: totalCount,
+        records_sent: valuesToSend.length,
+        records: valuesToSend,
+        callback: cbResult,
+        callbacks: cbResult ? [cbResult] : []
+    });
+}
+
+/**
+ * Case 3 - Submode: Uniform Range Recording (Record Mode)
+ */
+// ✅
+async function handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig = null) {
+    let metric = resolveMetric(ctx.refType);
+
+    const { rows: allRows } = await query(`
+        SELECT ts, value
+        FROM readings
+        WHERE tag_id = $1
+          AND ts >= $2::timestamptz
+          AND ts <= $3::timestamptz
+        ORDER BY ts ASC;
+    `, [tag.id, actualStart, actualEnd]);
+
+    if (allRows.length === 0) {
+        const errMsg = `No readings found for tag "${tag.name}" between ${actualStart.toISOString()} and ${actualEnd.toISOString()}`;
+        await reportError(`[BatchLine Record]: ${errMsg}`, ctx);
+        return res.status(404).json({ error: errMsg });
+    }
+
+    const totalCount = allRows.length;
+    let valuesToSend = [];
+    const durationMs = actualEnd.getTime() - actualStart.getTime();
+
+    if (intervalConfig && intervalConfig.intervalMs) {
+        valuesToSend = buildIntervalConsolidatedValues(
+            allRows,
+            actualStart,
+            actualEnd,
+            intervalConfig.intervalMs,
+            metric,
+            tag.display_digits,
+            allRows[0]?.value ?? 0
+        );
+    } else if (totalCount <= CONFIG.MAX_PROFILE_SAMPLES || durationMs <= 1000) {
+        valuesToSend = allRows.slice(0, CONFIG.MAX_PROFILE_SAMPLES).map((r, idx) => ({
+            repeat_no: idx + 1,
+            value: formatReadingValue(r.value, tag.display_digits),
+            raw_value: r.value,
+            ts: r.ts,
+            executed_timestamp: formatExecutedTimestamp(r.ts)
+        }));
+    } else {
+        const sampleCount = CONFIG.MAX_PROFILE_SAMPLES || 30;
+        const lastBucketIndex = sampleCount - 1;
+
+        const { rows: bucketRows } = await query(`
+            WITH bounds AS (
+                SELECT $2::timestamptz AS t_start, $3::timestamptz AS t_end
+            ),
+            buckets AS (
+                SELECT 
+                    i AS bucket_no,
+                    t_start + (i * (t_end - t_start) / $4) AS b_start,
+                    t_start + ((i + 1) * (t_end - t_start) / $4) AS b_end
+                FROM bounds, generate_series(0, $5) AS i
+            )
+            SELECT 
+                b.bucket_no,
+                b.b_start,
+                b.b_end,
+                AVG(r.value) AS avg_val,
+                MIN(r.value) AS min_val,
+                MAX(r.value) AS max_val,
+                COUNT(r.value)::int AS samples
+            FROM buckets b
+            LEFT JOIN readings r 
+              ON r.tag_id = $1 
+             AND r.ts >= b.b_start 
+             AND (CASE WHEN b.bucket_no = $5 THEN r.ts <= b.b_end ELSE r.ts < b.b_end END)
+            GROUP BY b.bucket_no, b.b_start, b.b_end
+            ORDER BY b.bucket_no;
+        `, [tag.id, actualStart, actualEnd, sampleCount, lastBucketIndex]);
+
+        let lastKnown = null;
+        const bucketList = bucketRows.map(r => {
+            let metricVal = null;
+            if (metric === 'min') metricVal = r.min_val;
+            else if (metric === 'max') metricVal = r.max_val;
+            else metricVal = r.avg_val;
+
+            if (metricVal !== null && metricVal !== undefined) {
+                lastKnown = Number(metricVal);
+            }
+            return {
+                bucket_no: r.bucket_no,
+                b_start: r.b_start,
+                b_end: r.b_end,
+                value: (metricVal !== null && metricVal !== undefined) ? Number(metricVal) : lastKnown,
+                samples: r.samples
+            };
+        });
+
+        const firstKnown = bucketList.find(b => b.value !== null)?.value ?? 0;
+        valuesToSend = bucketList.map((b, idx) => {
+            const resolvedVal = b.value !== null ? b.value : firstKnown;
+            return {
+                repeat_no: idx + 1,
+                value: formatReadingValue(resolvedVal, tag.display_digits),
+                raw_value: resolvedVal,
+                bucket_start: b.b_start,
+                bucket_end: b.b_end,
+                samples: b.samples,
+                executed_timestamp: formatExecutedTimestamp(b.b_start)
+            };
+        });
+    }
+
+    console.log(`[BatchLine Record]: Pushing ${valuesToSend.length} consolidated values for tag ${tag.name}...`);
+    const actualResult = valuesToSend.map((item, idx) => ({
+        repeat_no: item.repeat_no || (idx + 1),
+        value: item.value,
+        executed_timestamp: item.executed_timestamp || formatExecutedTimestamp(item.ts || item.bucket_start),
+        executed_user_email: ctx.triggeredByEmail || null
+    }));
+
+    const cbResult = await sendBatchLineInstructionUpdate({
+        refInstruction: ctx.refInstruction,
+        batchId: ctx.batchId,
+        callbackKey: ctx.callbackKey,
+        actualResult
+    });
+
+    if (!cbResult?.ok) {
+        await reportError(`Failed to update BatchLine Case 3 record (${valuesToSend.length} items)`, ctx, cbResult?.data?.error?.detail || cbResult?.error);
+    }
+
+    return res.json({
+        status: 'success',
+        case: 3,
+        mode: 'record',
+        batch_id: ctx.batchId,
+        tag: tag.name,
+        metric: metric.toUpperCase(),
+        ref_type: ctx.refType,
+        ref_start_time: ctx.refStartTime,
+        ref_end_time: ctx.refEndTime,
+        interval: intervalConfig ? intervalConfig.rawInterval : null,
+        interval_minutes: intervalConfig ? intervalConfig.intervalMinutes : null,
+        total_samples: totalCount,
+        records_sent: valuesToSend.length,
+        records: valuesToSend,
+        callback: cbResult,
+        callbacks: cbResult ? [cbResult] : []
+    });
+}
+
+/**
+ * Case 3 - Submode: Standard Statistical / Aggregate Calculations
+ */
+// ✅
+async function handleAggregateMode(ctx, res, tag, actualStart, actualEnd, statField) {
+    const { rows } = await query(`
+        SELECT 
+            COUNT(*)::int AS sample_count,
+            MIN(r.value) AS min,
+            MAX(r.value) AS max,
+            AVG(r.value) AS avg,
+            SUM(r.value) AS sum,
+            STDDEV(r.value) AS stddev,
+            VARIANCE(r.value) AS variance,
+            (MAX(r.value) - MIN(r.value)) AS range,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY r.value) AS median,
+            first(r.value, r.ts) AS first,
+            last(r.value, r.ts) AS last,
+            (last(r.value, r.ts) - first(r.value, r.ts)) AS diff
+        FROM readings r
+        WHERE r.tag_id = $1
+          AND r.ts >= $2::timestamptz
+          AND r.ts <= $3::timestamptz;
+    `, [tag.id, actualStart, actualEnd]);
+
+    const stats = rows[0] || {};
+    if (!stats.sample_count || Number(stats.sample_count) === 0) {
+        const errMsg = `No readings found for tag "${tag.name}" between ${actualStart.toISOString()} and ${actualEnd.toISOString()}`;
+        await reportError(`[BatchLine Aggregate]: ${errMsg}`, ctx);
+        return res.status(404).json({ error: errMsg });
+    }
+
+    let rawResult = stats[statField];
+    if (rawResult === null || rawResult === undefined) {
+        if (statField === 'stddev' || statField === 'variance') {
+            rawResult = 0;
+        } else {
+            const errMsg = `Unable to compute "${ctx.refType}" for tag "${tag.name}" in the specified time range.`;
+            await reportError(`[BatchLine Aggregate]: ${errMsg}`, ctx);
+            return res.status(404).json({ error: errMsg });
+        }
+    }
+
+    const formattedValue = (statField === 'sample_count')
+        ? String(rawResult)
+        : formatReadingValue(rawResult, tag.display_digits);
+
+    const callbackResult = await sendBatchLineInstructionUpdate({
+        refInstruction: ctx.refInstruction,
+        batchId: ctx.batchId,
+        callbackKey: ctx.callbackKey,
+        actualResult: [
+            {
+                repeat_no: 1,
+                value: formattedValue,
+                executed_user_email: ctx.triggeredByEmail
+            }
+        ]
+    });
+
+    if (callbackResult?.ok) {
+        console.log(`[BatchLine Aggregate]: Successfully updated ${statField} for tag ${tag.name}`);
+    } else {
+        await reportError('[BatchLine Aggregate]: Failed to update instruction', ctx, callbackResult?.data || callbackResult?.error);
+    }
+
+    return res.json({
+        status: 'success',
+        case: 3,
+        batch_id: ctx.batchId,
+        tag: tag.name,
+        ref_type: ctx.refType,
+        operation: statField,
+        ref_start_time: ctx.refStartTime,
+        ref_end_time: ctx.refEndTime,
+        sample_count: stats.sample_count,
+        raw_value: rawResult,
+        formatted_value: formattedValue,
+        statistics: {
+            min: stats.min,
+            max: stats.max,
+            avg: stats.avg,
+            sum: stats.sum,
+            stddev: stats.stddev,
+            variance: stats.variance,
+            range: stats.range,
+            median: stats.median,
+            first: stats.first,
+            last: stats.last,
+            diff: stats.diff,
+            sample_count: stats.sample_count
+        },
+        callback: callbackResult
+    });
+}
+
+/**
+ * Case 3 Dispatcher: Parses options and routes to profile, record, periodic, or aggregate
+ */
+async function handleCase3TimeRange(ctx, res) {
+    if (!ctx.refElement) {
+        await reportError('[BatchLine Case 3]: Missing required RefElement in instruction payload', ctx);
+        return res.status(400).json({ error: 'Missing required RefElement in instruction payload' });
+    }
+    if (!ctx.refStartTime || !ctx.refEndTime) {
+        await reportError('[BatchLine Case 3]: Missing required RefStartTime or RefEndTime in instruction payload', ctx);
+        return res.status(400).json({ error: 'Missing required RefStartTime or RefEndTime in instruction payload' });
+    }
+    if (!ctx.refType) {
+        await reportError('[BatchLine Case 3]: Missing required RefType in instruction payload', ctx);
+        return res.status(400).json({ error: 'Missing required RefType in instruction payload' });
+    }
+
+    const startDate = new Date(ctx.refStartTime);
+    const endDate = new Date(ctx.refEndTime);
+
+    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+        const errMsg = `Invalid date format for RefStartTime ("${ctx.refStartTime}") or RefEndTime ("${ctx.refEndTime}")`;
+        await reportError(`[BatchLine Case 3]: ${errMsg}`, ctx);
+        return res.status(400).json({ error: errMsg });
+    }
+
+    const [actualStart, actualEnd] = startDate > endDate ? [endDate, startDate] : [startDate, endDate];
+
+    // -------------------------------------------------------------------------
+    // Detect Modes (Strictly [RECORD] or [RECORD: ...] with 6 sub-scenarios)
+    // -------------------------------------------------------------------------
+    const desc = typeof ctx.instructionDescription === 'string' ? ctx.instructionDescription : '';
+
+    // Strictly match [RECORD] or [RECORD: ...]
+    const recordBlockMatch = desc.match(/\[RECORD(?::\s*([^\]]*))?\]/i);
+    const isRecordTrigger = Boolean(recordBlockMatch);
+
+    let isProfileMode = false;
+    let profileConfig = null;
+    let intervalConfig = null;
+    let statField = null;
+
+    if (isRecordTrigger) {
+        const content = (recordBlockMatch[1] || '').trim();
+        const metric = resolveMetric(ctx.refType);
+
+        // Parameters
+        const startMatch = content.match(/\bSTART\s*=\s*([+-]?\d+(?:\.\d+)?)/i);
+        const stopMatch = content.match(/\bSTOP\s*=\s*([+-]?\d+(?:\.\d+)?)/i);
+        const durationMatch = content.match(/\bDURATION\s*=\s*(\d+(?:\.\d+)?)\s*(s|m|h)?/i);
+        const directionMatch = content.match(/\bDIRECTION\s*=\s*(Rise|Fall)/i);
+        const intervalMatch = content.match(/\bINTERVAL\s*=\s*(\d+(?:\.\d+)?)\s*(s|m|h)?/i);
+
+        if (intervalMatch) {
+            const val = parseFloat(intervalMatch[1]);
+            const unit = (intervalMatch[2] || 'm').toLowerCase();
+            let intervalMs;
+            let intervalMinutes;
+            if (unit === 's') {
+                intervalMs = Math.round(val * 1000);
+                intervalMinutes = val / 60;
+            } else if (unit === 'h') {
+                intervalMs = Math.round(val * 3600 * 1000);
+                intervalMinutes = val * 60;
+            } else {
+                intervalMs = Math.round(val * 60 * 1000);
+                intervalMinutes = val;
+            }
+            intervalConfig = {
+                rawInterval: intervalMatch[0],
+                intervalMinutes,
+                intervalMs: Math.max(intervalMs, 1000)
+            };
+        }
+
+        let durationMinutes = null;
+        if (durationMatch) {
+            const val = parseFloat(durationMatch[1]);
+            const unit = (durationMatch[2] || 'm').toLowerCase();
+            if (unit === 's') durationMinutes = val / 60;
+            else if (unit === 'h') durationMinutes = val * 60;
+            else durationMinutes = val;
+        }
+
+        if (startMatch) {
+            isProfileMode = true;
+            profileConfig = {
+                start: parseFloat(startMatch[1]),
+                stop: stopMatch ? parseFloat(stopMatch[1]) : null,
+                durationMinutes,
+                direction: directionMatch ? directionMatch[1].toLowerCase() : null,
+                metric
+            };
+        }
+    } else {
+        const statKey = String(ctx.refType).trim().toUpperCase();
+        statField = STAT_OPERATIONS[statKey];
+
+        if (!statField) {
+            await reportError(`[BatchLine Case 3]: Unsupported RefType operation: "${ctx.refType}"`, ctx);
+            return res.status(400).json({
+                error: `Unsupported RefType operation: "${ctx.refType}". Supported operations: MAX, MIN, AVG, SUM, COUNT, STDDEV, VARIANCE, RANGE, MEDIAN, FIRST, LAST.`
+            });
+        }
+    }
+
+    // Single RefElement resolution
+    const tag = await resolveTag(ctx.refElement, ctx);
+    if (!tag) {
+        await reportError(`[BatchLine Case 3]: Could not resolve tag for RefElement: "${ctx.refElement}"`, ctx);
+        return res.status(404).json({ error: `Could not resolve tag for RefElement: "${ctx.refElement}"` });
+    }
+
+    const modeName = isProfileMode ? 'profile' : isRecordTrigger ? 'record' : 'aggregate';
+    console.log(`[BatchLine Case 3]: Identified mode "${modeName}" for tag "${tag.name}" (batch: ${ctx.batchId})`);
+
+    if (isProfileMode) {
+        return await handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileConfig, intervalConfig);
+    }
+
+    if (isRecordTrigger) {
+        return await handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig);
+    }
+
+    return await handleAggregateMode(ctx, res, tag, actualStart, actualEnd, statField);
+}
+
+// ===========================================================================
+// MAIN WEBHOOK ROUTES
+// ===========================================================================
+
+/**
+ * BatchLine Instruction Webhook (/instruction)
+ */
+router.post('/instruction', async (req, res) => {
+    let ctx = null;
+    try {
+        ctx = extractInstructionPayload(req.body);
+
+        if (ctx.rawEventType === undefined || ctx.rawEventType === null || ctx.rawEventType === '' || Number.isNaN(Number(ctx.rawEventType))) {
+            // await reportError('[BatchLine Error]: Missing required EventType in instruction payload', ctx);
+            console.log("/instruction received, no action is needed.")
+            return res.status(400).json({ error: 'Missing required EventType in instruction payload' });
+        }
+
+        const eventType = Number(ctx.rawEventType);
+
+        if (eventType === 1) {
+            return await handleCase1PointInTime(ctx, res);
+        }
+
+        if (eventType === 2) {
+            return await handleCase2PhaseTimestamp(ctx, res);
+        }
+
+        if (eventType === 3) {
+            return await handleCase3TimeRange(ctx, res);
+        }
+
+        const msg = `EventType ${eventType} not yet implemented`;
+        await reportError(`[BatchLine Error]: ${msg}`, ctx);
         return res.status(501).json({
-            error: `EventType ${eventType} not yet implemented`,
-            batchId,
-            refInstruction
+            error: msg,
+            batchId: ctx.batchId,
+            refInstruction: ctx.refInstruction
         });
     } catch (err) {
-        console.error('[Instruction Webhook Error]:', err);
-        res.status(500).json({ error: err.message });
+        await reportError('[Instruction Webhook Fatal Error]: ' + err.message, ctx || {}, err.stack);
+        return res.status(500).json({ error: err.message });
     }
 });
 
-// ---------------------------------------------------------------------------
-// BatchLine Status Webhook Endpoint (/status)
-// ---------------------------------------------------------------------------
+/**
+ * BatchLine Status Webhook Endpoint (/status)
+ */
 router.post('/status', async (req, res) => {
     try {
         console.log('[Status Webhook] Received status payload:', JSON.stringify(req.body));
