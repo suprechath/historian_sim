@@ -1370,6 +1370,11 @@ function parseBatchLineDate(dateStr) {
     return isNaN(d.getTime()) ? null : d;
 }
 
+function cleanInstructionId(instructionId = '') {
+    if (!instructionId) return '';
+    return String(instructionId).trim().replace(/^\[+/, '').replace(/\]+$/, '').toUpperCase();
+}
+
 // ✅
 function mapInstructionKey(instructionId = '') {
     const id = String(instructionId).trim().toUpperCase();
@@ -1407,6 +1412,7 @@ function parsePrintLabelPayload(body = {}) {
     };
 
     let executedUserEmail = null;
+    const incomingInstructionIds = [];
 
     const phases = Array.isArray(batch.Phases) ? batch.Phases : (batch.Phase ? [batch.Phase] : []);
     for (const phase of phases) {
@@ -1414,6 +1420,9 @@ function parsePrintLabelPayload(body = {}) {
         for (const step of steps) {
             const instructions = Array.isArray(step.Instructions) ? step.Instructions : (step.Instruction ? [step.Instruction] : []);
             for (const inst of instructions) {
+                if (inst.InstructionId) {
+                    incomingInstructionIds.push(cleanInstructionId(inst.InstructionId));
+                }
                 const key = mapInstructionKey(inst.InstructionId);
                 if (!key) continue;
 
@@ -1440,6 +1449,7 @@ function parsePrintLabelPayload(body = {}) {
         refInstruction: parameters.RefInstruction || batch.RefInstruction || body.RefInstruction || null,
         user: executedUserEmail ? { executedUserEmail } : null,
         parameters,
+        incomingInstructionIds,
         parsedDates: {
             startDate: startDate ? startDate.toISOString() : null,
             endDate: endDate ? endDate.toISOString() : null
@@ -1497,7 +1507,7 @@ const activeFutureIntervalJobs = new Map();
  * Immediately acknowledges HTTP webhook and starts a progressive 30-second cadence dispatcher,
  * sending sets of bucketed values to BatchLine every 30 seconds until RefEndTime.
  */
-async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig) {
+async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig, startThreshold = null, startDirection = null, stopThreshold = null) {
     const metric = resolveMetric(ctx.refType);
     const intervalMs = intervalConfig.intervalMs;
     const startMs = actualStart.getTime();
@@ -1510,21 +1520,19 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
         return res.status(400).json({ error: errMsg });
     }
 
-    let totalExpectedBuckets = Math.max(1, Math.ceil(durationMs / intervalMs));
-    if (totalExpectedBuckets > CONFIG.MAX_PERIODIC_REPEATS) {
-        console.warn(`[BatchLine PrintLabel Warning]: Capping expected buckets from ${totalExpectedBuckets} to max ${CONFIG.MAX_PERIODIC_REPEATS}`);
-        totalExpectedBuckets = CONFIG.MAX_PERIODIC_REPEATS;
-    }
-
-    const jobKey = ctx.refInstruction || `${ctx.batchId}_${ctx.refElement}`;
+    const cleanRef = cleanInstructionId(ctx.refInstruction);
+    const jobKey = `${ctx.batchId}_${cleanRef}`;
 
     // Cancel previous job for this instruction if running
     if (activeFutureIntervalJobs.has(jobKey)) {
         console.log(`[BatchLine PrintLabel]: Cancelling previous future interval job for ${jobKey}`);
         const prevJob = activeFutureIntervalJobs.get(jobKey);
-        if (prevJob.startTimeoutId) clearTimeout(prevJob.startTimeoutId);
-        if (prevJob.intervalId) clearInterval(prevJob.intervalId);
-        if (prevJob.endTimeoutId) clearTimeout(prevJob.endTimeoutId);
+        if (typeof prevJob.cleanup === 'function') prevJob.cleanup();
+        else {
+            if (prevJob.startTimeoutId) clearTimeout(prevJob.startTimeoutId);
+            if (prevJob.intervalId) clearInterval(prevJob.intervalId);
+            if (prevJob.endTimeoutId) clearTimeout(prevJob.endTimeoutId);
+        }
         activeFutureIntervalJobs.delete(jobKey);
     }
 
@@ -1536,15 +1544,72 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
     `, [tag.id, actualStart]);
 
     let lastKnown = 0;
+    let initialVal = null;
     if (initialRows.length > 0 && initialRows[0].value !== null) {
         lastKnown = Number(initialRows[0].value);
+        initialVal = lastKnown;
     } else {
         const { rows: snapRows } = await query(`
             SELECT value FROM snapshots WHERE tag_id = $1 LIMIT 1;
         `, [tag.id]);
         if (snapRows.length > 0 && snapRows[0].value !== null) {
             lastKnown = Number(snapRows[0].value);
+            initialVal = lastKnown;
         }
+    }
+
+    let effectiveDirection = startDirection;
+    if (startThreshold !== null && !effectiveDirection) {
+        if (initialVal !== null) {
+            effectiveDirection = (initialVal <= startThreshold) ? 'rise' : 'fall';
+        } else {
+            effectiveDirection = 'rise';
+        }
+    }
+    const isFall = (effectiveDirection === 'fall' || effectiveDirection === 'down');
+    const stopDirection = (stopThreshold !== null && startThreshold !== null)
+        ? ((stopThreshold >= startThreshold) ? 'rise' : 'fall')
+        : (isFall ? 'rise' : 'fall');
+
+    let crossedStartMs = (startThreshold === null) ? startMs : null;
+    let armed = false;
+
+    if (startThreshold !== null) {
+        if (initialVal !== null) {
+            armed = isFall ? (initialVal > startThreshold) : (initialVal < startThreshold);
+        }
+
+        const { rows: searchRows } = await query(`
+            SELECT ts, value FROM readings
+            WHERE tag_id = $1 AND ts >= $2::timestamptz AND ts <= $3::timestamptz
+            ORDER BY ts ASC;
+        `, [tag.id, actualStart, new Date()]);
+
+        for (let i = 0; i < searchRows.length; i++) {
+            const r = searchRows[i];
+            if (r.value === null || r.value === undefined) continue;
+            const val = Number(r.value);
+            if (isNaN(val)) continue;
+
+            if (!armed) {
+                if (isFall && val > startThreshold) armed = true;
+                if (!isFall && val < startThreshold) armed = true;
+            } else {
+                const crossed = isFall ? (val <= startThreshold) : (val >= startThreshold);
+                if (crossed) {
+                    crossedStartMs = new Date(r.ts).getTime();
+                    console.log(`[BatchLine Future 30s]: Tag "${tag.name}" already crossed START threshold (${startThreshold}) at ${r.ts} (direction: ${isFall ? 'fall' : 'rise'}). Intervals will start from this point.`);
+                    break;
+                }
+            }
+        }
+    }
+
+    const effectiveBaseStartMs = crossedStartMs || startMs;
+    let totalExpectedBuckets = Math.max(1, Math.ceil((endMs - effectiveBaseStartMs) / intervalMs));
+    if (totalExpectedBuckets > CONFIG.MAX_PERIODIC_REPEATS) {
+        console.warn(`[BatchLine PrintLabel Warning]: Capping expected buckets from ${totalExpectedBuckets} to max ${CONFIG.MAX_PERIODIC_REPEATS}`);
+        totalExpectedBuckets = CONFIG.MAX_PERIODIC_REPEATS;
     }
 
     const nowMs = Date.now();
@@ -1567,6 +1632,9 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
             ref_instruction: ctx.refInstruction,
             ref_start_time: ctx.refStartTime,
             ref_end_time: ctx.refEndTime,
+            start_threshold: startThreshold,
+            direction: startThreshold !== null ? (isFall ? 'fall' : 'rise') : null,
+            stop_threshold: stopThreshold,
             interval: intervalConfig.rawInterval,
             interval_ms: intervalMs,
             metric: metric.toUpperCase(),
@@ -1585,10 +1653,57 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
         try {
             const currentNowMs = Date.now();
 
+            // 1. If START threshold specified, ensure value has crossed threshold before starting repeats
+            if (crossedStartMs === null) {
+                const { rows: searchRows } = await query(`
+                    SELECT ts, value FROM readings
+                    WHERE tag_id = $1 AND ts >= $2::timestamptz AND ts <= $3::timestamptz
+                    ORDER BY ts ASC;
+                `, [tag.id, actualStart, new Date(currentNowMs)]);
+
+                for (let i = 0; i < searchRows.length; i++) {
+                    const r = searchRows[i];
+                    if (r.value === null || r.value === undefined) continue;
+                    const val = Number(r.value);
+                    if (isNaN(val)) continue;
+
+                    if (!armed) {
+                        if (isFall && val > startThreshold) armed = true;
+                        if (!isFall && val < startThreshold) armed = true;
+                    } else {
+                        const crossed = isFall ? (val <= startThreshold) : (val >= startThreshold);
+                        if (crossed) {
+                            crossedStartMs = new Date(r.ts).getTime();
+                            console.log(`[BatchLine Future 30s]: Tag "${tag.name}" crossed START threshold (${startThreshold}) at ${r.ts} (direction: ${isFall ? 'fall' : 'rise'}). Starting interval collection.`);
+                            break;
+                        }
+                    }
+                }
+
+                if (crossedStartMs === null) {
+                    if (currentNowMs >= endMs) {
+                        console.log(`[BatchLine Future 30s]: Tag "${tag.name}" never crossed START threshold (${startThreshold}) before RefEndTime (${actualEnd.toISOString()}). Finishing.`);
+                        cleanupJob();
+                    } else {
+                        console.log(`[BatchLine Future 30s]: Tag "${tag.name}" has not yet crossed START threshold (${startThreshold}) [direction: ${isFall ? 'fall' : 'rise'}, armed: ${armed}]. Waiting for threshold crossing...`);
+                    }
+                    return;
+                }
+            }
+
+            const effectiveStartMs = crossedStartMs;
+            const remainingDurationMs = endMs - effectiveStartMs;
+            if (remainingDurationMs > 0) {
+                totalExpectedBuckets = Math.min(
+                    Math.max(1, Math.ceil(remainingDurationMs / intervalMs)),
+                    CONFIG.MAX_PERIODIC_REPEATS
+                );
+            }
+
             const bucketsToProcess = [];
             while (nextBucketIndex < totalExpectedBuckets) {
-                const bStartMs = startMs + nextBucketIndex * intervalMs;
-                const bEndMs = Math.min(startMs + (nextBucketIndex + 1) * intervalMs, endMs);
+                const bStartMs = effectiveStartMs + nextBucketIndex * intervalMs;
+                const bEndMs = Math.min(effectiveStartMs + (nextBucketIndex + 1) * intervalMs, endMs);
 
                 // Bucket is ready if its window has completed or now >= endMs
                 if (currentNowMs >= bEndMs || currentNowMs >= endMs) {
@@ -1598,6 +1713,11 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
                         bEndMs
                     });
                     nextBucketIndex++;
+
+                    // Limit batch size per dispatch
+                    if (bucketsToProcess.length >= (CONFIG.MAX_PERIODIC_REPEATS || 50)) {
+                        break;
+                    }
                 } else {
                     break;
                 }
@@ -1623,6 +1743,8 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
             `, [tag.id, rangeStart, rangeEnd]);
 
             const setOfValues = [];
+            let hitStop = false;
+
             for (const b of bucketsToProcess) {
                 const isLast = (b.index === totalExpectedBuckets - 1);
                 const bucketReadings = readings.filter(r => {
@@ -1644,6 +1766,15 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
                     executed_timestamp: formatExecutedTimestamp(new Date(b.bStartMs)),
                     executed_user_email: ctx.triggeredByEmail || null
                 });
+
+                if (stopThreshold !== null && resolvedVal !== null) {
+                    const reachedStop = (stopDirection === 'rise') ? (resolvedVal >= stopThreshold) : (resolvedVal <= stopThreshold);
+                    if (reachedStop) {
+                        console.log(`[BatchLine Future 30s]: Tag "${tag.name}" reached STOP threshold (${stopThreshold}) at bucket repeat ${b.index + 1}.`);
+                        hitStop = true;
+                        break;
+                    }
+                }
             }
 
             console.log(`[BatchLine PrintLabel 30s]: Dispatching set of ${setOfValues.length} bucketed values (repeats ${setOfValues[0].repeat_no}..${setOfValues[setOfValues.length - 1].repeat_no}) for tag "${tag.name}" (batch: ${ctx.batchId})...`);
@@ -1656,10 +1787,22 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
             });
 
             if (!cbResult?.ok) {
-                await reportError(`[BatchLine PrintLabel 30s]: Failed to push set of ${setOfValues.length} bucketed values`, ctx, cbResult?.data?.error?.detail || cbResult?.error);
+                const detail = cbResult?.data?.error?.detail || cbResult?.error || '';
+                if (String(detail).toLowerCase().includes('cannot exceed the target repeat')) {
+                    console.log(`[BatchLine Future 30s]: Instruction ${ctx.refInstruction} reached Target Repeat limit in BatchLine. Stopping job.`);
+                    cleanupJob();
+                    return;
+                }
+                await reportError(`[BatchLine PrintLabel 30s]: Failed to push set of ${setOfValues.length} bucketed values`, ctx, detail);
             }
 
-            if (nextBucketIndex >= totalExpectedBuckets || currentNowMs >= endMs) {
+            // If there are still older backlogged buckets, process next chunk immediately
+            const nextBucketEndMs = effectiveStartMs + (nextBucketIndex + 1) * intervalMs;
+            if (currentNowMs >= nextBucketEndMs && nextBucketIndex < totalExpectedBuckets && !hitStop) {
+                setImmediate(processCompletedBuckets);
+            }
+
+            if (hitStop || nextBucketIndex >= totalExpectedBuckets || currentNowMs >= endMs) {
                 cleanupJob();
             }
         } catch (err) {
@@ -1680,6 +1823,11 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
         if (intervalId) clearInterval(intervalId);
         if (endTimeoutId) clearTimeout(endTimeoutId);
         activeFutureIntervalJobs.delete(jobKey);
+    };
+
+    const stop = async () => {
+        cleanupJob();
+        await processCompletedBuckets();
     };
 
     const CADENCE_MS = 30000;
@@ -1709,12 +1857,291 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
     const jobRecord = {
         jobKey,
         refInstruction: ctx.refInstruction,
+        cleanRefInstruction: cleanRef,
         batchId: ctx.batchId,
         tagId: tag.id,
         tagName: tag.name,
+        cleanup: cleanupJob,
+        stop,
+        getNextBucketIndex: () => nextBucketIndex,
         get startTimeoutId() { return startTimeoutId; },
         get intervalId() { return intervalId; },
         get endTimeoutId() { return endTimeoutId; },
+        startedAt: new Date()
+    };
+
+    activeFutureIntervalJobs.set(jobKey, jobRecord);
+}
+
+/**
+ * Mode: Continuous Interval Record Mode (RefEndTime is omitted)
+ * Immediately acknowledges HTTP webhook and starts a continuous 30-second cadence dispatcher,
+ * sending sets of bucketed values to BatchLine every 30 seconds continuously until
+ * a STOP request mentioning the RefInstruction is received.
+ */
+async function handleContinuousIntervalMode(ctx, res, tag, actualStart, intervalConfig, startThreshold = null, startDirection = null) {
+    const metric = resolveMetric(ctx.refType);
+    const intervalMs = intervalConfig.intervalMs;
+    const startMs = actualStart.getTime();
+
+    const cleanRef = cleanInstructionId(ctx.refInstruction);
+    const jobKey = `${ctx.batchId}_${cleanRef}`;
+
+    // Cancel previous job for this instruction if running
+    if (activeFutureIntervalJobs.has(jobKey)) {
+        console.log(`[BatchLine Continuous]: Replacing existing job for ${jobKey}`);
+        const prevJob = activeFutureIntervalJobs.get(jobKey);
+        if (typeof prevJob.cleanup === 'function') prevJob.cleanup();
+        activeFutureIntervalJobs.delete(jobKey);
+    }
+
+    // Determine initial lastKnown reading
+    const { rows: initialRows } = await query(`
+        SELECT value FROM readings
+        WHERE tag_id = $1 AND ts <= $2::timestamptz
+        ORDER BY ts DESC LIMIT 1;
+    `, [tag.id, actualStart]);
+
+    let lastKnown = 0;
+    let initialVal = null;
+    if (initialRows.length > 0 && initialRows[0].value !== null) {
+        lastKnown = Number(initialRows[0].value);
+        initialVal = lastKnown;
+    } else {
+        const { rows: snapRows } = await query(`
+            SELECT value FROM snapshots WHERE tag_id = $1 LIMIT 1;
+        `, [tag.id]);
+        if (snapRows.length > 0 && snapRows[0].value !== null) {
+            lastKnown = Number(snapRows[0].value);
+            initialVal = lastKnown;
+        }
+    }
+
+    let effectiveDirection = startDirection;
+    if (startThreshold !== null && !effectiveDirection) {
+        if (initialVal !== null) {
+            effectiveDirection = (initialVal <= startThreshold) ? 'rise' : 'fall';
+        } else {
+            effectiveDirection = 'rise';
+        }
+    }
+    const isFall = (effectiveDirection === 'fall' || effectiveDirection === 'down');
+
+    let crossedStartMs = (startThreshold === null) ? startMs : null;
+    let armed = false;
+    if (startThreshold !== null) {
+        if (initialVal !== null) {
+            armed = isFall ? (initialVal > startThreshold) : (initialVal < startThreshold);
+        }
+    }
+
+    // Acknowledge BatchLine webhook immediately with HTTP 200
+    if (!res.headersSent) {
+        res.json({
+            status: 'scheduled',
+            case: 3,
+            mode: 'record_interval_continuous',
+            message: startThreshold !== null
+                ? `Continuous periodic collection scheduled for instruction ${ctx.refInstruction}. Will begin recording bucketed values (${intervalConfig.rawInterval}) once ${tag.name} crosses START threshold (${startThreshold}) [direction: ${isFall ? 'fall' : 'rise'}].`
+                : `Continuous periodic collection started for instruction ${ctx.refInstruction}. Bucketed values (${intervalConfig.rawInterval}) will be sent every 30s continuously until a stop request is received.`,
+            batch_id: ctx.batchId,
+            tag: tag.name,
+            ref_instruction: ctx.refInstruction,
+            ref_start_time: ctx.refStartTime,
+            ref_end_time: null,
+            start_threshold: startThreshold,
+            direction: startThreshold !== null ? (isFall ? 'fall' : 'rise') : null,
+            interval: intervalConfig.rawInterval,
+            interval_ms: intervalMs,
+            metric: metric.toUpperCase(),
+            transmission_cadence_sec: 30
+        });
+    }
+
+    let nextBucketIndex = 0;
+    let isProcessing = false;
+
+    const processCompletedBuckets = async () => {
+        if (isProcessing) return;
+        isProcessing = true;
+
+        try {
+            const currentNowMs = Date.now();
+
+            // 1. If START threshold specified, ensure value has crossed threshold before starting repeats
+            if (crossedStartMs === null) {
+                const { rows: searchRows } = await query(`
+                    SELECT ts, value FROM readings
+                    WHERE tag_id = $1 AND ts >= $2::timestamptz AND ts <= $3::timestamptz
+                    ORDER BY ts ASC;
+                `, [tag.id, actualStart, new Date(currentNowMs)]);
+
+                for (let i = 0; i < searchRows.length; i++) {
+                    const r = searchRows[i];
+                    if (r.value === null || r.value === undefined) continue;
+                    const val = Number(r.value);
+                    if (isNaN(val)) continue;
+
+                    if (!armed) {
+                        if (isFall && val > startThreshold) armed = true;
+                        if (!isFall && val < startThreshold) armed = true;
+                    } else {
+                        const crossed = isFall ? (val <= startThreshold) : (val >= startThreshold);
+                        if (crossed) {
+                            crossedStartMs = new Date(r.ts).getTime();
+                            console.log(`[BatchLine Continuous]: Tag "${tag.name}" crossed START threshold (${startThreshold}) at ${r.ts} (direction: ${isFall ? 'fall' : 'rise'}). Starting interval collection.`);
+                            break;
+                        }
+                    }
+                }
+
+                if (crossedStartMs === null) {
+                    console.log(`[BatchLine Continuous]: Tag "${tag.name}" has not yet crossed START threshold (${startThreshold}) [direction: ${isFall ? 'fall' : 'rise'}, armed: ${armed}]. Waiting for threshold crossing...`);
+                    return;
+                }
+            }
+
+            const effectiveStartMs = crossedStartMs;
+            const bucketsToProcess = [];
+
+            while (true) {
+                const bStartMs = effectiveStartMs + nextBucketIndex * intervalMs;
+                const bEndMs = bStartMs + intervalMs;
+
+                // Bucket is ready once its full window has elapsed
+                if (currentNowMs >= bEndMs) {
+                    bucketsToProcess.push({
+                        index: nextBucketIndex,
+                        bStartMs,
+                        bEndMs
+                    });
+                    nextBucketIndex++;
+
+                    // Limit batch size per dispatch to prevent massive payloads on large backlogs
+                    if (bucketsToProcess.length >= (CONFIG.MAX_PERIODIC_REPEATS || 50)) {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            if (bucketsToProcess.length === 0) return;
+
+            const rangeStart = new Date(bucketsToProcess[0].bStartMs);
+            const rangeEnd = new Date(bucketsToProcess[bucketsToProcess.length - 1].bEndMs);
+
+            const { rows: readings } = await query(`
+                SELECT ts, value
+                FROM readings
+                WHERE tag_id = $1
+                  AND ts >= $2::timestamptz
+                  AND ts <= $3::timestamptz
+                ORDER BY ts ASC;
+            `, [tag.id, rangeStart, rangeEnd]);
+
+            const setOfValues = [];
+            for (const b of bucketsToProcess) {
+                const bucketReadings = readings.filter(r => {
+                    const rMs = new Date(r.ts).getTime();
+                    return rMs >= b.bStartMs && rMs < b.bEndMs;
+                });
+
+                let resolvedVal;
+                if (bucketReadings.length > 0) {
+                    resolvedVal = computeMetricValue(bucketReadings.map(r => Number(r.value)), metric);
+                    lastKnown = resolvedVal;
+                } else {
+                    resolvedVal = lastKnown;
+                }
+
+                setOfValues.push({
+                    repeat_no: b.index + 1,
+                    value: formatReadingValue(resolvedVal, tag.display_digits),
+                    executed_timestamp: formatExecutedTimestamp(new Date(b.bStartMs)),
+                    executed_user_email: ctx.triggeredByEmail || null
+                });
+            }
+
+            console.log(`[BatchLine Continuous 30s]: Dispatching set of ${setOfValues.length} bucketed values (repeats ${setOfValues[0].repeat_no}..${setOfValues[setOfValues.length - 1].repeat_no}) for tag "${tag.name}" (batch: ${ctx.batchId}, instruction: ${ctx.refInstruction})...`);
+
+            const cbResult = await sendBatchLineInstructionUpdate({
+                refInstruction: ctx.refInstruction,
+                batchId: ctx.batchId,
+                callbackKey: ctx.callbackKey,
+                actualResult: setOfValues
+            });
+
+            if (!cbResult?.ok) {
+                const detail = cbResult?.data?.error?.detail || cbResult?.error || '';
+                if (String(detail).toLowerCase().includes('cannot exceed the target repeat')) {
+                    console.log(`[BatchLine Continuous]: Instruction ${ctx.refInstruction} reached Target Repeat limit in BatchLine. Stopping continuous collection.`);
+                    cleanup();
+                    activeFutureIntervalJobs.delete(jobKey);
+                    return;
+                }
+                await reportError(`[BatchLine Continuous 30s]: Failed to push set of ${setOfValues.length} bucketed values`, ctx, detail);
+            }
+
+            // If there are still older backlogged buckets, process next chunk immediately
+            const nextBucketEndMs = effectiveStartMs + (nextBucketIndex + 1) * intervalMs;
+            if (Date.now() >= nextBucketEndMs) {
+                setImmediate(processCompletedBuckets);
+            }
+        } catch (err) {
+            console.error('[BatchLine Continuous 30s Error]:', err);
+            await reportError(`[BatchLine Continuous 30s Error]: ${err.message}`, ctx, err.stack);
+        } finally {
+            isProcessing = false;
+        }
+    };
+
+    let intervalId = null;
+    let startTimeoutId = null;
+
+    const cleanup = () => {
+        if (startTimeoutId) clearTimeout(startTimeoutId);
+        if (intervalId) clearInterval(intervalId);
+    };
+
+    const stop = async () => {
+        cleanup();
+        console.log(`[BatchLine Continuous]: Stopping continuous job for instruction ${ctx.refInstruction} (${tag.name}). Flushing final buckets...`);
+        await processCompletedBuckets();
+        console.log(`[BatchLine Continuous]: Final buckets flushed. Total repeats sent: ${nextBucketIndex}.`);
+    };
+
+    const CADENCE_MS = 30000;
+    const nowMs = Date.now();
+
+    if (startMs <= nowMs) {
+        // RefStartTime is in past or now: immediately check threshold / push completed buckets
+        console.log(`[BatchLine Continuous]: RefStartTime (${actualStart.toISOString()}) is past/now. Starting dispatcher...`);
+        setImmediate(processCompletedBuckets);
+        intervalId = setInterval(processCompletedBuckets, CADENCE_MS);
+    } else {
+        // RefStartTime is in future: schedule to start when RefStartTime arrives
+        const msUntilStart = startMs - nowMs;
+        console.log(`[BatchLine Continuous]: RefStartTime (${actualStart.toISOString()}) is in future. Waiting ${Math.round(msUntilStart / 1000)}s to begin 30s cadence...`);
+        startTimeoutId = setTimeout(() => {
+            console.log(`[BatchLine Continuous]: RefStartTime reached (${actualStart.toISOString()}). Starting 30s cadence dispatcher.`);
+            setImmediate(processCompletedBuckets);
+            intervalId = setInterval(processCompletedBuckets, CADENCE_MS);
+        }, msUntilStart);
+    }
+
+    const jobRecord = {
+        jobKey,
+        batchId: ctx.batchId,
+        refInstruction: ctx.refInstruction,
+        cleanRefInstruction: cleanRef,
+        tagId: tag.id,
+        tagName: tag.name,
+        cleanup,
+        stop,
+        getNextBucketIndex: () => nextBucketIndex,
+        get startTimeoutId() { return startTimeoutId; },
+        get intervalId() { return intervalId; },
         startedAt: new Date()
     };
 
@@ -1732,29 +2159,95 @@ async function handlePrintLabelInstruction(req, res) {
             callback_key: parsed.callbackKey,
             ref_instruction: parsed.refInstruction,
             parameters: parsed.parameters,
-            parsed_dates: parsed.parsedDates
+            parsed_dates: parsed.parsedDates,
+            incoming_instruction_ids: parsed.incomingInstructionIds
         }, null, 2));
+
+        // 1. Check if this request is a STOP signal for an active continuous or future interval job
+        if (parsed.batchId && parsed.incomingInstructionIds?.length > 0) {
+            const stoppedJobs = [];
+            for (const instId of parsed.incomingInstructionIds) {
+                const cleanInst = cleanInstructionId(instId);
+                const jobKey = `${parsed.batchId}_${cleanInst}`;
+
+                let targetJobKey = null;
+                if (activeFutureIntervalJobs.has(jobKey)) {
+                    targetJobKey = jobKey;
+                } else {
+                    for (const [k, job] of activeFutureIntervalJobs.entries()) {
+                        if (job.batchId === parsed.batchId && (job.cleanRefInstruction === cleanInst || cleanInstructionId(job.refInstruction) === cleanInst)) {
+                            targetJobKey = k;
+                            break;
+                        }
+                    }
+                }
+
+                if (targetJobKey) {
+                    const job = activeFutureIntervalJobs.get(targetJobKey);
+                    console.log(`[BatchLine PrintLabel]: Received STOP signal for instruction ${job.refInstruction} on batch ${parsed.batchId}. Stopping job.`);
+                    if (typeof job.stop === 'function') {
+                        await job.stop();
+                    } else if (typeof job.cleanup === 'function') {
+                        job.cleanup();
+                    }
+                    activeFutureIntervalJobs.delete(targetJobKey);
+                    stoppedJobs.push({
+                        refInstruction: job.refInstruction,
+                        totalRepeatsSent: typeof job.getNextBucketIndex === 'function' ? job.getNextBucketIndex() : null
+                    });
+                }
+            }
+
+            if (stoppedJobs.length > 0) {
+                return res.json({
+                    status: 'stopped',
+                    message: `Continuous periodic collection stopped for instruction(s): ${stoppedJobs.map(j => j.refInstruction).join(', ')}`,
+                    batch_id: parsed.batchId,
+                    stopped_jobs: stoppedJobs
+                });
+            }
+
+            // If payload has no RefElement and no RefStartTime, but mentions instructions,
+            // acknowledge gracefully (e.g. stop signal received when no job was active or manual value input)
+            if (!parsed.parameters.RefElement && !parsed.parameters.RefStartTime) {
+                console.log(`[BatchLine PrintLabel]: Received instruction update for [${parsed.incomingInstructionIds.join(', ')}] on batch ${parsed.batchId} with no active job. Acknowledged.`);
+                return res.json({
+                    status: 'acknowledged',
+                    message: `No active continuous job found for instruction(s) ${parsed.incomingInstructionIds.join(', ')}`,
+                    batch_id: parsed.batchId
+                });
+            }
+        }
 
         if (!parsed.parameters.RefElement) {
             await reportError('[BatchLine PrintLabel]: Missing required RefElement in instruction parameters', { batchId: parsed.batchId, callbackKey: parsed.callbackKey });
             return res.status(400).json({ error: 'Missing required RefElement in instruction parameters' });
         }
 
-        if (!parsed.parameters.RefStartTime || !parsed.parameters.RefEndTime) {
-            await reportError('[BatchLine PrintLabel]: Missing required RefStartTime or RefEndTime in instruction parameters', { batchId: parsed.batchId, callbackKey: parsed.callbackKey });
-            return res.status(400).json({ error: 'Missing required RefStartTime or RefEndTime in instruction parameters' });
+        if (!parsed.parameters.RefStartTime) {
+            await reportError('[BatchLine PrintLabel]: Missing required RefStartTime in instruction parameters', { batchId: parsed.batchId, callbackKey: parsed.callbackKey });
+            return res.status(400).json({ error: 'Missing required RefStartTime in instruction parameters' });
         }
 
         const startDate = parseBatchLineDate(parsed.parameters.RefStartTime);
-        const endDate = parseBatchLineDate(parsed.parameters.RefEndTime);
-
-        if (!startDate || !endDate || isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-            const errMsg = `Invalid date format for RefStartTime ("${parsed.parameters.RefStartTime}") or RefEndTime ("${parsed.parameters.RefEndTime}")`;
+        if (!startDate || isNaN(startDate.getTime())) {
+            const errMsg = `Invalid date format for RefStartTime ("${parsed.parameters.RefStartTime}")`;
             await reportError(`[BatchLine PrintLabel]: ${errMsg}`, { batchId: parsed.batchId, callbackKey: parsed.callbackKey });
             return res.status(400).json({ error: errMsg });
         }
 
-        const [actualStart, actualEnd] = startDate > endDate ? [endDate, startDate] : [startDate, endDate];
+        let actualStart = startDate;
+        let actualEnd = null;
+
+        if (parsed.parameters.RefEndTime) {
+            const endDate = parseBatchLineDate(parsed.parameters.RefEndTime);
+            if (!endDate || isNaN(endDate.getTime())) {
+                const errMsg = `Invalid date format for RefEndTime ("${parsed.parameters.RefEndTime}")`;
+                await reportError(`[BatchLine PrintLabel]: ${errMsg}`, { batchId: parsed.batchId, callbackKey: parsed.callbackKey });
+                return res.status(400).json({ error: errMsg });
+            }
+            [actualStart, actualEnd] = startDate > endDate ? [endDate, startDate] : [startDate, endDate];
+        }
 
         ctx = {
             topic: parsed.topic,
@@ -1763,7 +2256,7 @@ async function handlePrintLabelInstruction(req, res) {
             refElement: parsed.parameters.RefElement,
             refInstruction: parsed.refInstruction,
             refStartTime: actualStart.toISOString(),
-            refEndTime: actualEnd.toISOString(),
+            refEndTime: actualEnd ? actualEnd.toISOString() : null,
             refType: parsed.parameters.RefType,
             triggeredByEmail: parsed.user?.executedUserEmail || req.body.TriggeredByEmail || null,
             instructionDescription: '',
@@ -1785,7 +2278,31 @@ async function handlePrintLabelInstruction(req, res) {
         const intervalConfig = parseIntervalString(parsed.parameters.INTERVAL);
         const durationMinutes = parseDurationString(parsed.parameters.DURATION);
 
-        // Mode 1: Profile Mode (START is specified)
+        // Mode 1: Continuous Interval Mode (RefEndTime is omitted and INTERVAL is specified)
+        if (!actualEnd) {
+            if (!intervalConfig) {
+                const errMsg = 'Missing required RefEndTime in instruction parameters (or INTERVAL for continuous periodic collection)';
+                await reportError(`[BatchLine PrintLabel]: ${errMsg}`, ctx);
+                return res.status(400).json({ error: errMsg });
+            }
+            const startThreshold = hasStart ? parseFloat(rawStart) : null;
+            const startDirection = parsed.parameters.DIRECTION ? String(parsed.parameters.DIRECTION).trim().toLowerCase() : null;
+            console.log(`[BatchLine PrintLabel]: Identified Continuous Interval Mode for tag "${tag.name}" (batch: ${ctx.batchId}, START=${startThreshold ?? 'none'}, DIRECTION=${startDirection ?? 'auto'}, INTERVAL=${intervalConfig.rawInterval}, Metric=${resolveMetric(ctx.refType)})`);
+            return await handleContinuousIntervalMode(ctx, res, tag, actualStart, intervalConfig, startThreshold, startDirection);
+        }
+
+        // Mode 2: Future Interval Record Mode (INTERVAL specified and RefEndTime is in future)
+        // Checked BEFORE historical Profile/Record modes so ongoing/future interval recordings
+        // push past intervals immediately and continue pushing every 30s until RefEndTime.
+        if (intervalConfig && actualEnd.getTime() > Date.now()) {
+            const startThreshold = hasStart ? parseFloat(rawStart) : null;
+            const stopThreshold = hasStop ? parseFloat(rawStop) : null;
+            const startDirection = parsed.parameters.DIRECTION ? String(parsed.parameters.DIRECTION).trim().toLowerCase() : null;
+            console.log(`[BatchLine PrintLabel]: Identified Future Interval Record Mode for tag "${tag.name}" (batch: ${ctx.batchId}, START=${startThreshold ?? 'none'}, STOP=${stopThreshold ?? 'none'}, INTERVAL=${intervalConfig.rawInterval}, Metric=${resolveMetric(ctx.refType)}, RefEndTime in future: ${actualEnd.toISOString()})`);
+            return await handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig, startThreshold, startDirection, stopThreshold);
+        }
+
+        // Mode 3: Profile Mode (START is specified and RefEndTime is in past/now)
         if (hasStart) {
             const profileConfig = {
                 start: parseFloat(rawStart),
@@ -1798,13 +2315,7 @@ async function handlePrintLabelInstruction(req, res) {
             return await handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileConfig, intervalConfig);
         }
 
-        // Mode 2: Future Interval Record Mode (INTERVAL specified and RefEndTime is in future)
-        if (intervalConfig && actualEnd.getTime() > Date.now()) {
-            console.log(`[BatchLine PrintLabel]: Identified Future Interval Record Mode for tag "${tag.name}" (batch: ${ctx.batchId}, INTERVAL=${intervalConfig.rawInterval}, RefEndTime in future: ${actualEnd.toISOString()})`);
-            return await handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig);
-        }
-
-        // Mode 3: Record Mode (Default when START is omitted; uses interval if specified, or downsamples to MAX_PROFILE_SAMPLES)
+        // Mode 4: Record Mode (Default when START is omitted and RefEndTime is in past/now; uses interval if specified, or downsamples to MAX_PROFILE_SAMPLES)
         console.log(`[BatchLine PrintLabel]: Identified Record Mode for tag "${tag.name}" (batch: ${ctx.batchId}, INTERVAL=${intervalConfig?.rawInterval || 'none'}, Metric=${resolveMetric(ctx.refType)})`);
         return await handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig);
     } catch (err) {
