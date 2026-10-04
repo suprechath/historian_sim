@@ -5,6 +5,9 @@ export function useHistorianStream() {
         clock: null,
         running: true,
         speed: 1,
+        mode: 'continuous',
+        assignedBatchId: null,
+        singleBatchStatus: 'idle',
         reactors: { R1: { phase: 'Idle' }, R2: { phase: 'Idle' }, R3: { phase: 'Idle' } },
         tags: []
     });

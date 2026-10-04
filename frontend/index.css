@@ -174,6 +174,54 @@ header {
     color: #e8eaeb;
 }
 
+/* Header Batch Mode Indicator Chip */
+.batch-mode-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 9px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 500;
+    border: 1px solid var(--edge-dark);
+    background: var(--field);
+    color: var(--ink);
+    transition: all 0.2s ease;
+}
+
+.batch-mode-chip.single {
+    border-color: #635091;
+    background: rgba(99, 80, 145, 0.12);
+}
+
+.batch-mode-chip .mode-chip-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ok);
+    flex-shrink: 0;
+}
+
+.batch-mode-chip.single .mode-chip-dot {
+    background: #7a66b8;
+    box-shadow: 0 0 6px #7a66b8;
+}
+
+.batch-mode-chip .mode-chip-text {
+    font-size: 11px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.batch-mode-chip .mode-status-sub {
+    font-size: 9.5px;
+    color: var(--ink-3);
+    text-transform: uppercase;
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 600;
+}
+
 /* Main Layout */
 main {
     padding: 14px 18px 36px;
@@ -385,6 +433,319 @@ main {
 .tsel button[aria-pressed="true"] {
     background: var(--ink);
     color: #ffffff;
+}
+
+/* Custom Time Range Toolbar & Active Indicator Bar */
+.custom-range-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    background: #1e293b;
+    color: #f1f5f9;
+    padding: 6px 12px;
+    border-radius: 4px;
+    margin-bottom: 8px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+    border-left: 3.5px solid #3b82f6;
+}
+
+.cr-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    flex-wrap: wrap;
+}
+
+.cr-icon {
+    font-size: 12px;
+}
+
+.cr-label {
+    font-weight: 600;
+    color: #94a3b8;
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.4px;
+}
+
+.cr-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(255, 255, 255, 0.08);
+    padding: 2px 7px;
+    border-radius: 3px;
+    font-family: var(--mono, monospace);
+    font-size: 11px;
+}
+
+.cr-tag.time1 b {
+    color: #60a5fa;
+}
+
+.cr-tag.time2 b {
+    color: #38bdf8;
+}
+
+.cr-arrow {
+    color: #64748b;
+    font-weight: bold;
+}
+
+.cr-duration {
+    color: #cbd5e1;
+    font-weight: 600;
+}
+
+.cr-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.cr-actions button {
+    font: inherit;
+    font-size: 10.5px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.1);
+    color: #f8fafc;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.cr-actions button:hover {
+    background: rgba(255, 255, 255, 0.22);
+    border-color: rgba(255, 255, 255, 0.35);
+}
+
+.cr-actions button.cr-reset-btn {
+    background: #dc2626;
+    border-color: #ef4444;
+    color: #ffffff;
+    font-weight: 600;
+}
+
+.cr-actions button.cr-reset-btn:hover {
+    background: #b91c1c;
+}
+
+.cr-actions button.cr-edit-btn {
+    background: #2563eb;
+    border-color: #3b82f6;
+    color: #ffffff;
+}
+
+/* Custom Range Configuration Panel */
+.custom-range-panel {
+    background: #c3cbd0;
+    border: 1px solid var(--edge-dark);
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.cr-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.cr-inputs-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+}
+
+.cr-input-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.cr-input-group label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--ink);
+}
+
+.cr-badge {
+    font-size: 9.5px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 2px;
+    color: #ffffff;
+    text-transform: uppercase;
+}
+
+.cr-badge.time1-badge {
+    background: #2563eb;
+}
+
+.cr-badge.time2-badge {
+    background: #0284c7;
+}
+
+.cr-input-with-action {
+    display: flex;
+    gap: 6px;
+}
+
+.cr-input-group input[type="datetime-local"] {
+    flex: 1;
+    font-family: inherit;
+    font-size: 12px;
+    padding: 4px 8px;
+    border: 1px solid var(--edge-dark);
+    border-radius: 3px;
+    background: #ffffff;
+    color: var(--ink);
+}
+
+.cr-input-group input[type="datetime-local"]:focus {
+    outline: none;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+}
+
+.cr-now-btn {
+    font: inherit;
+    font-size: 11px;
+    padding: 3px 8px;
+    white-space: nowrap;
+    border: 1px solid var(--edge-dark);
+    background: var(--panel);
+    color: var(--ink);
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.cr-now-btn:hover {
+    background: #ffffff;
+}
+
+.cr-presets-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    padding-top: 4px;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.cr-preset-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ink-2);
+}
+
+.cr-presets-row button {
+    font: inherit;
+    font-size: 10.5px;
+    padding: 2px 7px;
+    border: 1px solid var(--edge);
+    border-radius: 3px;
+    background: var(--panel);
+    color: var(--ink);
+    cursor: pointer;
+}
+
+.cr-presets-row button:hover {
+    background: #ffffff;
+    border-color: var(--edge-dark);
+}
+
+.cr-phase-select-wrap {
+    margin-left: auto;
+}
+
+.cr-phase-select-wrap select {
+    font: inherit;
+    font-size: 11px;
+    padding: 2px 8px;
+    border: 1px solid var(--edge);
+    border-radius: 3px;
+    background: #ffffff;
+    color: var(--ink);
+    cursor: pointer;
+    max-width: 260px;
+}
+
+.cr-form-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding-top: 6px;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.cr-tip {
+    font-size: 10.5px;
+    color: var(--ink-2);
+}
+
+.cr-btn-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+}
+
+.cr-cancel-btn {
+    font: inherit;
+    font-size: 11px;
+    padding: 4px 10px;
+    border: 1px solid var(--edge-dark);
+    border-radius: 3px;
+    background: var(--panel);
+    color: var(--ink);
+    cursor: pointer;
+}
+
+.cr-reset-live-btn {
+    font: inherit;
+    font-size: 11px;
+    padding: 4px 10px;
+    border: 1px solid #ef4444;
+    border-radius: 3px;
+    background: #fee2e2;
+    color: #b91c1c;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.cr-apply-btn {
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 14px;
+    border: 1px solid #1d4ed8;
+    border-radius: 3px;
+    background: #2563eb;
+    color: #ffffff;
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+.cr-apply-btn:hover {
+    background: #1d4ed8;
+}
+
+.range-picker button.custom-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
 }
 
 /* Canvas Area & Interactive Tooltip */
@@ -890,6 +1251,406 @@ td.u {
     background: var(--alarm);
     color: #ffffff;
     border-color: var(--alarm);
+}
+
+/* -------------------------------------------------------------
+   Custom Batch Control Panel & Section Tabs Styling
+   ------------------------------------------------------------- */
+.demo-section-tabs {
+    display: flex;
+    border: 1px solid var(--edge-dark);
+    border-radius: 2px;
+    overflow: hidden;
+    background: var(--field);
+}
+
+.demo-section-tabs .section-tab {
+    font: inherit;
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border: 0;
+    border-right: 1px solid var(--edge);
+    cursor: pointer;
+    background: transparent;
+    color: var(--ink-2);
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.demo-section-tabs .section-tab:last-child {
+    border-right: 0;
+}
+
+.demo-section-tabs .section-tab:hover {
+    background: var(--panel);
+    color: var(--ink);
+}
+
+.demo-section-tabs .section-tab.active {
+    background: var(--ink);
+    color: #ffffff;
+}
+
+.batch-ctrl-container,
+.faults-ctrl-container {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    flex: 1;
+}
+
+.demo-vessel-tabs-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 2px 0;
+}
+
+.vessel-label {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--ink-2);
+}
+
+/* Batch Mode Selector */
+.batch-mode-selector {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 4px 6px;
+    background: var(--field);
+    border: 1px solid var(--edge);
+    border-radius: 3px;
+}
+
+.batch-selector-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ink-2);
+}
+
+.batch-mode-toggle-group {
+    display: flex;
+    border: 1px solid var(--edge-dark);
+    border-radius: 2px;
+    overflow: hidden;
+    background: var(--panel);
+}
+
+.mode-toggle-btn {
+    font: inherit;
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border: 0;
+    border-right: 1px solid var(--edge);
+    cursor: pointer;
+    background: transparent;
+    color: var(--ink-2);
+    transition: all 0.15s ease;
+}
+
+.mode-toggle-btn:last-child {
+    border-right: 0;
+}
+
+.mode-toggle-btn:hover:not(:disabled) {
+    background: var(--field);
+    color: var(--ink);
+}
+
+.mode-toggle-btn.active {
+    background: var(--ink);
+    color: #ffffff;
+}
+
+/* Batch Input & Form Box */
+.batch-form-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    background: var(--panel-2);
+    border: 1px solid var(--edge);
+    border-radius: 3px;
+}
+
+.batch-input-label-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ink);
+}
+
+.btn-link-preset {
+    background: transparent;
+    border: 0;
+    color: #3b5998;
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: 600;
+    text-decoration: underline;
+    padding: 0;
+}
+
+.btn-link-preset:hover {
+    color: var(--ink);
+}
+
+.batch-input-field-wrap {
+    width: 100%;
+}
+
+.batch-text-input {
+    width: 100%;
+    padding: 5px 8px;
+    font-size: 12px;
+    border: 1px solid var(--edge-dark);
+    border-radius: 2px;
+    background: #ffffff;
+    color: var(--ink);
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.batch-text-input:focus {
+    border-color: var(--ink);
+    box-shadow: 0 0 0 2px rgba(27, 33, 36, 0.15);
+}
+
+.batch-check-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10.5px;
+    color: var(--ink-2);
+    cursor: pointer;
+    user-select: none;
+    margin-top: 2px;
+}
+
+.batch-check-label input {
+    cursor: pointer;
+    margin: 0;
+}
+
+/* Action Buttons */
+.batch-primary-btn {
+    background: var(--ink);
+    color: #ffffff;
+    border-color: var(--ink);
+    font-weight: 600;
+    justify-content: center;
+}
+
+.batch-primary-btn:hover {
+    background: #2b3337;
+    color: #ffffff;
+    border-color: #2b3337;
+}
+
+.batch-primary-btn .btn-icon {
+    font-size: 12px;
+}
+
+.batch-secondary-btn {
+    background: var(--field);
+    border-color: var(--edge-dark);
+    font-weight: 500;
+    justify-content: center;
+}
+
+.batch-secondary-btn:hover {
+    background: #c3cbcf;
+}
+
+.batch-paused-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 2px;
+}
+
+.batch-pause-alert {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--caution);
+    padding: 3px 6px;
+    background: rgba(179, 129, 11, 0.1);
+    border: 1px solid rgba(179, 129, 11, 0.3);
+    border-radius: 2px;
+}
+
+.batch-pause-alert .alert-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--caution);
+    animation: pulsePause 1.5s infinite;
+}
+
+@keyframes pulsePause {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+.batch-btn-duo {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+/* Messages */
+.batch-msg-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 5px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    line-height: 1.3;
+}
+
+.batch-msg-banner.success {
+    background: rgba(45, 122, 62, 0.15);
+    border: 1px solid rgba(45, 122, 62, 0.4);
+    color: var(--ok);
+    font-weight: 500;
+}
+
+.batch-msg-banner.error {
+    background: rgba(181, 50, 28, 0.15);
+    border: 1px solid rgba(181, 50, 28, 0.4);
+    color: var(--alarm);
+    font-weight: 500;
+}
+
+.batch-msg-banner .msg-close {
+    background: transparent;
+    border: 0;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    color: inherit;
+    line-height: 1;
+    padding: 0 2px;
+}
+
+/* Status Monitor Card */
+.batch-status-panel {
+    background: var(--field);
+    border: 1px solid var(--edge);
+    border-radius: 3px;
+    padding: 7px 9px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.batch-status-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    color: var(--ink-3);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.07);
+    padding-bottom: 3px;
+}
+
+.status-pill {
+    font-size: 9.5px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 2px;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+}
+
+.status-pill.pill-continuous {
+    background: rgba(45, 122, 62, 0.15);
+    color: var(--ok);
+    border: 1px solid rgba(45, 122, 62, 0.3);
+}
+
+.status-pill.pill-single {
+    background: rgba(99, 80, 145, 0.2);
+    color: #4b367d;
+    border: 1px solid rgba(99, 80, 145, 0.4);
+}
+
+.status-pill.pill-completed {
+    background: rgba(31, 122, 90, 0.2);
+    color: var(--flow);
+    border: 1px solid rgba(31, 122, 90, 0.4);
+}
+
+.batch-status-body {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.batch-stat-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    font-size: 11px;
+}
+
+.batch-stat-row .stat-label {
+    color: var(--ink-3);
+}
+
+.batch-stat-row .stat-val {
+    color: var(--ink);
+}
+
+.batch-stat-desc {
+    font-size: 10px;
+    color: var(--ink-3);
+    line-height: 1.25;
+}
+
+.batch-stat-desc .text-ok {
+    color: var(--ok);
+    font-weight: 600;
+}
+
+.batch-stat-desc .text-info {
+    color: #435259;
+    font-weight: 500;
+}
+
+.btn-restore-link {
+    margin-top: 4px;
+    background: transparent;
+    border: 1px dashed var(--edge-dark);
+    border-radius: 2px;
+    padding: 3px 6px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--ink-2);
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.15s ease;
+}
+
+.btn-restore-link:hover {
+    background: var(--panel-2);
+    border-color: var(--ink);
+    color: var(--ink);
 }
 
 /* Bottom Feed Grid: 1-Min Rollup Audit (Left) & Events/Alarms Feed (Right) */

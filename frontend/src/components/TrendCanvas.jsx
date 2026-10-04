@@ -69,13 +69,74 @@ function formatTime(d) {
     return date.toTimeString().slice(0, 8);
 }
 
+function formatFullDateTime(d) {
+    if (!d) return '';
+    const date = new Date(d);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+        `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function formatDuration(ms) {
+    const sec = Math.round(Math.abs(ms) / 1000);
+    if (sec < 60) return `${sec}s`;
+    const min = Math.floor(sec / 60);
+    const remSec = sec % 60;
+    if (min < 60) return remSec > 0 ? `${min}m ${remSec}s` : `${min}m`;
+    const hrs = Math.floor(min / 60);
+    const remMin = min % 60;
+    if (hrs < 24) return remMin > 0 ? `${hrs}h ${remMin}m` : `${hrs}h`;
+    const days = Math.floor(hrs / 24);
+    const remHrs = hrs % 24;
+    return remHrs > 0 ? `${days}d ${remHrs}h` : `${days}d`;
+}
+
+function toDatetimeLocalString(date) {
+    if (!date) return '';
+    const d = new Date(date);
+    const pad = (n) => String(n).padStart(2, '0');
+    const y = d.getFullYear();
+    const m = pad(d.getMonth() + 1);
+    const day = pad(d.getDate());
+    const h = pad(d.getHours());
+    const min = pad(d.getMinutes());
+    const s = pad(d.getSeconds());
+    return `${y}-${m}-${day}T${h}:${min}:${s}`;
+}
+
+function parseDatetimeLocal(str) {
+    if (!str) return null;
+    const d = new Date(str);
+    return isNaN(d.getTime()) ? null : d;
+}
+
+function getTickInterval(spanMs) {
+    const sec = spanMs / 1000;
+    if (sec <= 30) return 5 * 1000;          // 5s
+    if (sec <= 90) return 15 * 1000;         // 15s
+    if (sec <= 300) return 30 * 1000;        // 30s
+    if (sec <= 600) return 60 * 1000;        // 1m
+    if (sec <= 1800) return 2 * 60 * 1000;   // 2m
+    if (sec <= 3600) return 5 * 60 * 1000;   // 5m
+    if (sec <= 7200) return 10 * 60 * 1000;  // 10m
+    if (sec <= 14400) return 20 * 60 * 1000; // 20m
+    if (sec <= 28800) return 30 * 60 * 1000; // 30m
+    if (sec <= 43200) return 60 * 60 * 1000; // 1h
+    if (sec <= 86400) return 2 * 3600 * 1000;// 2h
+    return 6 * 3600 * 1000;                  // 6h
+}
+
 function formatTimeShort(d, rangeHours) {
     if (!d) return '';
     const date = new Date(d);
-    if (rangeHours <= 15 / 60) {
+    if (rangeHours <= 1) {
         return date.toTimeString().slice(0, 8); // HH:mm:ss for tight zoom
     }
-    return date.toTimeString().slice(0, 5); // HH:mm
+    if (rangeHours <= 24) {
+        return date.toTimeString().slice(0, 5); // HH:mm
+    }
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${date.toTimeString().slice(0, 5)}`;
 }
 
 export default function TrendCanvas({ selectedReactor, onSelectReactor, clock }) {
@@ -85,6 +146,11 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
     const [events, setEvents] = useState([]);
     const [viewMode, setViewMode] = useState('stacked'); // 'stacked' (Grafana multi-level) or 'overlay'
     const [timeRange, setTimeRange] = useState(3); // Default 3 hours
+    const [customRange, setCustomRange] = useState(null); // null or { from: Date, to: Date }
+    const [isCustomRangeOpen, setIsCustomRangeOpen] = useState(false);
+    const [dragSelection, setDragSelection] = useState(null); // { startX, currentX, startTime, currentTime }
+    const [time1Input, setTime1Input] = useState('');
+    const [time2Input, setTime2Input] = useState('');
     const [hiddenTags, setHiddenTags] = useState(new Set());
     const [hover, setHover] = useState(null); // { mouseX, mouseY, time, nearestPoints, activePhase }
 
@@ -131,13 +197,23 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
         let isSubscribed = true;
 
         const fetchData = () => {
-            const nowTime = clock ? new Date(clock) : new Date();
-            const from = new Date(nowTime.getTime() - timeRange * 3600 * 1000);
+            let fromDate, toDate;
+            if (customRange) {
+                fromDate = customRange.from;
+                toDate = customRange.to;
+            } else {
+                const nowTime = clock ? new Date(clock) : new Date();
+                fromDate = new Date(nowTime.getTime() - timeRange * 3600 * 1000);
+                toDate = nowTime;
+            }
+
+            const spanHours = Math.max(0.001, (toDate.getTime() - fromDate.getTime()) / (3600 * 1000));
+            const resParam = spanHours <= 4 ? 'raw' : 'auto';
             const tagList = activeParams.map(t => `${selectedReactor}.${t}`).join(',');
 
             Promise.all([
-                fetch(`/ui/readings?tags=${tagList}&from=${from.toISOString()}&to=${nowTime.toISOString()}&resolution=raw`).then(r => r.json()),
-                fetch(`/ui/events?asset=${selectedReactor}&level=Phase&from=${from.toISOString()}&to=${nowTime.toISOString()}&limit=150`).then(r => r.json())
+                fetch(`/ui/readings?tags=${tagList}&from=${fromDate.toISOString()}&to=${toDate.toISOString()}&resolution=${resParam}`).then(r => r.json()),
+                fetch(`/ui/events?asset=${selectedReactor}&level=Phase&from=${fromDate.toISOString()}&to=${toDate.toISOString()}&limit=150`).then(r => r.json())
             ]).then(([readingsRes, eventsRes]) => {
                 if (!isSubscribed) return;
                 setReadings(readingsRes.data || []);
@@ -152,7 +228,7 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
             isSubscribed = false;
             clearInterval(timer);
         };
-    }, [selectedReactor, timeRange, clock, activeParams]);
+    }, [selectedReactor, timeRange, customRange, clock, activeParams]);
 
     // Compute latest readings map for live legend display
     const latestValues = useMemo(() => {
@@ -171,8 +247,14 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
 
     // Canvas boundary calculations
     const bounds = useMemo(() => {
-        const t1 = clock ? new Date(clock).getTime() : Date.now();
-        const t0 = t1 - timeRange * 3600 * 1000;
+        let t0, t1;
+        if (customRange) {
+            t0 = customRange.from.getTime();
+            t1 = customRange.to.getTime();
+        } else {
+            t1 = clock ? new Date(clock).getTime() : Date.now();
+            t0 = t1 - timeRange * 3600 * 1000;
+        }
         const span = Math.max(1000, t1 - t0);
         const L = 46;
         const Rp = 20; // Y-axis is kept on left only in both stacked and overlay modes
@@ -181,7 +263,19 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
         const y0 = 24; // Space for phase header chips
         const ch = canvasHeight - 52; // Total graph area height
         return { t0, t1, span, L, Rp, x0, cw, y0, ch };
-    }, [clock, timeRange, canvasWidth, canvasHeight]);
+    }, [clock, timeRange, customRange, canvasWidth, canvasHeight]);
+
+    // Sync input values when customRange or bounds change
+    useEffect(() => {
+        if (customRange) {
+            setTime1Input(toDatetimeLocalString(customRange.from));
+            setTime2Input(toDatetimeLocalString(customRange.to));
+        } else {
+            const { t0, t1 } = bounds;
+            setTime1Input(toDatetimeLocalString(new Date(t0)));
+            setTime2Input(toDatetimeLocalString(new Date(t1)));
+        }
+    }, [customRange, bounds]);
 
     // Unit analysis for Overlay mode (determines if Y-axis can be displayed)
     const overlayUnitInfo = useMemo(() => {
@@ -247,8 +341,166 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
         });
     }, [bounds, lanes, hiddenTags, TAG_CONFIG]);
 
+    // Global listener for drag-to-select range across chart
+    useEffect(() => {
+        if (!dragSelection) return;
+
+        const handleGlobalMouseMove = (e) => {
+            const rect = canvasRef.current?.getBoundingClientRect();
+            if (!rect) return;
+            const mouseX = e.clientX - rect.left;
+            const { t0, span, x0, cw } = bounds;
+            const clampedX = Math.max(x0, Math.min(x0 + cw, mouseX));
+            const frac = Math.max(0, Math.min(1, (clampedX - x0) / cw));
+            const time = t0 + frac * span;
+
+            setDragSelection(prev => prev ? ({
+                ...prev,
+                currentX: clampedX,
+                currentTime: time
+            }) : null);
+        };
+
+        const handleGlobalMouseUp = () => {
+            setDragSelection(prev => {
+                if (prev) {
+                    const dx = Math.abs(prev.currentX - prev.startX);
+                    if (dx >= 12) {
+                        const tMin = Math.min(prev.startTime, prev.currentTime);
+                        const tMax = Math.max(prev.startTime, prev.currentTime);
+                        if (tMax - tMin >= 2000) {
+                            setCustomRange({
+                                from: new Date(tMin),
+                                to: new Date(tMax)
+                            });
+                        }
+                    }
+                }
+                return null;
+            });
+        };
+
+        window.addEventListener('mousemove', handleGlobalMouseMove);
+        window.addEventListener('mouseup', handleGlobalMouseUp);
+        return () => {
+            window.removeEventListener('mousemove', handleGlobalMouseMove);
+            window.removeEventListener('mouseup', handleGlobalMouseUp);
+        };
+    }, [dragSelection, bounds]);
+
+    const handlePanLeft = () => {
+        if (!customRange) return;
+        const d = (customRange.to.getTime() - customRange.from.getTime()) * 0.5;
+        setCustomRange({
+            from: new Date(customRange.from.getTime() - d),
+            to: new Date(customRange.to.getTime() - d)
+        });
+    };
+
+    const handlePanRight = () => {
+        if (!customRange) return;
+        const d = (customRange.to.getTime() - customRange.from.getTime()) * 0.5;
+        setCustomRange({
+            from: new Date(customRange.from.getTime() + d),
+            to: new Date(customRange.to.getTime() + d)
+        });
+    };
+
+    const handleZoomIn = () => {
+        if (!customRange) return;
+        const mid = (customRange.from.getTime() + customRange.to.getTime()) / 2;
+        const half = (customRange.to.getTime() - customRange.from.getTime()) / 4;
+        setCustomRange({
+            from: new Date(mid - half),
+            to: new Date(mid + half)
+        });
+    };
+
+    const handleZoomOut = () => {
+        if (!customRange) return;
+        const mid = (customRange.from.getTime() + customRange.to.getTime()) / 2;
+        const half = customRange.to.getTime() - customRange.from.getTime();
+        setCustomRange({
+            from: new Date(mid - half),
+            to: new Date(mid + half)
+        });
+    };
+
+    const handleResetToLive = () => {
+        setCustomRange(null);
+        setIsCustomRangeOpen(false);
+    };
+
+    const handleApplyCustomRange = (e) => {
+        e?.preventDefault();
+        const d1 = parseDatetimeLocal(time1Input);
+        const d2 = parseDatetimeLocal(time2Input);
+        if (!d1 || !d2) {
+            alert('Please select both Start Time (Time 1) and End Time (Time 2).');
+            return;
+        }
+        if (d1.getTime() >= d2.getTime()) {
+            alert('Start Time (Time 1) must be strictly before End Time (Time 2).');
+            return;
+        }
+        setCustomRange({ from: d1, to: d2 });
+    };
+
+    const setQuickPreset = (hours) => {
+        const end = clock ? new Date(clock) : new Date();
+        const start = new Date(end.getTime() - hours * 3600 * 1000);
+        setTime1Input(toDatetimeLocalString(start));
+        setTime2Input(toDatetimeLocalString(end));
+        setCustomRange({ from: start, to: end });
+    };
+
+    const phaseOptions = useMemo(() => {
+        return events
+            .filter(ev => ev.level === 'Phase')
+            .slice(0, 10);
+    }, [events]);
+
+    const handlePhaseSelect = (e) => {
+        const evId = parseInt(e.target.value, 10);
+        const ev = events.find(p => p.id === evId);
+        if (!ev) return;
+        const start = new Date(ev.started_at);
+        const end = ev.ended_at ? new Date(ev.ended_at) : (clock ? new Date(clock) : new Date());
+        setTime1Input(toDatetimeLocalString(start));
+        setTime2Input(toDatetimeLocalString(end));
+        setCustomRange({ from: start, to: end });
+    };
+
+    const handleMouseDown = useCallback((e) => {
+        if (e.button !== 0) return; // Left click only
+        const rect = canvasRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        const { t0, span, x0, cw, y0, ch } = bounds;
+
+        if (mouseX >= x0 && mouseX <= x0 + cw && mouseY >= y0 - 15 && mouseY <= y0 + ch + 15) {
+            const frac = Math.max(0, Math.min(1, (mouseX - x0) / cw));
+            const time = t0 + frac * span;
+            setDragSelection({
+                startX: mouseX,
+                currentX: mouseX,
+                startTime: time,
+                currentTime: time
+            });
+            setHover(null);
+        }
+    }, [bounds]);
+
+    const handleDoubleClick = useCallback(() => {
+        setCustomRange(null);
+        setIsCustomRangeOpen(false);
+    }, []);
+
     // Handle mouse hover for crosshair and tooltip
     const handleMouseMove = useCallback((e) => {
+        if (dragSelection) return;
+
         const rect = canvasRef.current?.getBoundingClientRect();
         if (!rect) return;
         const mouseX = e.clientX - rect.left;
@@ -302,11 +554,13 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
             nearestPoints,
             activePhase
         });
-    }, [bounds, events, activeParams, hiddenTags, selectedReactor, readings]);
+    }, [bounds, events, activeParams, hiddenTags, selectedReactor, readings, dragSelection]);
 
     const handleMouseLeave = useCallback(() => {
-        setHover(null);
-    }, []);
+        if (!dragSelection) {
+            setHover(null);
+        }
+    }, [dragSelection]);
 
     // Main Canvas Paint Loop
     useEffect(() => {
@@ -548,7 +802,8 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
         // -------------------------------------------------------------
         // 3. Time Axis (X-Axis): Ticks, Labels, and Shared Vertical Grid
         // -------------------------------------------------------------
-        const tickMs = activeRange.tickIntervalMin * 60 * 1000;
+        const spanHours = span / (3600 * 1000);
+        const tickMs = getTickInterval(span);
         const firstTick = Math.ceil(t0 / tickMs) * tickMs;
 
         g.font = '10px "IBM Plex Sans", sans-serif';
@@ -576,31 +831,120 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
 
             // Formatted Time Label
             g.fillStyle = '#4e585e';
-            g.fillText(formatTimeShort(t, timeRange), x, y0 + ch + 16);
+            g.fillText(formatTimeShort(t, spanHours), x, y0 + ch + 16);
         }
 
-        // Right "LIVE" Edge Marker
-        const liveX = x0 + cw;
-        g.strokeStyle = '#2d7a3e';
-        g.lineWidth = 1.6;
-        g.beginPath();
-        g.moveTo(liveX, y0);
-        g.lineTo(liveX, y0 + ch + 6);
-        g.stroke();
+        // Right Edge Marker (LIVE in live mode, or TIME 2 in custom range mode)
+        const edgeX = x0 + cw;
+        if (!customRange) {
+            g.strokeStyle = '#2d7a3e';
+            g.lineWidth = 1.6;
+            g.beginPath();
+            g.moveTo(edgeX, y0);
+            g.lineTo(edgeX, y0 + ch + 6);
+            g.stroke();
 
-        g.fillStyle = '#2d7a3e';
-        g.beginPath();
-        g.arc(liveX, y0 + ch + 6, 2.5, 0, 2 * Math.PI);
-        g.fill();
+            g.fillStyle = '#2d7a3e';
+            g.beginPath();
+            g.arc(edgeX, y0 + ch + 6, 2.5, 0, 2 * Math.PI);
+            g.fill();
 
-        g.font = '600 9px "IBM Plex Sans", sans-serif';
-        g.textAlign = 'right';
-        g.fillText('LIVE', liveX - 3, y0 + ch + 16);
+            g.font = '600 9px "IBM Plex Sans", sans-serif';
+            g.textAlign = 'right';
+            g.fillText('LIVE', edgeX - 3, y0 + ch + 16);
+        } else {
+            g.strokeStyle = '#2563eb';
+            g.lineWidth = 1.6;
+            g.beginPath();
+            g.moveTo(edgeX, y0);
+            g.lineTo(edgeX, y0 + ch + 6);
+            g.stroke();
+
+            g.fillStyle = '#2563eb';
+            g.beginPath();
+            g.arc(edgeX, y0 + ch + 6, 2.5, 0, 2 * Math.PI);
+            g.fill();
+
+            g.font = '600 9px "IBM Plex Sans", sans-serif';
+            g.textAlign = 'right';
+            g.fillText('TIME 2', edgeX - 3, y0 + ch + 16);
+        }
 
         // -------------------------------------------------------------
-        // 4. Interactive Crosshair & Snapping Dots
+        // 4. Drag Selection Range (Time 1 -> Time 2) Overlay
         // -------------------------------------------------------------
-        if (hover && hover.mouseX >= x0 && hover.mouseX <= x0 + cw) {
+        if (dragSelection) {
+            const sx = Math.min(dragSelection.startX, dragSelection.currentX);
+            const ex = Math.max(dragSelection.startX, dragSelection.currentX);
+            const selW = ex - sx;
+
+            if (selW > 1) {
+                // Drag selection shaded box
+                g.fillStyle = 'rgba(37, 99, 235, 0.18)';
+                g.fillRect(sx, y0, selW, ch);
+
+                // Boundary lines
+                g.strokeStyle = '#2563eb';
+                g.lineWidth = 1.5;
+                g.beginPath();
+                g.moveTo(sx + 0.5, y0);
+                g.lineTo(sx + 0.5, y0 + ch);
+                g.moveTo(ex + 0.5, y0);
+                g.lineTo(ex + 0.5, y0 + ch);
+                g.stroke();
+
+                const tMin = Math.min(dragSelection.startTime, dragSelection.currentTime);
+                const tMax = Math.max(dragSelection.startTime, dragSelection.currentTime);
+                const t1Str = formatTime(tMin);
+                const t2Str = formatTime(tMax);
+                const deltaMs = tMax - tMin;
+                const deltaStr = formatDuration(deltaMs);
+
+                // Top duration badge
+                g.font = '600 10px "IBM Plex Sans", sans-serif';
+                const durText = `Δ ${deltaStr}`;
+                const durW = g.measureText(durText).width + 14;
+                const durX = Math.max(x0, Math.min(x0 + cw - durW, sx + selW / 2 - durW / 2));
+                g.fillStyle = '#2563eb';
+                g.beginPath();
+                g.roundRect(durX, y0 + 5, durW, 16, 3);
+                g.fill();
+                g.fillStyle = '#ffffff';
+                g.textAlign = 'center';
+                g.fillText(durText, durX + durW / 2, y0 + 16.5);
+
+                // Bottom Time 1 and Time 2 badges
+                g.font = '600 9.5px "IBM Plex Sans", sans-serif';
+                const b1Text = `Time 1: ${t1Str}`;
+                const b1W = g.measureText(b1Text).width + 8;
+                const b1X = Math.max(x0, Math.min(x0 + cw - b1W, sx - b1W / 2));
+
+                g.fillStyle = '#1e293b';
+                g.beginPath();
+                g.roundRect(b1X, y0 + ch + 3, b1W, 15, 2);
+                g.fill();
+                g.fillStyle = '#93c5fd';
+                g.textAlign = 'center';
+                g.fillText(b1Text, b1X + b1W / 2, y0 + ch + 14);
+
+                const b2Text = `Time 2: ${t2Str}`;
+                const b2W = g.measureText(b2Text).width + 8;
+                const b2X = Math.max(x0, Math.min(x0 + cw - b2W, ex - b2W / 2));
+
+                g.fillStyle = '#1e293b';
+                g.beginPath();
+                g.roundRect(b2X, y0 + ch + 3, b2W, 15, 2);
+                g.fill();
+                g.fillStyle = '#93c5fd';
+                g.textAlign = 'center';
+                g.fillText(b2Text, b2X + b2W / 2, y0 + ch + 14);
+            }
+        }
+
+        // -------------------------------------------------------------
+        // 5. Interactive Crosshair & Snapping Dots
+        // -------------------------------------------------------------
+        if (!dragSelection && hover && hover.mouseX >= x0 && hover.mouseX <= x0 + cw) {
             const hx = hover.mouseX;
 
             // Vertical Crosshair Line
@@ -666,7 +1010,7 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
             });
         }
 
-    }, [readings, events, clock, selectedReactor, canvasWidth, canvasHeight, timeRange, hiddenTags, bounds, hover, activeParams, viewMode, laneLayout, overlayUnitInfo, TAG_CONFIG]);
+    }, [readings, events, clock, selectedReactor, canvasWidth, canvasHeight, timeRange, customRange, dragSelection, hiddenTags, bounds, hover, activeParams, viewMode, laneLayout, overlayUnitInfo, TAG_CONFIG]);
 
     return (
         <div className="panel trend" ref={containerRef}>
@@ -704,18 +1048,32 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
                     </button>
                 </div>
 
-                {/* Time Range Selector: 5m, 15m, 30m, 1h, 3h, 6h, 12h */}
+                {/* Time Range Selector: 5m, 15m, 30m, 1h, 3h, 6h, 12h | Custom */}
                 <div className="range-picker" role="group" aria-label="Time range selection">
                     {TIME_RANGES.map(r => (
                         <button
                             key={r.label}
                             type="button"
-                            className={Math.abs(timeRange - r.hours) < 0.001 ? 'active' : ''}
-                            onClick={() => setTimeRange(r.hours)}
+                            className={!customRange && Math.abs(timeRange - r.hours) < 0.001 ? 'active' : ''}
+                            onClick={() => {
+                                setCustomRange(null);
+                                setTimeRange(r.hours);
+                            }}
                             title={`View last ${r.label}`}>
                             {r.label}
                         </button>
                     ))}
+                    <button
+                        type="button"
+                        className={customRange || isCustomRangeOpen ? 'active custom-btn' : 'custom-btn'}
+                        onClick={() => setIsCustomRangeOpen(prev => !prev)}
+                        title="Select specific custom time range (Time 1 to Time 2)">
+                        <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style={{ marginRight: 3 }}>
+                            <path d="M8 0a8 8 0 100 16A8 8 0 008 0zm0 14.5A6.5 6.5 0 118 1.5a6.5 6.5 0 010 13z" />
+                            <path d="M8 3.5a.75.75 0 00-.75.75v4c0 .2.08.39.22.53l2.5 2.5a.75.75 0 101.06-1.06L8.75 7.94V4.25A.75.75 0 008 3.5z" />
+                        </svg>
+                        Custom
+                    </button>
                 </div>
 
                 {/* Reactor Switcher */}
@@ -732,11 +1090,143 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
                 </div>
             </div>
 
-            {/* Canvas Container with Interactive Tooltip */}
+            {/* Custom Range Indicator Bar (when custom range is active) */}
+            {customRange && (
+                <div className="custom-range-bar">
+                    <div className="cr-info">
+                        <span className="cr-icon">⏱</span>
+                        <span className="cr-label">Selected Range:</span>
+                        <span className="cr-tag time1"><b>Time 1:</b> {formatFullDateTime(customRange.from)}</span>
+                        <span className="cr-arrow">→</span>
+                        <span className="cr-tag time2"><b>Time 2:</b> {formatFullDateTime(customRange.to)}</span>
+                        <span className="cr-duration">({formatDuration(customRange.to - customRange.from)})</span>
+                    </div>
+                    <div className="cr-actions">
+                        <button type="button" onClick={handlePanLeft} title="Pan earlier by 50%">◀ Pan</button>
+                        <button type="button" onClick={handlePanRight} title="Pan later by 50%">Pan ▶</button>
+                        <button type="button" onClick={handleZoomIn} title="Zoom in 2x">Zoom +</button>
+                        <button type="button" onClick={handleZoomOut} title="Zoom out 2x">Zoom &minus;</button>
+                        <button
+                            type="button"
+                            className="cr-edit-btn"
+                            onClick={() => setIsCustomRangeOpen(prev => !prev)}
+                            title="Edit Time 1 and Time 2 values">
+                            {isCustomRangeOpen ? 'Hide Inputs' : 'Edit Range'}
+                        </button>
+                        <button
+                            type="button"
+                            className="cr-reset-btn"
+                            onClick={handleResetToLive}
+                            title="Exit custom range and return to Live simulator stream">
+                            ✕ Return to Live
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Custom Range Input Panel */}
+            {isCustomRangeOpen && (
+                <div className="custom-range-panel">
+                    <form onSubmit={handleApplyCustomRange} className="cr-form">
+                        <div className="cr-inputs-grid">
+                            <div className="cr-input-group">
+                                <label htmlFor="cr-time1">
+                                    <span className="cr-badge time1-badge">Time 1</span>
+                                    <b>Start Time (From)</b>
+                                </label>
+                                <input
+                                    id="cr-time1"
+                                    type="datetime-local"
+                                    step="1"
+                                    value={time1Input}
+                                    onChange={(e) => setTime1Input(e.target.value)}
+                                    required
+                                />
+                            </div>
+                            <div className="cr-input-group">
+                                <label htmlFor="cr-time2">
+                                    <span className="cr-badge time2-badge">Time 2</span>
+                                    <b>End Time (To)</b>
+                                </label>
+                                <div className="cr-input-with-action">
+                                    <input
+                                        id="cr-time2"
+                                        type="datetime-local"
+                                        step="1"
+                                        value={time2Input}
+                                        onChange={(e) => setTime2Input(e.target.value)}
+                                        required
+                                    />
+                                    <button
+                                        type="button"
+                                        className="cr-now-btn"
+                                        onClick={() => {
+                                            const nowTime = clock ? new Date(clock) : new Date();
+                                            setTime2Input(toDatetimeLocalString(nowTime));
+                                        }}
+                                        title="Set Time 2 to current simulator clock">
+                                        Set to Now
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Quick Presets & Batch Jump */}
+                        <div className="cr-presets-row">
+                            <span className="cr-preset-label">Quick Presets:</span>
+                            <button type="button" onClick={() => setQuickPreset(15 / 60)}>Last 15m</button>
+                            <button type="button" onClick={() => setQuickPreset(30 / 60)}>Last 30m</button>
+                            <button type="button" onClick={() => setQuickPreset(1)}>Last 1h</button>
+                            <button type="button" onClick={() => setQuickPreset(3)}>Last 3h</button>
+                            <button type="button" onClick={() => setQuickPreset(6)}>Last 6h</button>
+
+                            {phaseOptions.length > 0 && (
+                                <div className="cr-phase-select-wrap">
+                                    <select
+                                        onChange={handlePhaseSelect}
+                                        defaultValue=""
+                                        title="Jump to a specific batch phase">
+                                        <option value="" disabled>Select Recent Batch Phase…</option>
+                                        {phaseOptions.map(p => (
+                                            <option key={p.id} value={p.id}>
+                                                {p.batch_id ? `[${p.batch_id}] ` : ''}{p.name} ({formatTime(p.started_at)} {p.ended_at ? '→ ' + formatTime(p.ended_at) : 'Active'})
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="cr-form-footer">
+                            <span className="cr-tip">
+                                💡 <b>Pro Tip:</b> You can also click and drag horizontally on the chart to select "Time 1" to "Time 2" directly. Double-click the chart to return to Live view.
+                            </span>
+                            <div className="cr-btn-actions">
+                                <button type="button" className="cr-cancel-btn" onClick={() => setIsCustomRangeOpen(false)}>
+                                    Close
+                                </button>
+                                {customRange && (
+                                    <button type="button" className="cr-reset-live-btn" onClick={handleResetToLive}>
+                                        Reset to Live
+                                    </button>
+                                )}
+                                <button type="submit" className="cr-apply-btn">
+                                    ✓ Apply Time Range
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            )}
+
+            {/* Canvas Container with Interactive Tooltip & Drag Selection */}
             <div
                 className="trend-canvas-wrap"
+                onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
-                onMouseLeave={handleMouseLeave}>
+                onMouseLeave={handleMouseLeave}
+                onDoubleClick={handleDoubleClick}
+                title="Click and drag horizontally on the chart to select Time 1 → Time 2. Double-click to reset to Live.">
                 <canvas ref={canvasRef} />
 
                 {/* Floating Inspection Tooltip */}

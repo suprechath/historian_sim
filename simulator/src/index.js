@@ -84,7 +84,36 @@ async function startEngine() {
     try {
       const { rows: runningBatches } = await client.query("SELECT id FROM batches WHERE status = 'Running'");
       if (runningBatches.length > 0) isInitialBoot = false;
-    } catch (e) {}
+
+      // Industrial Grade Crash Recovery: Rehydrate in-flight batches & phases
+      for (const sim of reactors) {
+        const { rows: activeB } = await client.query(
+          "SELECT id, batch_id, started_at FROM batches WHERE current_asset_id = $1 AND status = 'Running' ORDER BY started_at DESC LIMIT 1",
+          [sim.asset.id]
+        );
+        if (activeB.length > 0) {
+          sim.activeBatch = activeB[0];
+          const { rows: upEv } = await client.query(
+            "SELECT id FROM events WHERE batch_pk = $1 AND asset_id = $2 AND level = 'Unit Procedure' AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
+            [sim.activeBatch.id, sim.asset.id]
+          );
+          if (upEv.length > 0) sim.activeUnitProcedureId = upEv[0].id;
+
+          const { rows: phEv } = await client.query(
+            "SELECT id, name, occurrence FROM events WHERE asset_id = $1 AND level = 'Phase' AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
+            [sim.asset.id]
+          );
+          if (phEv.length > 0) {
+            sim.activePhaseEventId = phEv[0].id;
+            sim.currentPhase = phEv[0].name;
+            sim.phaseOccurrence = phEv[0].occurrence || 1;
+          }
+          console.log(`[Crash Recovery] Restored ${sim.code} with in-flight batch ${sim.activeBatch.batch_id} in phase '${sim.currentPhase}'`);
+        }
+      }
+    } catch (e) {
+      console.warn('Startup batch recovery note:', e.message);
+    }
 
     console.log(`Simulation ready. Managing 3 reactors in train with ${tags.length} tags.`);
 
@@ -96,13 +125,21 @@ async function startEngine() {
         let simRunning = true;
         let simSpeed = 1;
         let phaseSkipAsset = null;
+        let simMode = 'continuous';
+        let assignedBatchId = null;
+        let batchCommand = null;
+        let singleBatchStatus = 'idle';
 
         try {
-          const { rows: ctrl } = await client.query('SELECT running, speed, phase_skip_asset FROM simulation_control WHERE id = 1');
+          const { rows: ctrl } = await client.query('SELECT running, speed, phase_skip_asset, mode, assigned_batch_id, batch_command, single_batch_status FROM simulation_control WHERE id = 1');
           if (ctrl.length > 0) {
             simRunning = ctrl[0].running;
             simSpeed = ctrl[0].speed;
             phaseSkipAsset = ctrl[0].phase_skip_asset;
+            simMode = ctrl[0].mode || 'continuous';
+            assignedBatchId = ctrl[0].assigned_batch_id || null;
+            batchCommand = ctrl[0].batch_command || null;
+            singleBatchStatus = ctrl[0].single_batch_status || 'idle';
           }
         } catch (ctrlErr) {
           // Table may not yet be initialized
@@ -110,6 +147,106 @@ async function startEngine() {
 
         if (phaseSkipAsset) {
           await client.query('UPDATE simulation_control SET phase_skip_asset = NULL WHERE id = 1').catch(() => {});
+        }
+
+        // 0b. Process User-Assigned Batch Commands
+        if (batchCommand) {
+          await client.query("UPDATE simulation_control SET batch_command = NULL, single_batch_status = 'running', updated_at = NOW() WHERE id = 1").catch(() => {});
+
+          const isImmediate = batchCommand === 'start_immediate' || batchCommand === 'start_immediate_clear_train';
+          const isClearTrain = batchCommand === 'start_immediate_clear_train';
+          const canStartNow = isImmediate || !r1.activeBatch || r1.currentPhase === 'Idle';
+
+          if (canStartNow) {
+            await client.query('BEGIN');
+            try {
+              // Displace active batch on R1 if present
+              if (r1.activePhaseEventId) {
+                await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, r1.activePhaseEventId]);
+                r1.activePhaseEventId = null;
+              }
+              if (r1.activeUnitProcedureId) {
+                await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, r1.activeUnitProcedureId]);
+                r1.activeUnitProcedureId = null;
+              }
+              if (r1.activeBatch) {
+                await client.query("UPDATE batches SET ended_at = $1, status = 'Aborted', current_asset_id = NULL WHERE id = $2", [now, r1.activeBatch.id]);
+                console.log(`[Single Batch] Displaced active batch ${r1.activeBatch.batch_id} in R1 for user batch ${assignedBatchId}`);
+                r1.activeBatch = null;
+              }
+
+              // Line Clearance: If clearTrain requested, clean and reset R2 and R3 to Idle
+              if (isClearTrain) {
+                for (const vessel of [r2, r3]) {
+                  if (vessel) {
+                    if (vessel.activePhaseEventId) {
+                      await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, vessel.activePhaseEventId]);
+                      vessel.activePhaseEventId = null;
+                    }
+                    if (vessel.activeUnitProcedureId) {
+                      await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, vessel.activeUnitProcedureId]);
+                      vessel.activeUnitProcedureId = null;
+                    }
+                    if (vessel.activeBatch) {
+                      await client.query("UPDATE batches SET ended_at = $1, status = 'Aborted', current_asset_id = NULL WHERE id = $2", [now, vessel.activeBatch.id]);
+                      console.log(`[Line Clearance] Cleared active batch in ${vessel.code} for dedicated single run`);
+                      vessel.activeBatch = null;
+                    }
+                    vessel.transitionNextPhase('Idle');
+                    vessel.phaseElapsedSec = 0;
+                  }
+                }
+              }
+
+              // Transition R1 to Charging immediately
+              r1.transitionNextPhase('Charging');
+
+              let batchIdStr = (assignedBatchId || '').trim();
+              if (!batchIdStr) {
+                const year = now.getUTCFullYear();
+                batchIdStr = `B-${year}-${String(batchSeq++).padStart(4, '0')}`;
+              } else if (/^\d+$/.test(batchIdStr)) {
+                const year = now.getUTCFullYear();
+                batchIdStr = `B-${year}-${batchIdStr.padStart(4, '0')}`;
+              }
+
+              // Guard unique batch ID in batches table
+              const { rows: existing } = await client.query('SELECT id FROM batches WHERE batch_id = $1', [batchIdStr]);
+              if (existing.length > 0) {
+                batchIdStr = `${batchIdStr}-${Date.now().toString().slice(-4)}`;
+              }
+
+              const { rows: bRows } = await client.query(
+                `INSERT INTO batches (batch_id, product_code, recipe_version, current_asset_id, started_at, status)
+                 VALUES ($1, 'API-7734', 'v2.1', $2, $3, 'Running') RETURNING id`,
+                [batchIdStr, r1.asset.id, now]
+              );
+              r1.activeBatch = { id: bRows[0].id, batch_id: batchIdStr, started_at: now };
+
+              // Open Unit Procedure event for R1
+              const { rows: upRows } = await client.query(
+                `INSERT INTO events (batch_pk, asset_id, name, level, started_at)
+                 VALUES ($1, $2, 'Unit procedure R1 — Synthesis', 'Unit Procedure', $3) RETURNING id`,
+                [r1.activeBatch.id, r1.asset.id, now]
+              );
+              r1.activeUnitProcedureId = upRows[0].id;
+
+              // Open Phase event for Charging
+              const { rows: pRows } = await client.query(
+                `INSERT INTO events (batch_pk, asset_id, parent_id, name, level, occurrence, started_at)
+                 VALUES ($1, $2, $3, 'Charging', 'Phase', $4, $5) RETURNING id`,
+                [r1.activeBatch.id, r1.asset.id, r1.activeUnitProcedureId, r1.phaseOccurrence, now]
+              );
+              r1.activePhaseEventId = pRows[0].id;
+
+              await client.query('UPDATE simulation_control SET assigned_batch_id = $1, single_batch_status = $2 WHERE id = 1', [batchIdStr, 'running']);
+              await client.query('COMMIT');
+              console.log(`[Single Batch] Started assigned user batch ${batchIdStr} in R1 (Charging)`);
+            } catch (txErr) {
+              await client.query('ROLLBACK');
+              console.error('[Single Batch] Transaction error starting assigned batch:', txErr.message);
+            }
+          }
         }
 
         // -------------------------------------------------------------
@@ -182,7 +319,7 @@ async function startEngine() {
 
               const durationSec = prng.rangeInt(CHAOS_MIN_DURATION_SEC, CHAOS_MAX_DURATION_SEC);
               const clearTime = now.getTime() + durationSec * 1000;
-              const cleanMagnitude = magnitude !== null ? parseFloat(magnitude.toFixed(2)) : null;
+              const cleanMagnitude = magnitude !== null && !isNaN(Number(magnitude)) ? parseFloat(Number(magnitude).toFixed(2)) : null;
 
               try {
                 const { rows: inserted } = await client.query(
@@ -227,9 +364,16 @@ async function startEngine() {
         // A. ADVANCE TRAIN & MANAGE ISA-88 BATCH / EVENT LIFECYCLES
         // -------------------------------------------------------------
 
+        // In single batch mode, R1 stays in Idle if it has no active batch
+        if (simMode === 'single' && r1.currentPhase === 'Idle' && !r1.activeBatch) {
+          r1.phaseElapsedSec = 0;
+        }
+
         // 1. Check if R1 needs to start a new batch
-        if (simRunning && !r1.activeBatch && (r1.currentPhase === 'Charging' || (isInitialBoot && r1.currentPhase === 'Idle'))) {
-          if (isInitialBoot && r1.currentPhase === 'Idle') {
+        // In continuous mode, start batch automatically when Charging or Idle on boot/resume.
+        // In single mode, batches are ONLY started via explicit batchCommand.
+        if (simMode === 'continuous' && simRunning && !r1.activeBatch && (r1.currentPhase === 'Charging' || r1.currentPhase === 'Idle')) {
+          if (r1.currentPhase === 'Idle') {
             isInitialBoot = false;
             r1.transitionNextPhase('Charging');
           }
@@ -308,6 +452,16 @@ async function startEngine() {
                   r2.activePhaseEventId = null;
                 }
 
+                // If R2 already had a prior active batch that differs from incoming, close it cleanly
+                if (r2.activeBatch && r2.activeBatch.id !== transferredBatch.id) {
+                  if (r2.activeUnitProcedureId) {
+                    await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, r2.activeUnitProcedureId]);
+                    r2.activeUnitProcedureId = null;
+                  }
+                  await client.query("UPDATE batches SET ended_at = $1, status = 'Aborted', current_asset_id = NULL WHERE id = $2", [now, r2.activeBatch.id]);
+                  console.log(`[Batch Train] Cleared prior batch ${r2.activeBatch.batch_id} in R2 for incoming batch ${transferredBatch.batch_id}`);
+                }
+
                 r2.activeBatch = transferredBatch;
                 await client.query(
                   'UPDATE batches SET current_asset_id = $1 WHERE id = $2',
@@ -355,6 +509,16 @@ async function startEngine() {
                   r3.activePhaseEventId = null;
                 }
 
+                // If R3 already had a prior active batch that differs from incoming, close it cleanly
+                if (r3.activeBatch && r3.activeBatch.id !== transferredBatch.id) {
+                  if (r3.activeUnitProcedureId) {
+                    await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, r3.activeUnitProcedureId]);
+                    r3.activeUnitProcedureId = null;
+                  }
+                  await client.query("UPDATE batches SET ended_at = $1, status = 'Aborted', current_asset_id = NULL WHERE id = $2", [now, r3.activeBatch.id]);
+                  console.log(`[Batch Train] Cleared prior batch ${r3.activeBatch.batch_id} in R3 for incoming batch ${transferredBatch.batch_id}`);
+                }
+
                 r3.activeBatch = transferredBatch;
                 await client.query(
                   'UPDATE batches SET current_asset_id = $1 WHERE id = $2',
@@ -389,12 +553,20 @@ async function startEngine() {
               }
 
               if (sim.activeBatch) {
+                const finishedBatchId = sim.activeBatch.batch_id;
                 await client.query(
                   "UPDATE batches SET ended_at = $1, status = 'Completed', current_asset_id = NULL WHERE id = $2",
                   [now, sim.activeBatch.id]
                 );
-                console.log(`[Batch Train] Batch ${sim.activeBatch.batch_id} Completed successfully!`);
+                console.log(`[Batch Train] Batch ${finishedBatchId} Completed successfully!`);
                 sim.activeBatch = null;
+
+                if (simMode === 'single') {
+                  await client.query(
+                    "UPDATE simulation_control SET single_batch_status = 'completed', updated_at = NOW() WHERE id = 1"
+                  ).catch(() => {});
+                  console.log(`[Single Batch] Completed assigned batch ${finishedBatchId}. Simulator remaining idle without producing further batches.`);
+                }
               }
 
               sim.transitionNextPhase('Clean');

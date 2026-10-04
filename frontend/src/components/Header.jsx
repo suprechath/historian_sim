@@ -8,7 +8,7 @@ function formatDate(isoStr) {
         `${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())}`;
 }
 
-export default function Header({ clock, running, speed, connected }) {
+export default function Header({ clock, running, speed, connected, mode, assignedBatchId, singleBatchStatus }) {
     const handleSpeed = async (newSpeed, newRunning) => {
         try {
             await fetch('/ui/simulation/state', {
@@ -30,6 +30,18 @@ export default function Header({ clock, running, speed, connected }) {
                 {formatDate(clock)} <small>UTC+0</small>
             </div>
             <div className="hdr-r">
+                <div className={`batch-mode-chip ${mode === 'single' ? 'single' : 'continuous'}`} title={mode === 'single' ? `Single Assigned Batch Mode: ${assignedBatchId || 'Pending'}` : 'Continuous Train Mode: Auto-sequencing'}>
+                    <span className="mode-chip-dot" />
+                    <span className="mode-chip-text">
+                        {mode === 'single' ? (
+                            <>
+                                <b>Single:</b> {assignedBatchId || 'Manual'} <small className="mode-status-sub">[{singleBatchStatus || 'idle'}]</small>
+                            </>
+                        ) : (
+                            'Continuous Auto-Train'
+                        )}
+                    </span>
+                </div>
                 <div className={`live ${!running || !connected ? 'paused' : ''}`}>
                     <i />
                     <span>{!connected ? 'Disconnected' : !running ? 'Paused' : 'Live'}</span>
@@ -39,6 +51,11 @@ export default function Header({ clock, running, speed, connected }) {
                         aria-pressed={running && speed === 1}
                         onClick={() => handleSpeed(1, true)}>
                         1&times;
+                    </button>
+                    <button
+                        aria-pressed={running && speed === 30}
+                        onClick={() => handleSpeed(30, true)}>
+                        30&times;
                     </button>
                     <button
                         aria-pressed={running && speed === 60}

@@ -7,6 +7,9 @@ const router = Router();
 export let simState = {
     running: true,
     speed: 1,
+    mode: 'continuous',
+    assignedBatchId: null,
+    singleBatchStatus: 'idle',
     updatedAt: new Date()
 };
 
@@ -18,10 +21,18 @@ export async function ensureSimulationControl() {
         running           BOOLEAN NOT NULL DEFAULT true,
         speed             INTEGER NOT NULL DEFAULT 1 CHECK (speed >= 1 AND speed <= 3600),
         phase_skip_asset  TEXT,
+        mode              TEXT NOT NULL DEFAULT 'continuous' CHECK (mode IN ('continuous', 'single')),
+        assigned_batch_id TEXT,
+        batch_command     TEXT,
+        single_batch_status TEXT DEFAULT 'idle',
         updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
       );
-      INSERT INTO simulation_control (id, running, speed)
-      VALUES (1, true, 1)
+      ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'continuous';
+      ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS assigned_batch_id TEXT;
+      ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS batch_command TEXT;
+      ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS single_batch_status TEXT DEFAULT 'idle';
+      INSERT INTO simulation_control (id, running, speed, mode)
+      VALUES (1, true, 1, 'continuous')
       ON CONFLICT (id) DO NOTHING;
     `);
 }
@@ -29,10 +40,13 @@ export async function ensureSimulationControl() {
 // Fetch live simulation control state from database
 export async function getSimulationState() {
     try {
-        const { rows } = await query('SELECT running, speed, updated_at FROM simulation_control WHERE id = 1');
+        const { rows } = await query('SELECT running, speed, mode, assigned_batch_id, single_batch_status, updated_at FROM simulation_control WHERE id = 1');
         if (rows.length > 0) {
             simState.running = rows[0].running;
             simState.speed = rows[0].speed;
+            simState.mode = rows[0].mode || 'continuous';
+            simState.assignedBatchId = rows[0].assigned_batch_id || null;
+            simState.singleBatchStatus = rows[0].single_batch_status || 'idle';
             simState.updatedAt = rows[0].updated_at;
         }
     } catch (err) {
@@ -108,6 +122,9 @@ router.get('/stream', (req, res) => {
                 clock: new Date(),
                 running: currentSimState.running,
                 speed: currentSimState.speed,
+                mode: currentSimState.mode,
+                assignedBatchId: currentSimState.assignedBatchId,
+                singleBatchStatus: currentSimState.singleBatchStatus,
                 reactors: reactorMap,
                 tags
             })}\n\n`);
@@ -135,27 +152,131 @@ router.get('/simulation/state', async (req, res) => {
 });
 
 router.post('/simulation/state', async (req, res) => {
-    const { running, speed } = req.body;
+    const { running, speed, mode } = req.body;
     try {
         await ensureSimulationControl();
         const parsedSpeed = speed !== undefined ? Math.min(Math.max(parseInt(speed, 10) || 1, 1), 3600) : null;
         const parsedRunning = running !== undefined ? Boolean(running) : null;
+        const parsedMode = mode !== undefined && ['continuous', 'single'].includes(mode) ? mode : null;
 
         const { rows } = await query(`
           UPDATE simulation_control
           SET running = COALESCE($1, running),
               speed = COALESCE($2, speed),
+              mode = COALESCE($3, mode),
               updated_at = NOW()
           WHERE id = 1
-          RETURNING running, speed, updated_at;
-        `, [parsedRunning, parsedSpeed]);
+          RETURNING running, speed, mode, assigned_batch_id, single_batch_status, updated_at;
+        `, [parsedRunning, parsedSpeed, parsedMode]);
 
         if (rows.length > 0) {
             simState.running = rows[0].running;
             simState.speed = rows[0].speed;
+            simState.mode = rows[0].mode || 'continuous';
+            simState.assignedBatchId = rows[0].assigned_batch_id || null;
+            simState.singleBatchStatus = rows[0].single_batch_status || 'idle';
             simState.updatedAt = rows[0].updated_at;
         }
         res.json(simState);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Assign and start a user-specified batch
+router.post('/simulation/batch/assign', async (req, res) => {
+    let { batchId, startImmediately = true, clearTrain = false, resume = false } = req.body;
+    try {
+        await ensureSimulationControl();
+
+        if (!batchId || typeof batchId !== 'string' || !batchId.trim()) {
+            return res.status(400).json({ error: 'Batch number or identifier is required.' });
+        }
+        let cleanBatchId = batchId.trim();
+
+        // If purely numeric, format as standard B-YYYY-NNNN
+        if (/^\d+$/.test(cleanBatchId)) {
+            const year = new Date().getUTCFullYear();
+            cleanBatchId = `B-${year}-${cleanBatchId.padStart(4, '0')}`;
+        }
+
+        // Industrial regex validation: alphanumeric, hyphens, dots, underscores (max 64 chars)
+        if (!/^[a-zA-Z0-9_.-]{1,64}$/.test(cleanBatchId)) {
+            return res.status(400).json({
+                error: 'Batch identifier may only contain alphanumeric characters, hyphens, dots, and underscores (1–64 characters).'
+            });
+        }
+
+        // Check if batch ID already exists in batches table
+        const { rows: existing } = await query('SELECT id, status, started_at FROM batches WHERE batch_id = $1', [cleanBatchId]);
+        if (existing.length > 0) {
+            return res.status(400).json({
+                error: `Batch '${cleanBatchId}' already exists in historian records (Status: ${existing[0].status}). Please choose a unique batch number.`
+            });
+        }
+
+        const cmd = clearTrain
+            ? 'start_immediate_clear_train'
+            : (startImmediately ? 'start_immediate' : 'start_queue');
+
+        const { rows } = await query(`
+          UPDATE simulation_control
+          SET mode = 'single',
+              assigned_batch_id = $1,
+              batch_command = $2,
+              single_batch_status = 'pending',
+              running = CASE WHEN $3 THEN true ELSE running END,
+              updated_at = NOW()
+          WHERE id = 1
+          RETURNING running, speed, mode, assigned_batch_id, single_batch_status, updated_at;
+        `, [cleanBatchId, cmd, Boolean(resume)]);
+
+        if (rows.length > 0) {
+            simState.running = rows[0].running;
+            simState.speed = rows[0].speed;
+            simState.mode = rows[0].mode || 'single';
+            simState.assignedBatchId = rows[0].assigned_batch_id || cleanBatchId;
+            simState.singleBatchStatus = rows[0].single_batch_status || 'pending';
+            simState.updatedAt = rows[0].updated_at;
+        }
+
+        res.json({
+            message: `Batch '${cleanBatchId}' assigned. Simulator configured for single-batch production.`,
+            state: simState,
+            assignedBatchId: cleanBatchId
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Switch back to continuous auto-production mode
+router.post('/simulation/batch/continuous', async (req, res) => {
+    try {
+        await ensureSimulationControl();
+        const { rows } = await query(`
+          UPDATE simulation_control
+          SET mode = 'continuous',
+              batch_command = NULL,
+              single_batch_status = 'idle',
+              updated_at = NOW()
+          WHERE id = 1
+          RETURNING running, speed, mode, assigned_batch_id, single_batch_status, updated_at;
+        `);
+
+        if (rows.length > 0) {
+            simState.running = rows[0].running;
+            simState.speed = rows[0].speed;
+            simState.mode = rows[0].mode || 'continuous';
+            simState.assignedBatchId = rows[0].assigned_batch_id;
+            simState.singleBatchStatus = rows[0].single_batch_status || 'idle';
+            simState.updatedAt = rows[0].updated_at;
+        }
+
+        res.json({
+            message: 'Simulator switched to continuous production mode.',
+            state: simState
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

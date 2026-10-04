@@ -179,5 +179,9 @@ CREATE TABLE IF NOT EXISTS simulation_control (
   running           BOOLEAN NOT NULL DEFAULT true,
   speed             INTEGER NOT NULL DEFAULT 1 CHECK (speed >= 1 AND speed <= 3600),
   phase_skip_asset  TEXT,
+  mode              TEXT NOT NULL DEFAULT 'continuous' CHECK (mode IN ('continuous', 'single')),
+  assigned_batch_id TEXT,
+  batch_command     TEXT,
+  single_batch_status TEXT DEFAULT 'idle',
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
