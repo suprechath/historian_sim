@@ -28,8 +28,8 @@ SELECT
   t.is_cpp
 FROM (VALUES
   -- R1 Tags (9 tags)
-  ('R1.TEMP',       'R1', 'TEMP',       'Product temperature',           'float',            'degC',   -20::numeric, 150::numeric, -10::numeric, 105::numeric, NULL::smallint, 2::smallint, TRUE),
-  ('R1.JKT_TEMP',   'R1', 'JKT_TEMP',   'Jacket inlet temperature',      'float',            'degC',   -25::numeric, 160::numeric, NULL::numeric, 120::numeric, NULL::smallint, 1::smallint, FALSE),
+  ('R1.TEMP',       'R1', 'TEMP',       'Product temperature',           'float',            'degC',   -20::numeric, 170::numeric, 0::numeric, 145::numeric, NULL::smallint, 2::smallint, TRUE),
+  ('R1.JKT_TEMP',   'R1', 'JKT_TEMP',   'Jacket inlet temperature',      'float',            'degC',   -25::numeric, 180::numeric, NULL::numeric, 165::numeric, NULL::smallint, 1::smallint, FALSE),
   ('R1.PRES',       'R1', 'PRES',       'Vessel pressure',               'float',            'bar g',   -1::numeric,   6::numeric, NULL::numeric, 4.5::numeric, NULL::smallint, 2::smallint, TRUE),
   ('R1.FILTER_DP',  'R1', 'FILTER_DP',  'Filter pressure drop',          'float',            'bar',       0::numeric,   3::numeric, NULL::numeric, 1.5::numeric, NULL::smallint, 2::smallint, TRUE),
   ('R1.AGIT',       'R1', 'AGIT',       'Agitator speed',                'float',            'rpm',      0::numeric, 200::numeric, NULL::numeric, 180::numeric, NULL::smallint, 0::smallint, FALSE),
@@ -50,7 +50,7 @@ FROM (VALUES
 
   -- R3 Tags (8 tags)
   ('R3.TEMP',       'R3', 'TEMP',       'Product temperature',           'float',            'degC',   -20::numeric, 120::numeric, -15::numeric, 90::numeric, NULL::smallint, 2::smallint, TRUE),
-  ('R3.COOL_RATE',  'R3', 'COOL_RATE',  'Cooling rate (d TEMP / dt)',    'float_calculated', 'degC/h', -30::numeric,  30::numeric, -25::numeric,NULL::numeric, NULL::smallint, 1::smallint, TRUE),
+  ('R3.COOL_RATE',  'R3', 'COOL_RATE',  'Cooling rate (d TEMP / dt)',    'float_calculated', 'degC/h', -30::numeric,  30::numeric, -20::numeric,NULL::numeric, NULL::smallint, 1::smallint, TRUE),
   ('R3.AGIT',       'R3', 'AGIT',       'Agitator speed',                'float',            'rpm',      0::numeric, 150::numeric, NULL::numeric, 140::numeric, NULL::smallint, 0::smallint, FALSE),
   ('R3.TURB',       'R3', 'TURB',       'Turbidity',                     'float',            'NTU',      0::numeric,1000::numeric, NULL::numeric, NULL::numeric, NULL::smallint, 0::smallint, FALSE),
   ('R3.VOL',        'R3', 'VOL',        'Liquid volume',                 'float',            'L',        0::numeric,3000::numeric, NULL::numeric,2850::numeric, NULL::smallint, 0::smallint, FALSE),

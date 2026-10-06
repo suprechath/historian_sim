@@ -113,7 +113,7 @@ export default function DemoControls({
             await fetch('/ui/faults', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ tag, kind, magnitude: kind === 'drift' ? 200 : 1.5 })
+                body: JSON.stringify({ tag, kind, magnitude: kind === 'drift' ? 6.0 : 0 })
             });
         }
         fetchFaults();
@@ -378,7 +378,7 @@ export default function DemoControls({
                                 type="button"
                                 className={`demo-pill-btn ${hasDrift ? 'fault-active' : ''}`}
                                 onClick={() => toggleFault('drift')}
-                                title={`Toggle temperature drift on ${selectedReactor}.TEMP (+1.5°C)`}>
+                                title={`Toggle temperature drift on ${selectedReactor}.TEMP (+6.0°C fault)`}>
                                 <span className={`led-dot ${hasDrift ? 'led-amber' : ''}`} />
                                 <span className="btn-text">
                                     {hasDrift ? 'Stop Drift' : 'Start Temp Drift'}

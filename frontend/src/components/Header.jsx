@@ -53,6 +53,16 @@ export default function Header({ clock, running, speed, connected, mode, assigne
                         1&times;
                     </button>
                     <button
+                        aria-pressed={running && speed === 5}
+                        onClick={() => handleSpeed(5, true)}>
+                        5&times;
+                    </button>
+                    <button
+                        aria-pressed={running && speed === 10}
+                        onClick={() => handleSpeed(10, true)}>
+                        10&times;
+                    </button>
+                    <button
                         aria-pressed={running && speed === 30}
                         onClick={() => handleSpeed(30, true)}>
                         30&times;
@@ -61,11 +71,6 @@ export default function Header({ clock, running, speed, connected, mode, assigne
                         aria-pressed={running && speed === 60}
                         onClick={() => handleSpeed(60, true)}>
                         60&times;
-                    </button>
-                    <button
-                        aria-pressed={running && speed === 300}
-                        onClick={() => handleSpeed(300, true)}>
-                        300&times;
                     </button>
                     <button
                         aria-pressed={!running}

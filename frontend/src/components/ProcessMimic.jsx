@@ -216,7 +216,7 @@ export default function ProcessMimic({ reactors, tags, selectedReactor, onSelect
     };
 
     const f1Active = reactors?.R1?.phase === 'Transfer';
-    const f2Active = reactors?.R2?.phase === 'Transfer';
+    const f2Active = reactors?.R2?.phase === 'Filter & transfer' || reactors?.R2?.phase === 'Transfer';
 
     const handleKeyDown = (e, reactor) => {
         if (e.key === 'Enter' || e.key === ' ') {

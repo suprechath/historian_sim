@@ -91,6 +91,123 @@ function formatExecutedTimestamp(date) {
     return d.toISOString().slice(0, 19) + '+00:00';
 }
 
+function parseBatchLineDate(dateStr) {
+    if (!dateStr) return null;
+    const str = String(dateStr).trim();
+    const utcMatch = str.match(/^UTC\((.*?)\)$/i);
+    if (utcMatch) {
+        const d = new Date(utcMatch[1].trim() + ' UTC');
+        if (!isNaN(d.getTime())) return d;
+    }
+    const d = new Date(str);
+    return isNaN(d.getTime()) ? null : d;
+}
+
+function cleanInstructionId(instructionId = '') {
+    if (!instructionId) return '';
+    return String(instructionId).trim().replace(/^\[+/, '').replace(/\]+$/, '').toUpperCase();
+}
+
+/**
+ * Extracts [TIME: ...] triggers from text (e.g. [TIME: VALUE=130] or [TIME: VALUE=130, REF=130T]).
+ */
+function extractTimeTriggers(text, defaultRef = null) {
+    if (!text || typeof text !== 'string') return [];
+    const regex = /\[TIME:\s*([^\]]+)\]/gi;
+    const triggers = [];
+    const seen = new Set();
+    let m;
+    while ((m = regex.exec(text)) !== null) {
+        const content = m[1];
+        const valMatch = content.match(/\bVALUE\s*=\s*([+-]?\d+(?:\.\d+)?)/i);
+        if (!valMatch) continue;
+        const refMatch = content.match(/\bREF\s*=\s*([^,\s\]]+)/i);
+        const targetValue = parseFloat(valMatch[1]);
+        const targetRef = refMatch ? cleanInstructionId(refMatch[1]) : (defaultRef ? cleanInstructionId(defaultRef) : null);
+        const dedupeKey = `${targetValue}_${targetRef || ''}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+
+        triggers.push({
+            raw: m[0],
+            targetValue,
+            targetRef
+        });
+    }
+    return triggers;
+}
+
+/**
+ * Extracts duration in milliseconds from description if [RECORD: ... DURATION=... ] is present.
+ * Units supported: s (seconds), m (minutes, default), h (hours).
+ */
+function extractRecordDurationMs(text) {
+    if (!text || typeof text !== 'string') return 0;
+
+    let durationMatch = null;
+    const recordBlockMatch = text.match(/\[RECORD:\s*([^\]]+)\]/i);
+    if (recordBlockMatch) {
+        durationMatch = recordBlockMatch[1].match(/\bDURATION\s*=\s*([+-]?\d+(?:\.\d+)?)\s*(s(?:ec(?:onds?)?)?|m(?:in(?:utes?)?)?|h(?:(?:ou)?rs?)?)?\b/i);
+    }
+
+    if (!durationMatch) {
+        durationMatch = text.match(/\[DURATION:\s*([+-]?\d+(?:\.\d+)?)\s*(s(?:ec(?:onds?)?)?|m(?:in(?:utes?)?)?|h(?:(?:ou)?rs?)?)?\b\]/i) ||
+            text.match(/\bDURATION\s*=\s*([+-]?\d+(?:\.\d+)?)\s*(s(?:ec(?:onds?)?)?|m(?:in(?:utes?)?)?|h(?:(?:ou)?rs?)?)?\b/i);
+    }
+
+    if (!durationMatch) return 0;
+
+    const val = parseFloat(durationMatch[1]);
+    if (isNaN(val)) return 0;
+    const unitStr = (durationMatch[2] || 'm').toLowerCase();
+
+    if (unitStr.startsWith('s')) return Math.round(val * 1000);
+    if (unitStr.startsWith('h')) return Math.round(val * 3600 * 1000);
+    return Math.round(val * 60 * 1000); // default minutes
+}
+
+/**
+ * Aggregates all possible description fields from instructions, steps, phases, and batch payloads.
+ */
+function getCombinedDescription(ctx) {
+    const texts = [];
+    if (ctx?.instructionDescription) texts.push(ctx.instructionDescription);
+
+    const body = ctx?.rawBody || {};
+    if (body.InstructionDescription) texts.push(body.InstructionDescription);
+    if (body.Description) texts.push(body.Description);
+
+    const data = body.Data || {};
+    const batch = data.Batch || {};
+    if (batch.BatchDescription) texts.push(batch.BatchDescription);
+    if (batch.Description) texts.push(batch.Description);
+
+    const phases = Array.isArray(batch.Phases) ? batch.Phases : (batch.Phase ? [batch.Phase] : []);
+    for (const phase of phases) {
+        if (phase.PhaseDescription) texts.push(phase.PhaseDescription);
+        if (phase.Description) texts.push(phase.Description);
+        const steps = Array.isArray(phase.Steps) ? phase.Steps : (phase.Step ? [phase.Step] : []);
+        for (const step of steps) {
+            if (step.StepDescription) texts.push(step.StepDescription);
+            if (step.Description) texts.push(step.Description);
+            const instructions = Array.isArray(step.Instructions) ? step.Instructions : (step.Instruction ? [step.Instruction] : []);
+            for (const inst of instructions) {
+                if (inst.InstructionDescription) texts.push(inst.InstructionDescription);
+                if (inst.Description) texts.push(inst.Description);
+                if (inst.InstructionId) texts.push(inst.InstructionId);
+            }
+        }
+    }
+
+    if (ctx?.instruction) {
+        if (ctx.instruction.InstructionDescription) texts.push(ctx.instruction.InstructionDescription);
+        if (ctx.instruction.Description) texts.push(ctx.instruction.Description);
+        if (ctx.instruction.InstructionId) texts.push(ctx.instruction.InstructionId);
+    }
+
+    return texts.filter(t => typeof t === 'string' && t.trim()).join(' ');
+}
+
 // ✅
 function extractInstructionPayload(body = {}) {
     const data = body.Data || {};
@@ -103,7 +220,7 @@ function extractInstructionPayload(body = {}) {
         topic: body.Topic || null,
         batchId: batch.BatchId || body.batch_id || body.batchid || null,
         rawEventType: instruction.EventType !== undefined ? instruction.EventType : body.EventType,
-        instructionDescription: instruction.InstructionDescription || body.InstructionDescription || '',
+        instructionDescription: instruction.InstructionDescription || instruction.Description || body.InstructionDescription || body.Description || '',
         refElement: instruction.RefElement || body.RefElement || null,
         refTime: instruction.RefTime || body.RefTime || null,
         refInstruction: instruction.RefInstruction || body.RefInstruction || null,
@@ -114,9 +231,11 @@ function extractInstructionPayload(body = {}) {
         refEndTime: instruction.RefEndTime || body.RefEndTime || null,
         callbackKey: body.CallbackKey || instruction.CallbackKey || body.callbackkey || null,
         triggeredByEmail: instruction.TriggeredByEmail || body.TriggeredByEmail || null,
+        rawBody: body,
         instruction
     };
 }
+
 
 // ===========================================================================
 // BATCHLINE ERROR NOTIFICATION SENDER
@@ -328,6 +447,83 @@ async function getReadingNearTimestamp(tagId, targetDate, toleranceMs) {
     return snapRows.length > 0 ? snapRows[0] : null;
 }
 
+/**
+ * Finds the record time in historian nearest to targetValue of a tag after afterTime:
+ * 1. Scans sequentially from afterTime to detect the first crossing/arrival across targetValue.
+ *    If a crossing is found, returns the reading at the crossing closest to targetValue.
+ * 2. If no crossing occurred (e.g. value never reached targetValue), fallbacks to the reading
+ *    whose value came nearest to targetValue after afterTime.
+ */
+async function findRecordTimeNearestToValue(tagId, afterTime, targetValue) {
+    const CHUNK_SIZE = 5000;
+    let prevRow = null;
+
+    const { rows: firstChunk } = await query(`
+        SELECT ts, value
+        FROM readings
+        WHERE tag_id = $1 AND ts >= $2::timestamptz
+        ORDER BY ts ASC
+        LIMIT $3;
+    `, [tagId, afterTime, CHUNK_SIZE]);
+
+    if (!firstChunk || firstChunk.length === 0) {
+        return null;
+    }
+
+    const firstVal = Number(firstChunk[0].value);
+    if (!Number.isNaN(firstVal) && Math.abs(firstVal - targetValue) < 1e-4) {
+        return firstChunk[0];
+    }
+
+    let rowsToCheck = firstChunk;
+    while (rowsToCheck.length > 0) {
+        for (let i = 0; i < rowsToCheck.length; i++) {
+            const currRow = rowsToCheck[i];
+            if (currRow.value === null || currRow.value === undefined) continue;
+            const currVal = Number(currRow.value);
+            if (Number.isNaN(currVal)) continue;
+
+            if (prevRow !== null) {
+                const prevVal = Number(prevRow.value);
+                const isCrossing = (prevVal <= targetValue && currVal >= targetValue) ||
+                    (prevVal >= targetValue && currVal <= targetValue);
+                if (isCrossing) {
+                    const diffPrev = Math.abs(prevVal - targetValue);
+                    const diffCurr = Math.abs(currVal - targetValue);
+                    return diffPrev <= diffCurr ? prevRow : currRow;
+                }
+            }
+            prevRow = currRow;
+        }
+
+        if (rowsToCheck.length < CHUNK_SIZE) {
+            break;
+        }
+
+        const lastTs = rowsToCheck[rowsToCheck.length - 1].ts;
+        const { rows: nextChunk } = await query(`
+            SELECT ts, value
+            FROM readings
+            WHERE tag_id = $1 AND ts > $2::timestamptz
+            ORDER BY ts ASC
+            LIMIT $3;
+        `, [tagId, lastTs, CHUNK_SIZE]);
+
+        rowsToCheck = nextChunk;
+    }
+
+    // Fallback: If target was never reached or crossed, find reading nearest in value after afterTime
+    const { rows: nearestRows } = await query(`
+        SELECT ts, value
+        FROM readings
+        WHERE tag_id = $1 AND ts >= $2::timestamptz
+        ORDER BY ABS(value - $3) ASC, ts ASC
+        LIMIT 1;
+    `, [tagId, afterTime, targetValue]);
+
+    return nearestRows.length > 0 ? nearestRows[0] : (prevRow || null);
+}
+
 // ✅
 async function findEventForBatch({ refRecipe, refEvent }) {
     if (!refRecipe || !refEvent) return null;
@@ -455,7 +651,134 @@ async function handleCase1PointInTime(ctx, res) {
         return res.status(404).json({ error: `Could not resolve tag for RefElement: "${ctx.refElement}"` });
     }
 
-    const reading = await getNearestReading(tag.id, ctx.refTime);
+    // Check for trigger wording in description: [TIME: VALUE=130] (or [TIME: VALUE=..., REF=...])
+    const fullDesc = getCombinedDescription(ctx);
+    const triggers = extractTimeTriggers(fullDesc, ctx.refInstruction);
+    const durationMs = extractRecordDurationMs(fullDesc);
+
+    let baseRefTime = null;
+    let effectiveRefTime = null;
+    if (ctx.refTime) {
+        baseRefTime = parseBatchLineDate(ctx.refTime) || new Date(ctx.refTime);
+        if (!isNaN(baseRefTime.getTime())) {
+            effectiveRefTime = new Date(baseRefTime.getTime() + durationMs);
+            if (durationMs !== 0) {
+                console.log(`[BatchLine Case 1]: Applied [RECORD: DURATION] offset of ${durationMs}ms (${durationMs / 60000}m). Base RefTime: ${baseRefTime.toISOString()} -> Actual RefTime: ${effectiveRefTime.toISOString()}`);
+            }
+        }
+    }
+
+    if (triggers.length > 0) {
+        if (!ctx.refTime) {
+            await reportError('[BatchLine Case 1]: Missing required RefTime in instruction payload for time trigger', ctx);
+            return res.status(400).json({ error: 'Missing required RefTime in instruction payload for time trigger' });
+        }
+
+        if (!effectiveRefTime || isNaN(effectiveRefTime.getTime())) {
+            await reportError(`[BatchLine Case 1]: Invalid RefTime date format: "${ctx.refTime}"`, ctx);
+            return res.status(400).json({ error: `Invalid RefTime date format: "${ctx.refTime}"` });
+        }
+
+        const afterTime = effectiveRefTime;
+
+        console.log(`[BatchLine Case 1]: Processing ${triggers.length} time trigger(s) for tag "${tag.name}" after actual RefTime (${afterTime.toISOString()})...`);
+
+        const triggerResults = [];
+        for (const trigger of triggers) {
+            const targetRef = trigger.targetRef || ctx.refInstruction;
+            if (!targetRef) {
+                await reportError('[BatchLine Case 1]: Missing target RefInstruction for time trigger update', ctx);
+                continue;
+            }
+
+            console.log(`[BatchLine Case 1]: Finding record time nearest to ${trigger.targetValue} for tag "${tag.name}" after ${afterTime.toISOString()}...`);
+            const reading = await findRecordTimeNearestToValue(tag.id, afterTime, trigger.targetValue);
+
+            if (!reading) {
+                const errMsg = `No reading found for tag "${tag.name}" after ${afterTime.toISOString()} near value ${trigger.targetValue}`;
+                await reportError(`[BatchLine Case 1]: ${errMsg}`, ctx);
+                return res.status(404).json({ error: errMsg });
+            }
+
+            const formattedTime = formatBatchLineDate(reading.ts);
+            const executedTimestamp = formatExecutedTimestamp(reading.ts);
+
+            console.log(`[BatchLine Case 1]: Nearest reading found at ${reading.ts} (value: ${reading.value}, formatted: "${formattedTime}"). Recording back to ${targetRef}...`);
+
+            const callbackResult = await sendBatchLineInstructionUpdate({
+                refInstruction: targetRef,
+                batchId: ctx.batchId,
+                callbackKey: ctx.callbackKey,
+                actualResult: [
+                    {
+                        repeat_no: 1,
+                        value: formattedTime,
+                        executed_timestamp: executedTimestamp,
+                        executed_user_email: ctx.triggeredByEmail
+                    }
+                ]
+            });
+
+            if (callbackResult?.ok) {
+                console.log(`[BatchLine Case 1]: Successfully updated instruction ${targetRef} with record time "${formattedTime}"`);
+            } else {
+                await reportError(`[BatchLine Case 1]: Failed to update instruction ${targetRef}`, ctx, callbackResult?.data?.error?.detail || callbackResult?.error);
+            }
+
+            triggerResults.push({
+                target_value: trigger.targetValue,
+                target_ref: targetRef,
+                found_ts: reading.ts,
+                reading_value: reading.value,
+                formatted_time: formattedTime,
+                executed_timestamp: executedTimestamp,
+                quality: reading.quality,
+                callback: callbackResult
+            });
+        }
+
+        if (triggerResults.length === 1) {
+            const single = triggerResults[0];
+            return res.json({
+                status: 'success',
+                case: 1,
+                subcase: 'time_trigger',
+                batch_id: ctx.batchId,
+                tag: tag.name,
+                target_value: single.target_value,
+                target_instruction: single.target_ref,
+                ref_time: ctx.refTime,
+                actual_ref_time: afterTime.toISOString(),
+                duration_offset_ms: durationMs,
+                reading: {
+                    ts: single.found_ts,
+                    raw_value: single.reading_value,
+                    formatted_value: formatReadingValue(single.reading_value, tag.display_digits),
+                    formatted_time: single.formatted_time,
+                    executed_timestamp: single.executed_timestamp,
+                    quality: single.quality
+                },
+                callback: single.callback
+            });
+        }
+
+        return res.json({
+            status: 'success',
+            case: 1,
+            subcase: 'time_trigger',
+            batch_id: ctx.batchId,
+            tag: tag.name,
+            ref_time: ctx.refTime,
+            actual_ref_time: afterTime.toISOString(),
+            duration_offset_ms: durationMs,
+            triggers_processed: triggerResults.length,
+            results: triggerResults
+        });
+    }
+
+    // Default Case 1: Point-in-time value lookup
+    const targetLookupTime = effectiveRefTime || ctx.refTime;
+    const reading = await getNearestReading(tag.id, targetLookupTime);
     if (!reading) {
         await reportError(`[BatchLine Case 1]: No reading or snapshot found for tag "${tag.name}"`, ctx);
         return res.status(404).json({ error: `No reading or snapshot found for tag "${tag.name}"` });
@@ -490,6 +813,8 @@ async function handleCase1PointInTime(ctx, res) {
         batch_id: ctx.batchId,
         tag: tag.name,
         ref_time: ctx.refTime,
+        actual_ref_time: effectiveRefTime ? effectiveRefTime.toISOString() : null,
+        duration_offset_ms: durationMs,
         reading: {
             ts: reading.ts,
             raw_value: reading.value,
@@ -1351,6 +1676,9 @@ async function handleCase3TimeRange(ctx, res) {
             else durationMinutes = val;
         }
 
+        const sentinelMatch = content.match(/\b(SENTINEL|OPEN[-_]?ENDED)\b/i);
+        const isSentinelMode = Boolean(sentinelMatch);
+
         if (startMatch) {
             isProfileMode = true;
             profileConfig = {
@@ -1358,7 +1686,8 @@ async function handleCase3TimeRange(ctx, res) {
                 stop: stopMatch ? parseFloat(stopMatch[1]) : null,
                 durationMinutes,
                 direction: directionMatch ? directionMatch[1].toLowerCase() : null,
-                metric
+                metric,
+                isSentinel: isSentinelMode
             };
         }
     } else {
@@ -1373,15 +1702,25 @@ async function handleCase3TimeRange(ctx, res) {
         }
     }
 
-    // Determine endDate (support inferring from durationMinutes if RefEndTime omitted)
+    // Determine endDate (support inferring from durationMinutes or explicit SENTINEL/OPEN_ENDED mode)
     let endDate = ctx.refEndTime ? (parseBatchLineDate(ctx.refEndTime) || new Date(ctx.refEndTime)) : null;
-    if (!endDate || isNaN(endDate.getTime())) {
+    if (typeof isSentinelMode !== 'undefined' && isSentinelMode) {
+        // Explicit SENTINEL or OPEN_ENDED keyword in [RECORD: ... SENTINEL]
+        // Expand window with a 24-hour industrial safety watchdog ceiling awaiting stop signal from BatchLine
+        const watchdogHours = 24;
+        endDate = new Date(startDate.getTime() + watchdogHours * 60 * 60 * 1000);
+        console.log(`[BatchLine Case 3]: Explicit SENTINEL / OPEN_ENDED mode activated for tag "${ctx.refElement}" (batch: ${ctx.batchId}, refInstruction: ${ctx.refInstruction}). Setting 24h watchdog ceiling.`);
+    } else if (!endDate || isNaN(endDate.getTime())) {
         if (profileConfig?.durationMinutes && profileConfig.durationMinutes > 0) {
             endDate = new Date(startDate.getTime() + profileConfig.durationMinutes * 60 * 1000);
         } else {
             await reportError('[BatchLine Case 3]: Missing required RefEndTime in instruction payload', ctx);
             return res.status(400).json({ error: 'Missing required RefEndTime in instruction payload' });
         }
+    } else if (endDate.getTime() === startDate.getTime() && profileConfig?.durationMinutes && profileConfig.durationMinutes > 0) {
+        // When BatchLine mandates RefEndTime and operator sets RefEndTime = RefStartTime, expand by DURATION
+        console.log(`[BatchLine Case 3]: RefEndTime equals RefStartTime for tag "${ctx.refElement}". Expanding window by DURATION (${profileConfig.durationMinutes}m).`);
+        endDate = new Date(startDate.getTime() + profileConfig.durationMinutes * 60 * 1000);
     }
 
     const [actualStart, actualEnd] = startDate > endDate ? [endDate, startDate] : [startDate, endDate];
@@ -1516,6 +1855,12 @@ async function handleCase3TimeRange(ctx, res) {
     // Route 2: Record Mode (Future/Live Interval or Historical)
     // -------------------------------------------------------------------------
     if (isRecordTrigger) {
+        if (typeof isSentinelMode !== 'undefined' && isSentinelMode && !isProfileMode) {
+            console.log(`[BatchLine Case 3]: Identified Continuous Sentinel Record Mode for tag "${tag.name}" (batch: ${ctx.batchId}, INTERVAL=${intervalConfig?.rawInterval || 'none'})`);
+            const effInterval = intervalConfig || { rawInterval: '1m', intervalMinutes: 1, intervalMs: 60000 };
+            return await handleContinuousIntervalMode(ctx, res, tag, actualStart, effInterval, null, null);
+        }
+
         if (actualEnd.getTime() > nowMs) {
             console.log(`[BatchLine Case 3]: Identified Future Record Mode for tag "${tag.name}" (batch: ${ctx.batchId})`);
             let effectiveIntervalConfig = intervalConfig;
@@ -1558,22 +1903,7 @@ async function handleCase3TimeRange(ctx, res) {
 // PRINT LABEL INSTRUCTION (EBR USER RECORD TRIGGER) HELPERS
 // ===========================================================================
 
-function parseBatchLineDate(dateStr) {
-    if (!dateStr) return null;
-    const str = String(dateStr).trim();
-    const utcMatch = str.match(/^UTC\((.*?)\)$/i);
-    if (utcMatch) {
-        const d = new Date(utcMatch[1].trim() + ' UTC');
-        if (!isNaN(d.getTime())) return d;
-    }
-    const d = new Date(str);
-    return isNaN(d.getTime()) ? null : d;
-}
 
-function cleanInstructionId(instructionId = '') {
-    if (!instructionId) return '';
-    return String(instructionId).trim().replace(/^\[+/, '').replace(/\]+$/, '').toUpperCase();
-}
 
 // ✅
 function mapInstructionKey(instructionId = '') {
@@ -1586,8 +1916,8 @@ function mapInstructionKey(instructionId = '') {
     if (id.includes('[INV')) return 'INTERVAL';
     if (id.includes('[DUR')) return 'DURATION';
     if (id.includes('[DIR')) return 'DIRECTION';
-    if (id.includes('[NT')) return 'RefEndTime';
-    if (id.includes('[ST')) return 'RefStartTime';
+    if (id.includes('[ET') || id.includes('[NT') || id === 'ET' || id === 'NT') return 'RefEndTime';
+    if (id.includes('[ST') || id === 'ST') return 'RefStartTime';
     return null;
 }
 
@@ -2391,9 +2721,14 @@ async function handlePrintLabelInstruction(req, res) {
         }, null, 2));
 
         // 1. Check if this request is a STOP signal for an active continuous or future interval job
-        if (parsed.batchId && parsed.incomingInstructionIds?.length > 0) {
+        const incomingIds = [...(parsed.incomingInstructionIds || [])];
+        if (parsed.refInstruction && !incomingIds.includes(cleanInstructionId(parsed.refInstruction))) {
+            incomingIds.push(cleanInstructionId(parsed.refInstruction));
+        }
+
+        if (parsed.batchId && incomingIds.length > 0) {
             const stoppedJobs = [];
-            for (const instId of parsed.incomingInstructionIds) {
+            for (const instId of incomingIds) {
                 const cleanInst = cleanInstructionId(instId);
                 const jobKey = `${parsed.batchId}_${cleanInst}`;
 

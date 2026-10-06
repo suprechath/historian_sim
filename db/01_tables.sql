@@ -79,6 +79,26 @@ CREATE INDEX idx_events_lookup   ON events (batch_pk, name);
 CREATE INDEX idx_events_parent   ON events (parent_id);
 CREATE INDEX idx_events_tag      ON events (tag_id);
 
+-- 4b. Batch Exceptions (Dedicated Out-of-Limit Process Deviations Table)
+CREATE TABLE batch_exceptions (
+  id             SERIAL PRIMARY KEY,
+  batch_pk       INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+  asset_id       INTEGER NOT NULL REFERENCES assets(id),
+  tag_id         INTEGER NOT NULL REFERENCES tags(id),
+  phase_name     TEXT,
+  exception_type TEXT NOT NULL CHECK (exception_type IN ('HIGH_LIMIT', 'LOW_LIMIT', 'STATE_ALARM')),
+  limit_value    NUMERIC(12,4) NOT NULL,
+  peak_value     NUMERIC(12,4) NOT NULL,
+  started_at     TIMESTAMPTZ NOT NULL,
+  ended_at       TIMESTAMPTZ,
+  duration_sec   INTEGER,
+  details        JSONB,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_batch_exceptions_batch    ON batch_exceptions (batch_pk);
+CREATE INDEX idx_batch_exceptions_asset_ts ON batch_exceptions (asset_id, started_at DESC);
+CREATE INDEX idx_batch_exceptions_tag      ON batch_exceptions (tag_id);
+
 -- 5. Raw Readings (Time-series archive partitioned by TimescaleDB)
 CREATE TABLE readings (
   tag_id   INTEGER NOT NULL REFERENCES tags(id),
