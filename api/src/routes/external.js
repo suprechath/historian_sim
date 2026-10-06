@@ -635,6 +635,52 @@ function computeMetricValue(vals, metric) {
 }
 
 /**
+ * Resolves start/stop directions and whether the waveform represents an envelope/pulse
+ * (e.g. rising above threshold, staying high, then falling back below threshold).
+ */
+function resolveWaveDirections(startThreshold, stopThreshold, userDirection = null, initialVal = null) {
+    let startDirection = userDirection ? String(userDirection).trim().toLowerCase() : null;
+    if (!startDirection) {
+        if (stopThreshold !== null && stopThreshold !== startThreshold) {
+            startDirection = (stopThreshold > startThreshold) ? 'rise' : 'fall';
+        } else if (initialVal !== null) {
+            startDirection = (initialVal <= startThreshold) ? 'rise' : 'fall';
+        } else {
+            startDirection = 'rise';
+        }
+    }
+
+    const isFall = (startDirection === 'fall' || startDirection === 'down');
+    const effectiveStartDirection = isFall ? 'fall' : 'rise';
+
+    let stopDirection = null;
+    let isEnvelope = false;
+
+    if (stopThreshold !== null) {
+        if (stopThreshold === startThreshold) {
+            // Equal thresholds: envelope / pulse wave (stop when returning across the same threshold)
+            stopDirection = isFall ? 'rise' : 'fall';
+            isEnvelope = true;
+        } else if (isFall) {
+            // Starting with a fall: if stopThreshold > startThreshold, it's recovering upward (dip/valley envelope)
+            stopDirection = (stopThreshold > startThreshold) ? 'rise' : 'fall';
+            isEnvelope = (stopThreshold > startThreshold);
+        } else {
+            // Starting with a rise: if stopThreshold < startThreshold, it's falling back down (peak envelope with hysteresis)
+            stopDirection = (stopThreshold < startThreshold) ? 'fall' : 'rise';
+            isEnvelope = (stopThreshold < startThreshold);
+        }
+    }
+
+    return {
+        startDirection: effectiveStartDirection,
+        stopDirection,
+        isFall,
+        isEnvelope
+    };
+}
+
+/**
  * Consolidates readings within a window into intervals of intervalMs,
  * aggregating each interval's readings using the specified metric (min, max, avg, sum, first, last).
  */
@@ -736,25 +782,20 @@ async function handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileC
     }
 
     // Direction resolution
-    let startDirection = profileConfig.direction;
-    if (!startDirection) {
-        if (stopThreshold !== null) {
-            startDirection = (stopThreshold >= startThreshold) ? 'rise' : 'fall';
-        } else {
-            const firstValidRow = rows.find(r => r.value !== null && r.value !== undefined && !Number.isNaN(Number(r.value)));
-            const initialVal = firstValidRow ? Number(firstValidRow.value) : startThreshold;
-            startDirection = (initialVal <= startThreshold) ? 'rise' : 'fall';
-        }
-    }
-    const isFall = (startDirection === 'fall');
-    const stopDirection = (stopThreshold !== null) ? ((stopThreshold >= startThreshold) ? 'rise' : 'fall') : null;
+    const firstValidRow = rows.find(r => r.value !== null && r.value !== undefined && !Number.isNaN(Number(r.value)));
+    const firstVal = firstValidRow ? Number(firstValidRow.value) : null;
+
+    const { startDirection, stopDirection, isFall, isEnvelope } = resolveWaveDirections(
+        startThreshold,
+        stopThreshold,
+        profileConfig.direction,
+        firstVal
+    );
 
     let armed = false;
     let waveStartTs = null;
     let waveStopTs = null;
 
-    const firstValidRow = rows.find(r => r.value !== null && r.value !== undefined && !Number.isNaN(Number(r.value)));
-    const firstVal = firstValidRow ? Number(firstValidRow.value) : null;
     if (firstVal !== null) {
         if (isFall && firstVal >= startThreshold) armed = true;
         if (!isFall && firstVal <= startThreshold) armed = true;
@@ -790,17 +831,20 @@ async function handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileC
                     break;
                 }
             } else if (stopThreshold !== null) {
+                const isAfterStart = (new Date(r.ts).getTime() > new Date(waveStartTs).getTime());
                 const reachedStop = (stopDirection === 'rise') ? (val >= stopThreshold) : (val <= stopThreshold);
-                if (reachedStop) {
+                if (reachedStop && isAfterStart) {
                     waveStopTs = r.ts;
                     break;
                 }
 
-                // If wave aborted back past startThreshold before stop: reset
-                const aborted = isFall ? (val > startThreshold) : (val < startThreshold);
-                if (aborted) {
-                    waveStartTs = null;
-                    armed = false;
+                // If wave aborted back past startThreshold before stop: reset (only for monotonic ramps!)
+                if (!isEnvelope) {
+                    const aborted = isFall ? (val > startThreshold) : (val < startThreshold);
+                    if (aborted) {
+                        waveStartTs = null;
+                        armed = false;
+                    }
                 }
             }
         }
@@ -1235,25 +1279,21 @@ async function handleCase3TimeRange(ctx, res) {
         await reportError('[BatchLine Case 3]: Missing required RefElement in instruction payload', ctx);
         return res.status(400).json({ error: 'Missing required RefElement in instruction payload' });
     }
-    if (!ctx.refStartTime || !ctx.refEndTime) {
-        await reportError('[BatchLine Case 3]: Missing required RefStartTime or RefEndTime in instruction payload', ctx);
-        return res.status(400).json({ error: 'Missing required RefStartTime or RefEndTime in instruction payload' });
+    if (!ctx.refStartTime) {
+        await reportError('[BatchLine Case 3]: Missing required RefStartTime in instruction payload', ctx);
+        return res.status(400).json({ error: 'Missing required RefStartTime in instruction payload' });
     }
     if (!ctx.refType) {
         await reportError('[BatchLine Case 3]: Missing required RefType in instruction payload', ctx);
         return res.status(400).json({ error: 'Missing required RefType in instruction payload' });
     }
 
-    const startDate = new Date(ctx.refStartTime);
-    const endDate = new Date(ctx.refEndTime);
-
-    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-        const errMsg = `Invalid date format for RefStartTime ("${ctx.refStartTime}") or RefEndTime ("${ctx.refEndTime}")`;
+    const startDate = parseBatchLineDate(ctx.refStartTime) || new Date(ctx.refStartTime);
+    if (isNaN(startDate.getTime())) {
+        const errMsg = `Invalid date format for RefStartTime ("${ctx.refStartTime}")`;
         await reportError(`[BatchLine Case 3]: ${errMsg}`, ctx);
         return res.status(400).json({ error: errMsg });
     }
-
-    const [actualStart, actualEnd] = startDate > endDate ? [endDate, startDate] : [startDate, endDate];
 
     // -------------------------------------------------------------------------
     // Detect Modes (Strictly [RECORD] or [RECORD: ...] with 6 sub-scenarios)
@@ -1333,6 +1373,19 @@ async function handleCase3TimeRange(ctx, res) {
         }
     }
 
+    // Determine endDate (support inferring from durationMinutes if RefEndTime omitted)
+    let endDate = ctx.refEndTime ? (parseBatchLineDate(ctx.refEndTime) || new Date(ctx.refEndTime)) : null;
+    if (!endDate || isNaN(endDate.getTime())) {
+        if (profileConfig?.durationMinutes && profileConfig.durationMinutes > 0) {
+            endDate = new Date(startDate.getTime() + profileConfig.durationMinutes * 60 * 1000);
+        } else {
+            await reportError('[BatchLine Case 3]: Missing required RefEndTime in instruction payload', ctx);
+            return res.status(400).json({ error: 'Missing required RefEndTime in instruction payload' });
+        }
+    }
+
+    const [actualStart, actualEnd] = startDate > endDate ? [endDate, startDate] : [startDate, endDate];
+
     // Single RefElement resolution
     const tag = await resolveTag(ctx.refElement, ctx);
     if (!tag) {
@@ -1340,17 +1393,164 @@ async function handleCase3TimeRange(ctx, res) {
         return res.status(404).json({ error: `Could not resolve tag for RefElement: "${ctx.refElement}"` });
     }
 
-    const modeName = isProfileMode ? 'profile' : isRecordTrigger ? 'record' : 'aggregate';
-    console.log(`[BatchLine Case 3]: Identified mode "${modeName}" for tag "${tag.name}" (batch: ${ctx.batchId})`);
+    const now = new Date();
+    const nowMs = now.getTime();
 
+    // -------------------------------------------------------------------------
+    // Route 1: Profile Mode (Check if historical or live tracking required)
+    // -------------------------------------------------------------------------
     if (isProfileMode) {
+        let isLiveTracking = false;
+
+        if (actualEnd.getTime() > nowMs) {
+            isLiveTracking = true;
+        } else {
+            // Check in existing readings up to now if wave has already fully finished
+            const startThreshold = profileConfig.start;
+            const { startDirection, stopDirection } = resolveWaveDirections(
+                startThreshold,
+                profileConfig.stop,
+                profileConfig.direction
+            );
+            const isFall = (startDirection === 'fall');
+
+            const { rows: searchRows } = await query(`
+                SELECT ts, value FROM readings
+                WHERE tag_id = $1 AND ts >= $2::timestamptz AND ts <= $3::timestamptz
+                ORDER BY ts ASC;
+            `, [tag.id, actualStart, now]);
+
+            let waveStartTs = null;
+            let armed = false;
+            for (let i = 0; i < searchRows.length; i++) {
+                const r = searchRows[i];
+                if (r.value === null || r.value === undefined) continue;
+                const val = Number(r.value);
+                if (isNaN(val)) continue;
+
+                if (!armed) {
+                    if (isFall && val > startThreshold) armed = true;
+                    if (!isFall && val < startThreshold) armed = true;
+                }
+                const reachedStart = isFall ? (val <= startThreshold) : (val >= startThreshold);
+                if (armed && reachedStart) {
+                    waveStartTs = r.ts;
+                    break;
+                }
+                if (i === 0 && reachedStart) {
+                    waveStartTs = r.ts;
+                    break;
+                }
+            }
+
+            if (!waveStartTs) {
+                // Wave has not crossed START threshold yet: Live Tracking required
+                isLiveTracking = true;
+            } else if (profileConfig.durationMinutes !== null && profileConfig.durationMinutes > 0) {
+                const targetFinishMs = new Date(waveStartTs).getTime() + profileConfig.durationMinutes * 60 * 1000;
+                if (targetFinishMs > nowMs) {
+                    // Wave started, but duration extends beyond current time: Live Tracking required
+                    isLiveTracking = true;
+                }
+            } else if (profileConfig.stop !== null) {
+                let reachedStop = false;
+                for (const r of searchRows) {
+                    if (new Date(r.ts).getTime() <= new Date(waveStartTs).getTime()) continue;
+                    const val = Number(r.value);
+                    if (stopDirection === 'rise' ? (val >= profileConfig.stop) : (val <= profileConfig.stop)) {
+                        reachedStop = true;
+                        break;
+                    }
+                }
+                if (!reachedStop) {
+                    isLiveTracking = true;
+                }
+            }
+        }
+
+        if (isLiveTracking) {
+            console.log(`[BatchLine Case 3]: Identified Live Tracking Profile Mode for tag "${tag.name}" (batch: ${ctx.batchId}, START=${profileConfig.start}, DURATION=${profileConfig.durationMinutes ?? 'none'}m)`);
+
+            let effectiveIntervalConfig = intervalConfig;
+            if (!effectiveIntervalConfig) {
+                const sampleCount = CONFIG.MAX_PROFILE_SAMPLES || 30;
+                const durMs = (profileConfig.durationMinutes && profileConfig.durationMinutes > 0)
+                    ? (profileConfig.durationMinutes * 60 * 1000)
+                    : Math.max(1000, actualEnd.getTime() - actualStart.getTime());
+                const intervalMs = Math.max(1000, Math.round(durMs / sampleCount));
+                effectiveIntervalConfig = {
+                    rawInterval: `${Math.round(intervalMs / 1000)}s`,
+                    intervalMinutes: intervalMs / 60000,
+                    intervalMs
+                };
+            }
+
+            let effectiveEnd = actualEnd;
+            if (profileConfig.durationMinutes && profileConfig.durationMinutes > 0) {
+                const minEndMs = actualStart.getTime() + profileConfig.durationMinutes * 60 * 1000;
+                if (!effectiveEnd || effectiveEnd.getTime() < minEndMs) {
+                    effectiveEnd = new Date(minEndMs);
+                }
+            }
+
+            return await handleFutureIntervalRecordMode(
+                ctx,
+                res,
+                tag,
+                actualStart,
+                effectiveEnd,
+                effectiveIntervalConfig,
+                profileConfig.start,
+                profileConfig.direction,
+                profileConfig.stop,
+                profileConfig.durationMinutes
+            );
+        }
+
+        // Entire wave completed in the past: run standard historical profile
+        console.log(`[BatchLine Case 3]: Identified historical profile mode for tag "${tag.name}" (batch: ${ctx.batchId})`);
         return await handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileConfig, intervalConfig);
     }
 
+    // -------------------------------------------------------------------------
+    // Route 2: Record Mode (Future/Live Interval or Historical)
+    // -------------------------------------------------------------------------
     if (isRecordTrigger) {
+        if (actualEnd.getTime() > nowMs) {
+            console.log(`[BatchLine Case 3]: Identified Future Record Mode for tag "${tag.name}" (batch: ${ctx.batchId})`);
+            let effectiveIntervalConfig = intervalConfig;
+            if (!effectiveIntervalConfig) {
+                const sampleCount = CONFIG.MAX_PROFILE_SAMPLES || 30;
+                const durMs = Math.max(1000, actualEnd.getTime() - actualStart.getTime());
+                const intervalMs = Math.max(1000, Math.round(durMs / sampleCount));
+                effectiveIntervalConfig = {
+                    rawInterval: `${Math.round(intervalMs / 1000)}s`,
+                    intervalMinutes: intervalMs / 60000,
+                    intervalMs
+                };
+            }
+            return await handleFutureIntervalRecordMode(
+                ctx,
+                res,
+                tag,
+                actualStart,
+                actualEnd,
+                effectiveIntervalConfig,
+                null,
+                null,
+                null,
+                null
+            );
+        }
+
+        console.log(`[BatchLine Case 3]: Identified historical record mode for tag "${tag.name}" (batch: ${ctx.batchId})`);
         return await handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig);
     }
 
+    // -------------------------------------------------------------------------
+    // Route 3: Standard Statistical / Aggregate Calculations
+    // -------------------------------------------------------------------------
+    console.log(`[BatchLine Case 3]: Identified aggregate mode "${statField}" for tag "${tag.name}" (batch: ${ctx.batchId})`);
     return await handleAggregateMode(ctx, res, tag, actualStart, actualEnd, statField);
 }
 
@@ -1507,16 +1707,25 @@ const activeFutureIntervalJobs = new Map();
  * Immediately acknowledges HTTP webhook and starts a progressive 30-second cadence dispatcher,
  * sending sets of bucketed values to BatchLine every 30 seconds until RefEndTime.
  */
-async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig, startThreshold = null, startDirection = null, stopThreshold = null) {
+async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig, startThreshold = null, startDirection = null, stopThreshold = null, durationMinutes = null) {
     const metric = resolveMetric(ctx.refType);
     const intervalMs = intervalConfig.intervalMs;
     const startMs = actualStart.getTime();
-    const endMs = actualEnd.getTime();
+
+    const durationSpecifiedMs = (durationMinutes !== null && durationMinutes > 0)
+        ? durationMinutes * 60 * 1000
+        : null;
+
+    let endMs = actualEnd ? actualEnd.getTime() : (startMs + (durationSpecifiedMs || intervalMs));
+    if (durationSpecifiedMs && endMs < startMs + durationSpecifiedMs) {
+        endMs = startMs + durationSpecifiedMs;
+    }
+
     const durationMs = endMs - startMs;
 
     if (durationMs <= 0) {
-        const errMsg = `RefEndTime (${actualEnd.toISOString()}) must be after RefStartTime (${actualStart.toISOString()})`;
-        await reportError(`[BatchLine PrintLabel]: ${errMsg}`, ctx);
+        const errMsg = `RefEndTime (${actualEnd ? actualEnd.toISOString() : 'none'}) must be after RefStartTime (${actualStart.toISOString()})`;
+        await reportError(`[BatchLine Future Record]: ${errMsg}`, ctx);
         return res.status(400).json({ error: errMsg });
     }
 
@@ -1525,7 +1734,7 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
 
     // Cancel previous job for this instruction if running
     if (activeFutureIntervalJobs.has(jobKey)) {
-        console.log(`[BatchLine PrintLabel]: Cancelling previous future interval job for ${jobKey}`);
+        console.log(`[BatchLine Future Record]: Cancelling previous future interval job for ${jobKey}`);
         const prevJob = activeFutureIntervalJobs.get(jobKey);
         if (typeof prevJob.cleanup === 'function') prevJob.cleanup();
         else {
@@ -1558,18 +1767,13 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
         }
     }
 
-    let effectiveDirection = startDirection;
-    if (startThreshold !== null && !effectiveDirection) {
-        if (initialVal !== null) {
-            effectiveDirection = (initialVal <= startThreshold) ? 'rise' : 'fall';
-        } else {
-            effectiveDirection = 'rise';
-        }
-    }
-    const isFall = (effectiveDirection === 'fall' || effectiveDirection === 'down');
-    const stopDirection = (stopThreshold !== null && startThreshold !== null)
-        ? ((stopThreshold >= startThreshold) ? 'rise' : 'fall')
-        : (isFall ? 'rise' : 'fall');
+    const { startDirection: resolvedStartDir, stopDirection, isFall, isEnvelope } = resolveWaveDirections(
+        startThreshold,
+        stopThreshold,
+        startDirection,
+        initialVal
+    );
+    const effectiveDirection = resolvedStartDir;
 
     let crossedStartMs = (startThreshold === null) ? startMs : null;
     let armed = false;
@@ -1594,22 +1798,33 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
             if (!armed) {
                 if (isFall && val > startThreshold) armed = true;
                 if (!isFall && val < startThreshold) armed = true;
-            } else {
-                const crossed = isFall ? (val <= startThreshold) : (val >= startThreshold);
-                if (crossed) {
-                    crossedStartMs = new Date(r.ts).getTime();
-                    console.log(`[BatchLine Future 30s]: Tag "${tag.name}" already crossed START threshold (${startThreshold}) at ${r.ts} (direction: ${isFall ? 'fall' : 'rise'}). Intervals will start from this point.`);
-                    break;
-                }
+            }
+            const crossed = isFall ? (val <= startThreshold) : (val >= startThreshold);
+            if (armed && crossed) {
+                crossedStartMs = new Date(r.ts).getTime();
+                console.log(`[BatchLine Future 30s]: Tag "${tag.name}" already crossed START threshold (${startThreshold}) at ${r.ts} (direction: ${isFall ? 'fall' : 'rise'}). Intervals will start from this point.`);
+                break;
+            }
+            if (i === 0 && crossed) {
+                crossedStartMs = new Date(r.ts).getTime();
+                console.log(`[BatchLine Future 30s]: Tag "${tag.name}" was already at/past START threshold (${startThreshold}) at ${r.ts}. Intervals will start from this point.`);
+                break;
             }
         }
     }
 
+    if (crossedStartMs && durationSpecifiedMs) {
+        endMs = crossedStartMs + durationSpecifiedMs;
+    }
+
     const effectiveBaseStartMs = crossedStartMs || startMs;
-    let totalExpectedBuckets = Math.max(1, Math.ceil((endMs - effectiveBaseStartMs) / intervalMs));
-    if (totalExpectedBuckets > CONFIG.MAX_PERIODIC_REPEATS) {
-        console.warn(`[BatchLine PrintLabel Warning]: Capping expected buckets from ${totalExpectedBuckets} to max ${CONFIG.MAX_PERIODIC_REPEATS}`);
-        totalExpectedBuckets = CONFIG.MAX_PERIODIC_REPEATS;
+    let totalExpectedBuckets = durationSpecifiedMs
+        ? Math.min(Math.max(1, Math.ceil(durationSpecifiedMs / intervalMs)), CONFIG.MAX_PERIODIC_REPEATS || 50)
+        : Math.max(1, Math.ceil((endMs - effectiveBaseStartMs) / intervalMs));
+
+    if (totalExpectedBuckets > (CONFIG.MAX_PERIODIC_REPEATS || 50)) {
+        console.warn(`[BatchLine Future Warning]: Capping expected buckets from ${totalExpectedBuckets} to max ${CONFIG.MAX_PERIODIC_REPEATS || 50}`);
+        totalExpectedBuckets = CONFIG.MAX_PERIODIC_REPEATS || 50;
     }
 
     const nowMs = Date.now();
@@ -1625,16 +1840,19 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
             scenario: scenarioNum,
             mode: 'record_interval_future',
             message: isScenario2
-                ? `Scenario 2: RefStartTime is in past, RefEndTime in future. Initial past data pushed immediately; subsequent intervals pushed every 30s until ${actualEnd.toISOString()}.`
-                : `Scenario 3: RefStartTime and RefEndTime are in future. Scheduled to begin at ${actualStart.toISOString()} and push intervals every 30s until ${actualEnd.toISOString()}.`,
+                ? `Scenario 2: RefStartTime is in past, RefEndTime in future. Initial past data pushed immediately; subsequent intervals pushed every 30s until ${new Date(endMs).toISOString()}.`
+                : `Scenario 3: RefStartTime and RefEndTime are in future. Scheduled to begin at ${actualStart.toISOString()} and push intervals every 30s until ${new Date(endMs).toISOString()}.`,
             batch_id: ctx.batchId,
             tag: tag.name,
             ref_instruction: ctx.refInstruction,
             ref_start_time: ctx.refStartTime,
-            ref_end_time: ctx.refEndTime,
+            ref_end_time: actualEnd ? actualEnd.toISOString() : (new Date(endMs).toISOString()),
             start_threshold: startThreshold,
             direction: startThreshold !== null ? (isFall ? 'fall' : 'rise') : null,
             stop_threshold: stopThreshold,
+            stop_direction: stopDirection,
+            is_envelope: isEnvelope,
+            duration_minutes: durationMinutes ?? null,
             interval: intervalConfig.rawInterval,
             interval_ms: intervalMs,
             metric: metric.toUpperCase(),
@@ -1670,19 +1888,25 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
                     if (!armed) {
                         if (isFall && val > startThreshold) armed = true;
                         if (!isFall && val < startThreshold) armed = true;
-                    } else {
-                        const crossed = isFall ? (val <= startThreshold) : (val >= startThreshold);
-                        if (crossed) {
-                            crossedStartMs = new Date(r.ts).getTime();
-                            console.log(`[BatchLine Future 30s]: Tag "${tag.name}" crossed START threshold (${startThreshold}) at ${r.ts} (direction: ${isFall ? 'fall' : 'rise'}). Starting interval collection.`);
-                            break;
+                    }
+                    const crossed = isFall ? (val <= startThreshold) : (val >= startThreshold);
+                    if (armed && crossed) {
+                        crossedStartMs = new Date(r.ts).getTime();
+                        if (durationSpecifiedMs) {
+                            endMs = crossedStartMs + durationSpecifiedMs;
+                            totalExpectedBuckets = Math.min(Math.max(1, Math.ceil(durationSpecifiedMs / intervalMs)), CONFIG.MAX_PERIODIC_REPEATS || 50);
+                            if (endTimeoutId) clearTimeout(endTimeoutId);
+                            const msUntilEnd = Math.max(0, endMs - Date.now() + 1500);
+                            endTimeoutId = setTimeout(processCompletedBuckets, msUntilEnd);
                         }
+                        console.log(`[BatchLine Future 30s]: Tag "${tag.name}" crossed START threshold (${startThreshold}) at ${r.ts} (direction: ${isFall ? 'fall' : 'rise'}). Intervals will start from this point until ${new Date(endMs).toISOString()}.`);
+                        break;
                     }
                 }
 
                 if (crossedStartMs === null) {
                     if (currentNowMs >= endMs) {
-                        console.log(`[BatchLine Future 30s]: Tag "${tag.name}" never crossed START threshold (${startThreshold}) before RefEndTime (${actualEnd.toISOString()}). Finishing.`);
+                        console.log(`[BatchLine Future 30s]: Tag "${tag.name}" never crossed START threshold (${startThreshold}) before end time (${new Date(endMs).toISOString()}). Finishing.`);
                         cleanupJob();
                     } else {
                         console.log(`[BatchLine Future 30s]: Tag "${tag.name}" has not yet crossed START threshold (${startThreshold}) [direction: ${isFall ? 'fall' : 'rise'}, armed: ${armed}]. Waiting for threshold crossing...`);
@@ -1692,12 +1916,14 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
             }
 
             const effectiveStartMs = crossedStartMs;
-            const remainingDurationMs = endMs - effectiveStartMs;
-            if (remainingDurationMs > 0) {
-                totalExpectedBuckets = Math.min(
-                    Math.max(1, Math.ceil(remainingDurationMs / intervalMs)),
-                    CONFIG.MAX_PERIODIC_REPEATS
-                );
+            if (!durationSpecifiedMs) {
+                const remainingDurationMs = endMs - effectiveStartMs;
+                if (remainingDurationMs > 0) {
+                    totalExpectedBuckets = Math.min(
+                        Math.max(1, Math.ceil(remainingDurationMs / intervalMs)),
+                        CONFIG.MAX_PERIODIC_REPEATS || 50
+                    );
+                }
             }
 
             const bucketsToProcess = [];
@@ -1769,8 +1995,9 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
 
                 if (stopThreshold !== null && resolvedVal !== null) {
                     const reachedStop = (stopDirection === 'rise') ? (resolvedVal >= stopThreshold) : (resolvedVal <= stopThreshold);
-                    if (reachedStop) {
-                        console.log(`[BatchLine Future 30s]: Tag "${tag.name}" reached STOP threshold (${stopThreshold}) at bucket repeat ${b.index + 1}.`);
+                    const hasStarted = (b.bStartMs > effectiveStartMs || setOfValues.length > 0 || nextBucketIndex > 0);
+                    if (reachedStop && hasStarted) {
+                        console.log(`[BatchLine Future 30s]: Tag "${tag.name}" reached STOP threshold (${stopThreshold}) [stopDirection: ${stopDirection}, isEnvelope: ${isEnvelope}] at bucket repeat ${b.index + 1}.`);
                         hitStop = true;
                         break;
                     }
@@ -2299,7 +2526,41 @@ async function handlePrintLabelInstruction(req, res) {
             const stopThreshold = hasStop ? parseFloat(rawStop) : null;
             const startDirection = parsed.parameters.DIRECTION ? String(parsed.parameters.DIRECTION).trim().toLowerCase() : null;
             console.log(`[BatchLine PrintLabel]: Identified Future Interval Record Mode for tag "${tag.name}" (batch: ${ctx.batchId}, START=${startThreshold ?? 'none'}, STOP=${stopThreshold ?? 'none'}, INTERVAL=${intervalConfig.rawInterval}, Metric=${resolveMetric(ctx.refType)}, RefEndTime in future: ${actualEnd.toISOString()})`);
-            return await handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig, startThreshold, startDirection, stopThreshold);
+            return await handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig, startThreshold, startDirection, stopThreshold, durationMinutes);
+        }
+
+        // Mode 2b: Future/Live Profile Mode (START is specified with future RefEndTime or DURATION extending into future)
+        if (hasStart && (actualEnd.getTime() > Date.now() || (durationMinutes && durationMinutes > 0))) {
+            const startThreshold = parseFloat(rawStart);
+            const stopThreshold = hasStop ? parseFloat(rawStop) : null;
+            const startDirection = parsed.parameters.DIRECTION ? String(parsed.parameters.DIRECTION).trim().toLowerCase() : null;
+
+            let effectiveIntervalConfig = intervalConfig;
+            if (!effectiveIntervalConfig) {
+                const sampleCount = CONFIG.MAX_PROFILE_SAMPLES || 30;
+                const durMs = (durationMinutes && durationMinutes > 0)
+                    ? (durationMinutes * 60 * 1000)
+                    : Math.max(1000, actualEnd.getTime() - actualStart.getTime());
+                const intervalMs = Math.max(1000, Math.round(durMs / sampleCount));
+                effectiveIntervalConfig = {
+                    rawInterval: `${Math.round(intervalMs / 1000)}s`,
+                    intervalMinutes: intervalMs / 60000,
+                    intervalMs
+                };
+            }
+
+            let effectiveEnd = actualEnd;
+            if (durationMinutes && durationMinutes > 0) {
+                const minEndMs = actualStart.getTime() + durationMinutes * 60 * 1000;
+                if (!effectiveEnd || effectiveEnd.getTime() < minEndMs) {
+                    effectiveEnd = new Date(minEndMs);
+                }
+            }
+
+            if (effectiveEnd.getTime() > Date.now()) {
+                console.log(`[BatchLine PrintLabel]: Identified Future/Live Profile Mode for tag "${tag.name}" (batch: ${ctx.batchId}, START=${startThreshold}, DURATION=${durationMinutes ?? 'none'}m)`);
+                return await handleFutureIntervalRecordMode(ctx, res, tag, actualStart, effectiveEnd, effectiveIntervalConfig, startThreshold, startDirection, stopThreshold, durationMinutes);
+            }
         }
 
         // Mode 3: Profile Mode (START is specified and RefEndTime is in past/now)

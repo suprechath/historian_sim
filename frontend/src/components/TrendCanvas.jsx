@@ -6,6 +6,7 @@ const REACTOR_TAG_CONFIG = {
         TEMP: { d: 'Temperature', u: '°C', min: -20, max: 150, col: '#b4451f', digits: 1 },
         JKT_TEMP: { d: 'Jacket temp', u: '°C', min: -25, max: 160, col: '#c9822f', digits: 1 },
         PRES: { d: 'Pressure', u: 'bar', min: -1, max: 6, col: '#1f6e7a', digits: 2 },
+        FILTER_DP: { d: 'Filter ΔP', u: 'bar', min: 0, max: 2.5, col: '#d97706', digits: 2 },
         AGIT: { d: 'Agitator', u: 'rpm', min: 0, max: 200, col: '#5d4e8c', digits: 0 },
         VOL: { d: 'Volume', u: 'L', min: 0, max: 5000, col: '#2e5c8a', digits: 0 }
     },
@@ -26,7 +27,7 @@ const REACTOR_TAG_CONFIG = {
 };
 
 const REACTOR_TAGS = {
-    R1: ['TEMP', 'JKT_TEMP', 'PRES', 'AGIT', 'VOL'],
+    R1: ['TEMP', 'JKT_TEMP', 'PRES', 'FILTER_DP', 'AGIT', 'VOL'],
     R2: ['PH', 'TEMP', 'DOSE_FLOW', 'DOSE_TOTAL', 'VOL'],
     R3: ['TEMP', 'COOL_RATE', 'TURB', 'AGIT', 'VOL']
 };
@@ -35,7 +36,7 @@ const REACTOR_TAGS = {
 const REACTOR_LANES = {
     R1: [
         { id: 'thermal', title: 'Thermal (°C)', tags: ['TEMP', 'JKT_TEMP'] },
-        { id: 'press', title: 'Pressure', tags: ['PRES'] },
+        { id: 'press', title: 'Pressure & Filter ΔP', tags: ['PRES', 'FILTER_DP'] },
         { id: 'agitation', title: 'Agitation', tags: ['AGIT'] },
         { id: 'vol', title: 'Volume (L)', tags: ['VOL'] }
     ],

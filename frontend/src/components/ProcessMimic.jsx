@@ -73,12 +73,13 @@ export default function ProcessMimic({ reactors, tags, selectedReactor, onSelect
             speed >= 60 ? 3.5 :
                 1.0;
 
-    // Reactor Tag Lookups (All 8 tags per vessel)
+    // Reactor Tag Lookups (All tags per vessel)
     const rData = {
         R1: {
             temp: getTag('R1.TEMP'),
             jkt: getTag('R1.JKT_TEMP'),
             pres: getTag('R1.PRES'),
+            filterDp: getTag('R1.FILTER_DP'),
             agit: getTag('R1.AGIT'),
             vol: getTag('R1.VOL'),
             agitRun: getTag('R1.AGIT_RUN'),
@@ -117,6 +118,7 @@ export default function ProcessMimic({ reactors, tags, selectedReactor, onSelect
         { label: 'Temp', tag: rData.R1.temp, type: 'value', unit: '°C' },
         { label: 'Jacket', tag: rData.R1.jkt, type: 'value', unit: '°C' },
         { label: 'Pressure', tag: rData.R1.pres, type: 'value', unit: 'bar' },
+        { label: 'Filter ΔP', tag: rData.R1.filterDp, type: 'value', unit: 'bar' },
         { label: 'Agit', tag: rData.R1.agit, type: 'value', unit: 'rpm' },
         { label: 'Volume', tag: rData.R1.vol, type: 'value', unit: 'L' },
         { label: 'Agitator', tag: rData.R1.agitRun, type: 'mode' },
@@ -148,14 +150,15 @@ export default function ProcessMimic({ reactors, tags, selectedReactor, onSelect
 
     const renderReadoutTile = (x0, rows) => {
         const tileW = 144;
-        const tileH = 156;
-        const tileY = 96;
+        const rowH = 17;
+        const tileH = Math.max(156, rows.length * rowH + 14);
+        const tileY = 96 - Math.max(0, (rows.length - 8) * 8);
 
         return (
             <g className="readout-tile">
                 <rect x={x0} y={tileY} width={tileW} height={tileH} rx="3" fill="var(--panel-2)" stroke="var(--edge)" />
                 {rows.map((row, idx) => {
-                    const yBase = 113 + idx * 18;
+                    const yBase = tileY + 16 + idx * rowH;
                     const rightEdge = x0 + tileW - 8;
 
                     return (

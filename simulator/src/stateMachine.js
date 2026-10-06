@@ -1,7 +1,7 @@
 // simulator/src/stateMachine.js
 
 export const REACTOR_PHASES = {
-  R1: ['Idle', 'Charging', 'Heating', 'Reaction hold', 'Cooling', 'Transfer', 'Clean'],
+  R1: ['Idle', 'Charging', 'Heating', 'Distillation', 'Reaction hold', 'Transfer', 'Clean'],
   R2: ['Idle', 'Receive', 'pH adjust', 'Settle & separate', 'Solvent swap', 'Transfer', 'Clean'],
   R3: ['Idle', 'Receive', 'Heat to dissolve', 'Cooling ramp', 'Age', 'Transfer', 'Clean']
 };
@@ -11,9 +11,9 @@ export const PHASE_DURATIONS = {
     'Idle':          { min: 300,  max: 3600 },   // 5m – 60m
     'Charging':      { min: 1200, max: 2400 },   // 20m – 40m
     'Heating':       { min: 2700, max: 5400 },   // 45m – 90m
-    'Reaction hold': { min: 7200, max: 21600 },  // 2h – 6h
-    'Cooling':       { min: 3600, max: 7200 },   // 60m – 120m
-    'Transfer':      { min: 1200, max: 2400 },   // 20m – 40m
+    'Distillation':  { min: 1800, max: 3600 },   // 30m – 60m (Azeotropic water/solvent distillation)
+    'Reaction hold': { min: 7200, max: 21600 },  // 2h – 6h (Metformin condensation hold)
+    'Transfer':      { min: 1200, max: 2400 },   // 20m – 40m (Hot transfer to R2)
     'Clean':         { min: 1800, max: 3600 }    // 30m – 60m
   },
   R2: {
@@ -58,6 +58,12 @@ export class ReactorSimulation {
     // Temperature history buffer for R3.COOL_RATE derivative (slope)
     this.tempHistory = [];
 
+    // R1 Charge Filter Differential Pressure (FILTER_DP) State
+    this.filterClogBaseline = 0.45;    // Clean filter base DP (bar)
+    this.filterClogAccum = 0.0;        // Dirt accumulation across batches
+    this.filterAlarmTimerSec = 0;      // Continuous duration above 1.5 bar threshold
+    this.filterNeedsReplacement = false;// Flag to replace filter before next batch
+
     // Initialize values based on reactor type
     this.values = {};
     this.qualities = {};
@@ -70,6 +76,7 @@ export class ReactorSimulation {
         TEMP: 22.0,
         JKT_TEMP: 20.0,
         PRES: 0.05,
+        FILTER_DP: 0.0,
         AGIT: 0.0,
         VOL: 0.0,
         AGIT_RUN: 0,
@@ -130,11 +137,18 @@ export class ReactorSimulation {
     return this.phaseElapsedSec >= this.phaseDurationSec;
   }
 
-  // --- R1 Physics (Synthesis) ---
+  // --- R1 Physics (Metformin Hydrochloride Synthesis) ---
   _tickR1(dt, prog) {
     const p = this.currentPhase;
     const v = this.values;
     let targetTemp = 22.0;
+
+    // Filter DP behavior: Liquid only flows through charge filter during 'Charging'.
+    // Outside Charging, tag reads ~zero with small sensor noise.
+    if (p !== 'Charging') {
+      v.FILTER_DP = Math.max(0, this.approach(v.FILTER_DP, 0.0, 10, 0.003, dt));
+      this.filterAlarmTimerSec = 0;
+    }
 
     switch (p) {
       case 'Idle':
@@ -150,9 +164,31 @@ export class ReactorSimulation {
         break;
 
       case 'Charging':
+        // Liquid flow through charge filter is active between 2% and 98% of phase
+        const flowActive = prog >= 0.02 && prog <= 0.98;
+        if (flowActive) {
+          // When flow starts, value jumps up quickly, then rises slowly as dirt collects
+          const currentBatchDirt = ((prog - 0.02) / 0.96) * 0.22;
+          const targetDP = this.filterClogBaseline + this.filterClogAccum + currentBatchDirt;
+          v.FILTER_DP = this.approach(v.FILTER_DP, targetDP, 15, 0.015, dt);
+
+          // Track over-limit condition (> 1.5 bar for more than 1 minute)
+          if (v.FILTER_DP > 1.5) {
+            this.filterAlarmTimerSec += dt;
+            if (this.filterAlarmTimerSec >= 60) {
+              this.filterNeedsReplacement = true;
+            }
+          } else {
+            this.filterAlarmTimerSec = Math.max(0, this.filterAlarmTimerSec - dt * 0.5);
+          }
+        } else {
+          // When flow stops, drops back toward zero
+          v.FILTER_DP = Math.max(0, this.approach(v.FILTER_DP, 0.0, 8, 0.003, dt));
+        }
+
         targetTemp = 22.0;
         v.JKT_MODE = 0;
-        v.VOL = Math.min(4000, prog * 3900);
+        v.VOL = Math.min(4000, prog * 3950);
         v.AGIT_RUN = v.VOL > 800 ? 1 : 0;
         v.AGIT = v.AGIT_RUN ? this.approach(v.AGIT, 70, 45, 0.2, dt) : this.approach(v.AGIT, 0, 30, 0.1, dt);
         v.JKT_TEMP = this.approach(v.JKT_TEMP, 22.0, 180, 0.02, dt);
@@ -162,75 +198,78 @@ export class ReactorSimulation {
         break;
 
       case 'Heating':
-        targetTemp = 85.0;
+        targetTemp = 125.0; // Metformin condensation heating
         v.JKT_MODE = 1; // Heating
-        // Jacket runs 15 °C above target to drive heat transfer
-        const jktTargetHeat = Math.min(105, v.TEMP + 16.0);
+        const jktTargetHeat = Math.min(145, v.TEMP + 18.0);
         v.JKT_TEMP = this.approach(v.JKT_TEMP, jktTargetHeat, 90, 0.04, dt);
-        // Product follows with thermal lag and slight overshoot
-        const tempTarget = prog > 0.85 ? 86.5 : 85.0;
+        const tempTarget = prog > 0.85 ? 126.5 : 125.0;
         v.TEMP = this.approach(v.TEMP, tempTarget, 220, 0.03, dt);
-        // Pressure rises as solvent heats
-        const presTarget = 0.2 + (v.TEMP / 85.0) * 2.8;
+        const presTarget = 0.2 + (v.TEMP / 125.0) * 1.6;
         v.PRES = this.approach(v.PRES, presTarget, 180, 0.015, dt);
         v.AGIT_RUN = 1;
         v.AGIT = this.approach(v.AGIT, 140, 60, 0.2, dt);
+        v.VOL = 3950;
+        v.N2_BLANKET = 1;
+        break;
+
+      case 'Distillation':
+        // Azeotropic water/solvent distillation to drive reaction equilibrium
+        targetTemp = 122.0;
+        v.JKT_MODE = 1; // Heating continues to drive boil-off
+        v.JKT_TEMP = this.approach(v.JKT_TEMP, 140.0, 90, 0.04, dt);
+        v.TEMP = this.approach(v.TEMP, 122.0, 120, 0.03, dt); // Boiling plateau
+        // Volume decreases as distillate leaves overhead into receiver
+        v.VOL = Math.max(3000, 3950 - prog * 950);
+        v.PRES = this.approach(v.PRES, 0.25, 120, 0.01, dt);
+        v.AGIT_RUN = 1;
+        v.AGIT = this.approach(v.AGIT, 120, 60, 0.2, dt);
         v.N2_BLANKET = 1;
         break;
 
       case 'Reaction hold':
-        targetTemp = 85.0;
-        // JKT_MODE alternates between heating and cooling in short bursts
+        targetTemp = 125.0;
+        // JKT_MODE modulates to maintain tight isothermal control at 125 °C
         v.JKT_MODE = Math.sin(this.phaseElapsedSec / 120) > 0 ? 1 : 2;
-        v.JKT_TEMP = this.approach(v.JKT_TEMP, 85.0 + Math.sin(this.phaseElapsedSec / 120) * 2.5, 60, 0.04, dt);
-        // Product oscillates gently ±0.4 °C around target
-        v.TEMP = this.approach(v.TEMP, 85.0 + Math.sin((this.phaseElapsedSec - 60) / 120) * 0.4, 180, 0.02, dt);
-        v.PRES = this.approach(v.PRES, 3.2 + Math.sin(this.phaseElapsedSec / 300) * 0.1, 180, 0.01, dt);
+        v.JKT_TEMP = this.approach(v.JKT_TEMP, 125.0 + Math.sin(this.phaseElapsedSec / 120) * 2.5, 60, 0.04, dt);
+        v.TEMP = this.approach(v.TEMP, 125.0 + Math.sin((this.phaseElapsedSec - 60) / 120) * 0.4, 180, 0.02, dt);
+        v.PRES = this.approach(v.PRES, 0.35 + Math.sin(this.phaseElapsedSec / 300) * 0.05, 180, 0.01, dt);
         v.AGIT_RUN = 1;
         v.AGIT = this.approach(v.AGIT, 140, 60, 0.2, dt);
-        v.N2_BLANKET = 1;
-        break;
-
-      case 'Cooling':
-        targetTemp = 25.0;
-        v.JKT_MODE = 2; // Cooling
-        v.JKT_TEMP = this.approach(v.JKT_TEMP, 12.0, 90, 0.04, dt);
-        v.TEMP = this.approach(v.TEMP, 25.0, 240, 0.03, dt);
-        v.PRES = this.approach(v.PRES, 0.3, 180, 0.01, dt);
-        v.AGIT_RUN = 1;
-        v.AGIT = this.approach(v.AGIT, 70, 60, 0.2, dt);
+        v.VOL = 3000;
         v.N2_BLANKET = 1;
         break;
 
       case 'Transfer':
-        targetTemp = 22.0;
+        // Metformin HOT transfer directly to R2 (no cooling in R1 to prevent line freezing)
+        targetTemp = 100.0;
         v.JKT_MODE = 0;
-        v.VOL = Math.max(0, (1 - prog) * 3900);
-        v.AGIT_RUN = v.VOL > 500 ? 1 : 0;
+        v.VOL = Math.max(0, (1 - prog) * 3000);
+        v.AGIT_RUN = v.VOL > 400 ? 1 : 0;
         v.AGIT = v.AGIT_RUN ? this.approach(v.AGIT, 40, 45, 0.2, dt) : this.approach(v.AGIT, 0, 30, 0.1, dt);
-        v.TEMP = this.approach(v.TEMP, 24.0, 300, 0.02, dt);
-        v.JKT_TEMP = this.approach(v.JKT_TEMP, 20.0, 200, 0.02, dt);
+        v.TEMP = this.approach(v.TEMP, 102.0, 360, 0.02, dt);
+        v.JKT_TEMP = this.approach(v.JKT_TEMP, 95.0, 200, 0.02, dt);
         v.PRES = this.approach(v.PRES, 0.05, 120, 0.005, dt);
         v.N2_BLANKET = 1;
         break;
 
       case 'Clean':
-        targetTemp = 70.0;
+        targetTemp = 80.0;
         v.JKT_MODE = prog < 0.75 ? 1 : 0;
         v.VOL = prog < 0.75 ? 2000 : Math.max(0, (1 - (prog - 0.75) / 0.25) * 2000);
         v.AGIT_RUN = v.VOL > 300 ? 1 : 0;
         v.AGIT = v.AGIT_RUN ? this.approach(v.AGIT, 160, 45, 0.3, dt) : this.approach(v.AGIT, 0, 30, 0.1, dt);
-        v.JKT_TEMP = prog < 0.75 ? this.approach(v.JKT_TEMP, 75.0, 120, 0.04, dt) : this.approach(v.JKT_TEMP, 25.0, 120, 0.04, dt);
-        v.TEMP = prog < 0.75 ? this.approach(v.TEMP, 70.0, 200, 0.03, dt) : this.approach(v.TEMP, 30.0, 200, 0.03, dt);
+        v.JKT_TEMP = prog < 0.75 ? this.approach(v.JKT_TEMP, 85.0, 120, 0.04, dt) : this.approach(v.JKT_TEMP, 25.0, 120, 0.04, dt);
+        v.TEMP = prog < 0.75 ? this.approach(v.TEMP, 80.0, 200, 0.03, dt) : this.approach(v.TEMP, 30.0, 200, 0.03, dt);
         v.PRES = this.approach(v.PRES, 0.5, 120, 0.01, dt);
         v.N2_BLANKET = 1;
         break;
     }
 
     // Physical clamps
-    v.TEMP = Math.max(-20, Math.min(150, v.TEMP));
-    v.JKT_TEMP = Math.max(-25, Math.min(160, v.JKT_TEMP));
+    v.TEMP = Math.max(-20, Math.min(160, v.TEMP));
+    v.JKT_TEMP = Math.max(-25, Math.min(170, v.JKT_TEMP));
     v.PRES = Math.max(-1, Math.min(6, v.PRES));
+    v.FILTER_DP = Math.max(0, Math.min(3, v.FILTER_DP));
     v.AGIT = Math.max(0, Math.min(200, v.AGIT));
     v.VOL = Math.max(0, Math.min(5000, v.VOL));
   }
@@ -254,10 +293,11 @@ export class ReactorSimulation {
       case 'Receive':
         // Reset DOSE_TOTAL at start
         if (this.phaseElapsedSec <= dt) v.DOSE_TOTAL = 0.0;
-        v.VOL = Math.min(3900, prog * 3900);
-        v.AGIT_RUN = v.VOL > 800 ? 1 : 0;
+        v.VOL = Math.min(3000, prog * 3000);
+        v.AGIT_RUN = v.VOL > 600 ? 1 : 0;
         v.PH = this.approach(v.PH, 2.4, 180, 0.01, dt);
-        v.TEMP = this.approach(v.TEMP, 28.0, 240, 0.02, dt);
+        // Cools as hot mixture (100 °C) from R1 enters R2 with dilution / quench
+        v.TEMP = this.approach(v.TEMP, 85.0 - prog * 45.0, 180, 0.03, dt);
         v.DOSE_FLOW = 0;
         v.DOSE_PUMP = 0;
         v.N2_BLANKET = 1;
@@ -272,7 +312,7 @@ export class ReactorSimulation {
         // Integrate total dosed volume (Flow in L/h -> L/s)
         v.DOSE_TOTAL += (v.DOSE_FLOW / 3600.0) * dt;
         // Volume increases by dosing
-        v.VOL = 3900 + v.DOSE_TOTAL;
+        v.VOL = 3000 + v.DOSE_TOTAL;
         // pH rises asymptotically toward 7.0
         const phTarget = 2.4 + (1 - Math.exp(-prog * 4.5)) * 4.6;
         v.PH = this.approach(v.PH, phTarget, 60, 0.01, dt);
@@ -450,12 +490,28 @@ export class ReactorSimulation {
 
   // Transition to next phase in sequence or forced phase
   transitionNextPhase(forcedPhase = null) {
+    const prevPhase = this.currentPhase;
     const phases = REACTOR_PHASES[this.code];
     if (forcedPhase) {
       this.currentPhase = forcedPhase;
     } else {
       const idx = phases.indexOf(this.currentPhase);
       this.currentPhase = phases[(idx + 1) % phases.length];
+    }
+
+    // R1 Charge Filter DP lifecycle across batches:
+    // Filter collects dirt during Charging (+0.26 bar higher on each successive batch).
+    // Once > 1.5 bar for > 1 min, filter is flagged and replaced during Clean / Idle before next batch.
+    if (this.code === 'R1') {
+      if (prevPhase === 'Charging') {
+        this.filterClogAccum += 0.26;
+      }
+      if ((this.currentPhase === 'Idle' || this.currentPhase === 'Clean') && this.filterNeedsReplacement) {
+        this.filterClogAccum = 0.0;
+        this.filterNeedsReplacement = false;
+        this.filterAlarmTimerSec = 0;
+        console.log('[R1 Charge Filter] High DP limit exceeded (>1.5 bar) on prior batch. Filter element replaced before next batch; DP reset to clean level.');
+      }
     }
 
     this.phaseElapsedSec = 0;

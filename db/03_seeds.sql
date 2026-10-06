@@ -27,10 +27,11 @@ SELECT
   t.display_digits,
   t.is_cpp
 FROM (VALUES
-  -- R1 Tags (8 tags)
+  -- R1 Tags (9 tags)
   ('R1.TEMP',       'R1', 'TEMP',       'Product temperature',           'float',            'degC',   -20::numeric, 150::numeric, -10::numeric, 105::numeric, NULL::smallint, 2::smallint, TRUE),
   ('R1.JKT_TEMP',   'R1', 'JKT_TEMP',   'Jacket inlet temperature',      'float',            'degC',   -25::numeric, 160::numeric, NULL::numeric, 120::numeric, NULL::smallint, 1::smallint, FALSE),
   ('R1.PRES',       'R1', 'PRES',       'Vessel pressure',               'float',            'bar g',   -1::numeric,   6::numeric, NULL::numeric, 4.5::numeric, NULL::smallint, 2::smallint, TRUE),
+  ('R1.FILTER_DP',  'R1', 'FILTER_DP',  'Filter pressure drop',          'float',            'bar',       0::numeric,   3::numeric, NULL::numeric, 1.5::numeric, NULL::smallint, 2::smallint, TRUE),
   ('R1.AGIT',       'R1', 'AGIT',       'Agitator speed',                'float',            'rpm',      0::numeric, 200::numeric, NULL::numeric, 180::numeric, NULL::smallint, 0::smallint, FALSE),
   ('R1.VOL',        'R1', 'VOL',        'Liquid volume',                 'float',            'L',        0::numeric,5000::numeric, NULL::numeric,4800::numeric, NULL::smallint, 0::smallint, FALSE),
   ('R1.AGIT_RUN',   'R1', 'AGIT_RUN',   'Agitator state',                'integer',          NULL,       0::numeric,   1::numeric, NULL::numeric, NULL::numeric, NULL::smallint, 0::smallint, FALSE),
