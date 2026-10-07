@@ -273,12 +273,12 @@ export class ReactorSimulation {
         v.VOL = Math.max(3000, 3950 - prog * 950);
 
         let targetPresDist = 0.35;
-        // Solvent vapor boil-up surge & condenser vent restriction peak at ~4.82 bar g (alarm_high is 4.50 bar g)
-        if (prog >= 0.14 && prog <= 0.32) {
-          const boilupProg = Math.sin(((prog - 0.14) / 0.18) * Math.PI);
-          targetPresDist = 0.35 + boilupProg * 4.47; // Peaks at ~4.82 bar g
+        // Solvent vapor boil-up surge & overhead condenser backpressure: reliably peaks at ~4.75 - 4.88 bar g (> 4.50 bar g alarm)
+        if (prog >= 0.12 && prog <= 0.36) {
+          const boilupProg = Math.sin(((prog - 0.12) / 0.24) * Math.PI);
+          targetPresDist = 0.35 + boilupProg * 4.95; // Target peaks at 5.30 bar g
         }
-        v.PRES = this.approach(v.PRES, targetPresDist, 75, 0.005, dt);
+        v.PRES = this.approach(v.PRES, targetPresDist, 50, 0.005, dt);
         v.AGIT_RUN = 1;
         v.AGIT = this.approach(v.AGIT, 120, 60, 0.1, dt);
         v.N2_BLANKET = 1;
@@ -385,18 +385,18 @@ export class ReactorSimulation {
         v.AGIT_RUN = 1;
         v.DOSE_PUMP = prog < 0.85 ? 1 : 0;
         let targetFlow = v.DOSE_PUMP ? Math.max(30, (1 - prog * 0.85) * 250) : 0;
-        if (this.r2HasDoseFlowSurge && prog >= 0.10 && prog <= 0.25) {
-          targetFlow = 425; // Brief dosing valve surge (> 400 L/h)
+        if (this.r2HasDoseFlowSurge && prog >= 0.10 && prog <= 0.28) {
+          targetFlow = 450; // Dosing valve surge peaking at ~435 - 445 L/h (> 400 L/h alarm)
         }
-        v.DOSE_FLOW = this.approach(v.DOSE_FLOW, targetFlow, 20, 0.1, dt);
+        v.DOSE_FLOW = this.approach(v.DOSE_FLOW, targetFlow, 15, 0.1, dt);
         v.DOSE_TOTAL += (v.DOSE_FLOW / 3600.0) * dt;
         v.VOL = 3000 + v.DOSE_TOTAL;
         let phTarget = 2.4 + (1 - Math.exp(-prog * 4.5)) * 4.6;
-        if (this.r2HasPhOvershoot && prog >= 0.78 && prog <= 0.90) {
-          const overshoot = Math.sin(((prog - 0.78) / 0.12) * Math.PI);
-          phTarget += overshoot * 2.8; // Brief alkaline overshoot peaking at ~9.8 pH (> 9.5)
+        if (this.r2HasPhOvershoot && prog >= 0.76 && prog <= 0.92) {
+          const overshoot = Math.sin(((prog - 0.76) / 0.16) * Math.PI);
+          phTarget += overshoot * 3.2; // Alkaline overshoot peaking at ~9.85 - 10.1 pH (> 9.50 alarm)
         }
-        v.PH = this.approach(v.PH, phTarget, 60, 0.005, dt);
+        v.PH = this.approach(v.PH, phTarget, 45, 0.005, dt);
         v.TEMP = this.approach(v.TEMP, 38.0 + (prog < 0.8 ? prog * 6 : 4.8), 120, 0.015, dt);
         v.N2_BLANKET = 1;
         break;
@@ -418,10 +418,11 @@ export class ReactorSimulation {
         v.DOSE_PUMP = 0;
         v.DOSE_FLOW = 0;
         let targetSwapTemp = 62.0;
-        if (this.r2HasTempOverrun && prog >= 0.40 && prog <= 0.60) {
-          targetSwapTemp = 92.5; // Occasional solvent swap temperature creep (> 90.0 °C)
+        if (this.r2HasTempOverrun && prog >= 0.35 && prog <= 0.65) {
+          const overrunProg = Math.sin(((prog - 0.35) / 0.30) * Math.PI);
+          targetSwapTemp = 62.0 + overrunProg * 32.0; // Solvent swap temperature creep peaking at ~92.5 - 93.5 °C (> 90.0 °C alarm)
         }
-        v.TEMP = this.approach(v.TEMP, targetSwapTemp, 200, 0.015, dt);
+        v.TEMP = this.approach(v.TEMP, targetSwapTemp, 90, 0.015, dt);
         const swapVol = prog < 0.6 ? 3100 - prog * 900 : 2560 + (prog - 0.6) * 400;
         v.VOL = this.approach(v.VOL, swapVol, 120, 0.05, dt);
         v.N2_BLANKET = 1;
@@ -496,16 +497,16 @@ export class ReactorSimulation {
       case 'Cooling ramp':
         v.AGIT_RUN = 1;
         let agitSpeedR3 = 75;
-        if (this.r3HasAgitSpike && prog >= 0.30 && prog <= 0.42) {
-          agitSpeedR3 = 145; // Brief slurry viscosity speed boost (> 140 rpm)
+        if (this.r3HasAgitSpike && prog >= 0.28 && prog <= 0.44) {
+          agitSpeedR3 = 148; // Slurry viscosity compensation speed spike peaking at ~145 - 147 rpm (> 140 rpm alarm)
         }
-        v.AGIT = this.approach(v.AGIT, agitSpeedR3, 45, 0.1, dt);
+        v.AGIT = this.approach(v.AGIT, agitSpeedR3, 25, 0.1, dt);
         v.COOL_RAMP = 1;
         let rampTemp = 72.0 - prog * 60.0; // Controlled linear ramp 72 -> 12 °C
-        if (this.r3HasCoolRateGlitch && prog >= 0.40 && prog <= 0.52) {
-          rampTemp -= Math.sin(((prog - 0.40) / 0.12) * Math.PI) * 2.5; // Chiller pulse causing cooling rate dip < -20 °C/h
+        if (this.r3HasCoolRateGlitch && prog >= 0.38 && prog <= 0.54) {
+          rampTemp -= Math.sin(((prog - 0.38) / 0.16) * Math.PI) * 4.2; // Chiller pulse causing cooling rate dip to -23.0 to -26.0 °C/h (< -20.0 °C/h alarm)
         }
-        v.TEMP = this.approach(v.TEMP, rampTemp, 50, 0.015, dt);
+        v.TEMP = this.approach(v.TEMP, rampTemp, 30, 0.015, dt);
         if (prog >= 0.40) {
           v.SEEDED = 1;
           const seedProg = (prog - 0.40) / 0.60;
@@ -609,14 +610,14 @@ export class ReactorSimulation {
       }
     } else if (this.code === 'R2') {
       if (this.currentPhase === 'Receive' && prevPhase !== 'Receive') {
-        this.r2HasPhOvershoot = this.prng.next() < 0.15;
-        this.r2HasDoseFlowSurge = this.prng.next() < 0.10;
-        this.r2HasTempOverrun = this.prng.next() < 0.10;
+        this.r2HasPhOvershoot = this.prng.next() < 0.50;   // 50% per batch
+        this.r2HasDoseFlowSurge = this.prng.next() < 0.50; // 50% per batch
+        this.r2HasTempOverrun = this.prng.next() < 0.50;   // 50% per batch
       }
     } else if (this.code === 'R3') {
       if (this.currentPhase === 'Receive' && prevPhase !== 'Receive') {
-        this.r3HasCoolRateGlitch = this.prng.next() < 0.20;
-        this.r3HasAgitSpike = this.prng.next() < 0.08;
+        this.r3HasCoolRateGlitch = this.prng.next() < 0.50; // 50% per batch
+        this.r3HasAgitSpike = this.prng.next() < 0.50;      // 50% per batch
       }
     }
 

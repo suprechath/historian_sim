@@ -37,6 +37,23 @@ export class ControlService {
   }
 
   /**
+   * Reset simulation speed to default (1x) on container startup.
+   */
+  async resetSpeedToDefault(defaultSpeed = 1) {
+    try {
+      await query(
+        `INSERT INTO simulation_control (id, running, speed, mode)
+         VALUES (1, true, $1, 'continuous')
+         ON CONFLICT (id) DO UPDATE SET speed = $1, updated_at = NOW()`,
+        [defaultSpeed]
+      );
+      logger.info(`Simulation speed initialized to default: ${defaultSpeed}x`, 'ControlService');
+    } catch (err) {
+      logger.warn(`Could not initialize default simulation speed: ${err.message}`, 'ControlService');
+    }
+  }
+
+  /**
    * Clear processed phase_skip_asset trigger.
    */
   async clearPhaseSkip() {

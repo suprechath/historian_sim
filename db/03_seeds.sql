@@ -93,4 +93,4 @@ SELECT id, now(), NULL, 2 FROM tags;
 -- 4. Simulation Control Plane (Default to active at 1x real-time speed in continuous mode)
 INSERT INTO simulation_control (id, running, speed, mode)
 VALUES (1, true, 1, 'continuous')
-ON CONFLICT (id) DO NOTHING;
+ON CONFLICT (id) DO UPDATE SET speed = 1;

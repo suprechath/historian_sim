@@ -442,6 +442,13 @@ export async function seedHistory({ days = config.autoSeedDays, seed = Date.now(
       [sTagIds, sTimes, sVals, sQualities]
     );
 
+    // 5. Ensure simulation control plane is reset to 1x real-time speed in continuous mode
+    await client.query(`
+      INSERT INTO simulation_control (id, running, speed, mode)
+      VALUES (1, true, 1, 'continuous')
+      ON CONFLICT (id) DO UPDATE SET speed = 1, running = true, updated_at = NOW()
+    `);
+
     logger.info('Historical Backfill Completed Successfully!', 'Seeder');
     logger.info(`- Total Readings Persisted: ${totalReadings.toLocaleString()}`, 'Seeder');
     logger.info(`- Total Batches Generated: ${batchSeq - 1}`, 'Seeder');

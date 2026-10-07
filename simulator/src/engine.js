@@ -1,4 +1,5 @@
 import { query, closePool } from './db.js';
+import { config } from './config.js';
 import { PRNG } from './prng.js';
 import { logger } from './logger.js';
 import { ReactorSimulation } from './stateMachine.js';
@@ -38,6 +39,9 @@ export class SimulationEngine {
 
   async initialize() {
     logger.info('Initializing Continuous Simulation Engine (Single-Batch Train)...', 'Engine');
+
+    // 0. Ensure simulation speed is initialized to default (1x) on container/engine launch
+    await this.controlService.resetSpeedToDefault(config.defaultSpeed);
 
     // 1. Fetch Assets and Tags
     const { rows: assets } = await query(

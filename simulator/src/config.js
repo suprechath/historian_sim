@@ -10,6 +10,7 @@ dotenv.config(); // Also check local .env if present
 export const config = {
   databaseUrl: process.env.DATABASE_URL || 'postgres://admin:FT1234@localhost:5432/reactor',
   autoSeedDays: parseInt(process.env.AUTO_SEED_DAYS || '3', 10),
+  defaultSpeed: Math.max(1, Math.min(3600, parseInt(process.env.SIMULATION_SPEED || process.env.DEFAULT_SIM_SPEED || '1', 10))),
   archiveIntervalSec: parseInt(process.env.ARCHIVE_INTERVAL_SEC || '5', 10),
   maxArchiveBufferSize: parseInt(process.env.MAX_ARCHIVE_BUFFER_SIZE || '50000', 10),
   logLevel: (process.env.LOG_LEVEL || 'info').toLowerCase(),

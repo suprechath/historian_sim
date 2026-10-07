@@ -94,6 +94,7 @@ function formatExecutedTimestamp(date) {
 function parseBatchLineDate(dateStr) {
     if (!dateStr) return null;
     const str = String(dateStr).trim();
+    if (['null', 'undefined', 'none', 'nil', '', 'skip instruction'].includes(str.toLowerCase())) return null;
     const utcMatch = str.match(/^UTC\((.*?)\)$/i);
     if (utcMatch) {
         const d = new Date(utcMatch[1].trim() + ' UTC');
@@ -138,6 +139,36 @@ function extractTimeTriggers(text, defaultRef = null) {
 }
 
 /**
+ * Extracts [EXCEPTION: REF=...] triggers from text (e.g. [EXCEPTION: REF=REFINST] or [EXCEPTION]).
+ */
+function extractExceptionTriggers(text, defaultRef = null) {
+    if (!text || typeof text !== 'string') return [];
+    const regex = /\[EXCEPTION(?::\s*([^\]]*))?\]/gi;
+    const triggers = [];
+    const seen = new Set();
+    let m;
+    while ((m = regex.exec(text)) !== null) {
+        const content = (m[1] || '').trim();
+        const refMatch = content.match(/\bREF\s*=\s*([^,\s\]]+)/i);
+        const targetRef = refMatch ? cleanInstructionId(refMatch[1]) : (defaultRef ? cleanInstructionId(defaultRef) : null);
+        const phaseMatch = content.match(/\bPHASE\s*=\s*([^,\s\]]+)/i);
+        const tagMatch = content.match(/\bTAG\s*=\s*([^,\s\]]+)/i);
+
+        const dedupeKey = `${targetRef || ''}_${phaseMatch ? phaseMatch[1] : ''}_${tagMatch ? tagMatch[1] : ''}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+
+        triggers.push({
+            raw: m[0],
+            targetRef,
+            filterPhase: phaseMatch ? phaseMatch[1] : null,
+            filterTag: tagMatch ? tagMatch[1] : null
+        });
+    }
+    return triggers;
+}
+
+/**
  * Extracts duration in milliseconds from description if [RECORD: ... DURATION=... ] is present.
  * Units supported: s (seconds), m (minutes, default), h (hours).
  */
@@ -164,6 +195,55 @@ function extractRecordDurationMs(text) {
     if (unitStr.startsWith('s')) return Math.round(val * 1000);
     if (unitStr.startsWith('h')) return Math.round(val * 3600 * 1000);
     return Math.round(val * 60 * 1000); // default minutes
+}
+
+/**
+ * Extracts [INTERPRET: ...] mappings from text (e.g. [INTERPRET: 1="Yes", 0="No"]).
+ * Maps fetched numeric or string values according to specified key-value definitions.
+ */
+function extractInterpretMapping(text) {
+    if (!text || typeof text !== 'string') return null;
+    const match = text.match(/\[INTERPRET:\s*([^\]]+)\]/i);
+    if (!match) return null;
+
+    const content = match[1].trim();
+    const mapping = {};
+    const pairRegex = /(?:([+-]?\d+(?:\.\d+)?|"[^"]*"|'[^']*'|[a-zA-Z0-9_-]+))\s*=\s*(?:"([^"]*)"|'([^']*)'|([^,\s\]]+))/g;
+    let m;
+    while ((m = pairRegex.exec(content)) !== null) {
+        const rawKey = (m[1] || '').trim().replace(/^["']|["']$/g, '');
+        const rawVal = (m[2] !== undefined ? m[2] : (m[3] !== undefined ? m[3] : m[4] || '')).trim();
+        mapping[rawKey] = rawVal;
+        const numKey = Number(rawKey);
+        if (!isNaN(numKey)) {
+            mapping[String(numKey)] = rawVal;
+            mapping[String(Math.round(numKey))] = rawVal;
+        }
+    }
+
+    if (Object.keys(mapping).length === 0) return null;
+
+    return {
+        raw: match[0],
+        mapping,
+        interpret: (val) => {
+            if (val === null || val === undefined) {
+                return mapping['null'] !== undefined ? mapping['null'] : (mapping['0'] !== undefined ? mapping['0'] : 'No');
+            }
+            const numVal = Number(val);
+            if (!isNaN(numVal)) {
+                const intStr = String(Math.round(numVal));
+                if (mapping[intStr] !== undefined) return mapping[intStr];
+                if (mapping[String(numVal)] !== undefined) return mapping[String(numVal)];
+                if (Math.round(numVal) === 1 && mapping['1'] !== undefined) return mapping['1'];
+                if (mapping['0'] !== undefined) return mapping['0'];
+                return Math.round(numVal) === 1 ? 'Yes' : 'No';
+            }
+            const strVal = String(val).trim();
+            if (mapping[strVal] !== undefined) return mapping[strVal];
+            return strVal === '1' ? (mapping['1'] || 'Yes') : (mapping['0'] || 'No');
+        }
+    };
 }
 
 /**
@@ -208,6 +288,13 @@ function getCombinedDescription(ctx) {
     return texts.filter(t => typeof t === 'string' && t.trim()).join(' ');
 }
 
+function cleanPayloadField(val) {
+    if (val === null || val === undefined) return null;
+    const s = String(val).trim();
+    if (['null', 'undefined', 'none', 'nil', ''].includes(s.toLowerCase())) return null;
+    return s;
+}
+
 // ✅
 function extractInstructionPayload(body = {}) {
     const data = body.Data || {};
@@ -221,14 +308,14 @@ function extractInstructionPayload(body = {}) {
         batchId: batch.BatchId || body.batch_id || body.batchid || null,
         rawEventType: instruction.EventType !== undefined ? instruction.EventType : body.EventType,
         instructionDescription: instruction.InstructionDescription || instruction.Description || body.InstructionDescription || body.Description || '',
-        refElement: instruction.RefElement || body.RefElement || null,
-        refTime: instruction.RefTime || body.RefTime || null,
-        refInstruction: instruction.RefInstruction || body.RefInstruction || null,
-        refRecipe: instruction.RefRecipe || body.RefRecipe || null,
-        refEvent: instruction.RefEvent || body.RefEvent || null,
-        refType: instruction.RefType || body.RefType || null,
-        refStartTime: instruction.RefStartTime || body.RefStartTime || null,
-        refEndTime: instruction.RefEndTime || body.RefEndTime || null,
+        refElement: cleanPayloadField(instruction.RefElement || body.RefElement),
+        refTime: cleanPayloadField(instruction.RefTime || body.RefTime),
+        refInstruction: cleanPayloadField(instruction.RefInstruction || body.RefInstruction),
+        refRecipe: cleanPayloadField(instruction.RefRecipe || body.RefRecipe),
+        refEvent: cleanPayloadField(instruction.RefEvent || body.RefEvent),
+        refType: cleanPayloadField(instruction.RefType || body.RefType),
+        refStartTime: cleanPayloadField(instruction.RefStartTime || body.RefStartTime),
+        refEndTime: cleanPayloadField(instruction.RefEndTime || body.RefEndTime),
         callbackKey: body.CallbackKey || instruction.CallbackKey || body.callbackkey || null,
         triggeredByEmail: instruction.TriggeredByEmail || body.TriggeredByEmail || null,
         rawBody: body,
@@ -653,8 +740,14 @@ async function handleCase1PointInTime(ctx, res) {
 
     // Check for trigger wording in description: [TIME: VALUE=130] (or [TIME: VALUE=..., REF=...])
     const fullDesc = getCombinedDescription(ctx);
+    const exceptionTriggers = extractExceptionTriggers(fullDesc, ctx.refInstruction);
+    if (exceptionTriggers.length > 0) {
+        return await handleBatchExceptionTrigger(ctx, res, exceptionTriggers);
+    }
+
     const triggers = extractTimeTriggers(fullDesc, ctx.refInstruction);
     const durationMs = extractRecordDurationMs(fullDesc);
+    const interpretConfig = extractInterpretMapping(fullDesc);
 
     let baseRefTime = null;
     let effectiveRefTime = null;
@@ -784,8 +877,13 @@ async function handleCase1PointInTime(ctx, res) {
         return res.status(404).json({ error: `No reading or snapshot found for tag "${tag.name}"` });
     }
 
-    const formattedValue = formatReadingValue(reading.value, tag.display_digits);
+    const standardFormattedValue = formatReadingValue(reading.value, tag.display_digits);
+    const formattedValue = interpretConfig ? interpretConfig.interpret(reading.value) : standardFormattedValue;
     const executedTimestamp = formatExecutedTimestamp(reading.ts);
+
+    if (interpretConfig) {
+        console.log(`[BatchLine Case 1]: Applied [INTERPRET] mapping on tag "${tag.name}": raw value ${reading.value} (${standardFormattedValue}) -> "${formattedValue}"`);
+    }
 
     const callbackResult = await sendBatchLineInstructionUpdate({
         refInstruction: ctx.refInstruction,
@@ -802,9 +900,9 @@ async function handleCase1PointInTime(ctx, res) {
     });
 
     if (callbackResult?.ok) {
-        console.log(`[BatchLine Case 1]: Successfully updated instruction for tag ${tag.name}`);
+        console.log(`[BatchLine Case 1]: Successfully updated instruction for tag ${tag.name} with value "${formattedValue}"`);
     } else {
-        await reportError('[BatchLine Case 1]: Failed to update instruction', ctx, callbackResult?.data.error.detail);
+        await reportError('[BatchLine Case 1]: Failed to update instruction', ctx, callbackResult?.data?.error?.detail || callbackResult?.error);
     }
 
     return res.json({
@@ -815,10 +913,12 @@ async function handleCase1PointInTime(ctx, res) {
         ref_time: ctx.refTime,
         actual_ref_time: effectiveRefTime ? effectiveRefTime.toISOString() : null,
         duration_offset_ms: durationMs,
+        interpret: interpretConfig ? { raw: interpretConfig.raw, mapping: interpretConfig.mapping } : null,
         reading: {
             ts: reading.ts,
             raw_value: reading.value,
             formatted_value: formattedValue,
+            standard_formatted_value: standardFormattedValue,
             executed_timestamp: executedTimestamp,
             quality: reading.quality
         },
@@ -888,6 +988,7 @@ async function handleCase2PhaseTimestamp(ctx, res) {
     }
 
     const formattedTime = formatBatchLineDate(targetTime);
+    const executedTimestamp = formatExecutedTimestamp(targetTime);
 
     const callbackResult = await sendBatchLineInstructionUpdate({
         refInstruction: ctx.refInstruction,
@@ -897,6 +998,7 @@ async function handleCase2PhaseTimestamp(ctx, res) {
             {
                 repeat_no: 1,
                 value: formattedTime,
+                executed_timestamp: executedTimestamp,
                 executed_user_email: ctx.triggeredByEmail
             }
         ]
@@ -915,6 +1017,8 @@ async function handleCase2PhaseTimestamp(ctx, res) {
         ref_recipe: recipeBatchId,
         ref_event: ctx.refEvent,
         ref_type: ctx.refType,
+        timestamp: formattedTime,
+        executed_timestamp: executedTimestamp,
         event: {
             id: event.id,
             name: event.name,
@@ -924,9 +1028,161 @@ async function handleCase2PhaseTimestamp(ctx, res) {
             ended_at: event.ended_at,
             selected_field: selectedField,
             selected_time: targetTime,
-            formatted_value: formattedTime
+            formatted_value: formattedTime,
+            executed_timestamp: executedTimestamp
         },
         callback: callbackResult
+    });
+}
+
+/**
+ * Handles [EXCEPTION: REF=...] triggers.
+ * Queries batch_exceptions for the batch and returns repeats formatted as:
+ * "Phase : phase_name, Type: exception_type, Limit: limit_value, Actual: peak_value"
+ */
+async function handleBatchExceptionTrigger(ctx, res, triggers) {
+    const rawBatchId = ctx.batchId;
+    let batchRow = null;
+
+    if (rawBatchId) {
+        const { rows } = await query(
+            'SELECT id, batch_id, status FROM batches WHERE LOWER(batch_id) = LOWER($1) LIMIT 1',
+            [rawBatchId]
+        );
+        if (rows.length > 0) {
+            batchRow = rows[0];
+        }
+    }
+
+    // Fallback: If batch not directly found by batch_id, check currently running batch or latest
+    if (!batchRow) {
+        const { rows } = await query(
+            "SELECT id, batch_id, status FROM batches WHERE status = 'Running' ORDER BY started_at DESC LIMIT 1"
+        );
+        if (rows.length > 0) {
+            batchRow = rows[0];
+            console.log(`[BatchLine Exception]: Batch "${rawBatchId}" not matched directly; using active batch "${batchRow.batch_id}" (id: ${batchRow.id})`);
+        } else {
+            const { rows: latestRows } = await query(
+                "SELECT id, batch_id, status FROM batches ORDER BY started_at DESC LIMIT 1"
+            );
+            if (latestRows.length > 0) {
+                batchRow = latestRows[0];
+            }
+        }
+    }
+
+    const triggerResults = [];
+
+    for (const trigger of triggers) {
+        const targetRef = trigger.targetRef || ctx.refInstruction || ctx.instruction?.InstructionId;
+        if (!targetRef) {
+            await reportError('[BatchLine Exception]: Missing target RefInstruction for exception update', ctx);
+            continue;
+        }
+
+        let exceptions = [];
+        if (batchRow) {
+            const queryParams = [batchRow.id];
+            let filterSql = '';
+            if (trigger.filterPhase) {
+                queryParams.push(`%${trigger.filterPhase}%`);
+                filterSql += ` AND be.phase_name ILIKE $${queryParams.length}`;
+            }
+            if (trigger.filterTag) {
+                queryParams.push(`%${trigger.filterTag}%`);
+                filterSql += ` AND t.name ILIKE $${queryParams.length}`;
+            }
+
+            const { rows } = await query(`
+                SELECT 
+                    be.id,
+                    be.phase_name,
+                    be.exception_type,
+                    be.limit_value,
+                    be.peak_value,
+                    be.started_at,
+                    be.ended_at,
+                    be.duration_sec,
+                    t.name AS tag_name,
+                    t.display_digits,
+                    a.code AS asset_code
+                FROM batch_exceptions be
+                JOIN tags t ON be.tag_id = t.id
+                JOIN assets a ON be.asset_id = a.id
+                WHERE be.batch_pk = $1 ${filterSql}
+                ORDER BY be.started_at ASC, be.id ASC;
+            `, queryParams);
+            exceptions = rows;
+        }
+
+        let actualResult = [];
+        if (exceptions.length > 0) {
+            actualResult = exceptions.map((ex, idx) => {
+                const limitVal = formatReadingValue(ex.limit_value, ex.display_digits);
+                const peakVal = formatReadingValue(ex.peak_value, ex.display_digits);
+                const msg = `Phase : ${ex.phase_name || 'N/A'}, Type: ${ex.exception_type}, Limit: ${limitVal}, Actual: ${peakVal}`;
+                return {
+                    repeat_no: idx + 1,
+                    value: msg,
+                    executed_timestamp: formatExecutedTimestamp(ex.started_at || new Date()),
+                    executed_user_email: ctx.triggeredByEmail || "qa1@cs.com"
+                };
+            });
+        } else {
+            actualResult = [
+                {
+                    repeat_no: 1,
+                    value: 'None',
+                    executed_timestamp: formatExecutedTimestamp(new Date()),
+                    executed_user_email: ctx.triggeredByEmail || null
+                }
+            ];
+        }
+
+        console.log(`[BatchLine Exception]: Dispatching ${actualResult.length} item(s) to instruction ${targetRef} for batch ${batchRow?.batch_id || rawBatchId}...`);
+
+        const callbackResult = await sendBatchLineInstructionUpdate({
+            refInstruction: targetRef,
+            batchId: ctx.batchId || batchRow?.batch_id,
+            callbackKey: ctx.callbackKey,
+            actualResult
+        });
+
+        if (callbackResult?.ok) {
+            console.log(`[BatchLine Exception]: Successfully updated instruction ${targetRef} with exception results`);
+        } else {
+            await reportError(`[BatchLine Exception]: Failed to update instruction ${targetRef}`, ctx, callbackResult?.data?.error?.detail || callbackResult?.error);
+        }
+
+        triggerResults.push({
+            target_ref: targetRef,
+            batch_id: ctx.batchId || batchRow?.batch_id,
+            exception_count: exceptions.length,
+            actual_result: actualResult,
+            callback: callbackResult
+        });
+    }
+
+    if (triggerResults.length === 1) {
+        const single = triggerResults[0];
+        return res.json({
+            status: 'success',
+            type: 'batch_exception_summary',
+            batch_id: single.batch_id,
+            target_instruction: single.target_ref,
+            exception_count: single.exception_count,
+            actual_result: single.actual_result,
+            callback: single.callback
+        });
+    }
+
+    return res.json({
+        status: 'success',
+        type: 'batch_exception_summary',
+        batch_id: ctx.batchId || batchRow?.batch_id,
+        triggers_processed: triggerResults.length,
+        results: triggerResults
     });
 }
 
@@ -1010,7 +1266,7 @@ function resolveWaveDirections(startThreshold, stopThreshold, userDirection = nu
  * aggregating each interval's readings using the specified metric (min, max, avg, sum, first, last).
  */
 // ✅
-function buildIntervalConsolidatedValues(rows, windowStart, windowEnd, intervalMs, metric, displayDigits, fallbackVal = 0) {
+function buildIntervalConsolidatedValues(rows, windowStart, windowEnd, intervalMs, metric, displayDigits, fallbackVal = 0, interpretConfig = null) {
     const startMs = windowStart.getTime();
     const endMs = windowEnd.getTime();
     const windowDurationMs = Math.max(0, endMs - startMs);
@@ -1021,9 +1277,12 @@ function buildIntervalConsolidatedValues(rows, windowStart, windowEnd, intervalM
         if (rows && rows.length > 0) {
             singleVal = computeMetricValue(rows.map(r => Number(r.value)), metric);
         }
+        const standardFormattedValue = formatReadingValue(singleVal, displayDigits);
+        const formattedValue = interpretConfig ? interpretConfig.interpret(singleVal) : standardFormattedValue;
         return [{
             repeat_no: 1,
-            value: formatReadingValue(singleVal, displayDigits),
+            value: formattedValue,
+            standard_formatted_value: standardFormattedValue,
             raw_value: singleVal,
             bucket_start: windowStart.toISOString(),
             bucket_end: windowEnd.toISOString(),
@@ -1069,9 +1328,13 @@ function buildIntervalConsolidatedValues(rows, windowStart, windowEnd, intervalM
             resolvedVal = lastKnown;
         }
 
+        const standardFormattedValue = formatReadingValue(resolvedVal, displayDigits);
+        const formattedValue = interpretConfig ? interpretConfig.interpret(resolvedVal) : standardFormattedValue;
+
         values.push({
             repeat_no: i + 1,
-            value: formatReadingValue(resolvedVal, displayDigits),
+            value: formattedValue,
+            standard_formatted_value: standardFormattedValue,
             raw_value: resolvedVal,
             bucket_start: bStart.toISOString(),
             bucket_end: bEnd.toISOString(),
@@ -1087,7 +1350,7 @@ function buildIntervalConsolidatedValues(rows, windowStart, windowEnd, intervalM
  * Case 3 - Submode: Profile Wave Detection & Downsampling
  */
 // ✅
-async function handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileConfig, intervalConfig = null) {
+async function handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileConfig, intervalConfig = null, interpretConfig = null) {
     const startThreshold = profileConfig.start;
     const stopThreshold = profileConfig.stop;
 
@@ -1231,16 +1494,22 @@ async function handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileC
             intervalConfig.intervalMs,
             profileConfig.metric || 'avg',
             tag.display_digits,
-            startThreshold
+            startThreshold,
+            interpretConfig
         );
     } else if (totalCount <= CONFIG.MAX_PROFILE_SAMPLES || durationMs <= 1000) {
-        valuesToSend = waveRows.slice(0, CONFIG.MAX_PROFILE_SAMPLES).map((r, idx) => ({
-            repeat_no: idx + 1,
-            value: formatReadingValue(r.value, tag.display_digits),
-            raw_value: r.value,
-            ts: r.ts,
-            executed_timestamp: formatExecutedTimestamp(r.ts)
-        }));
+        valuesToSend = waveRows.slice(0, CONFIG.MAX_PROFILE_SAMPLES).map((r, idx) => {
+            const standardFormattedValue = formatReadingValue(r.value, tag.display_digits);
+            const formattedValue = interpretConfig ? interpretConfig.interpret(r.value) : standardFormattedValue;
+            return {
+                repeat_no: idx + 1,
+                value: formattedValue,
+                standard_formatted_value: standardFormattedValue,
+                raw_value: r.value,
+                ts: r.ts,
+                executed_timestamp: formatExecutedTimestamp(r.ts)
+            };
+        });
     } else {
         const sampleCount = CONFIG.MAX_PROFILE_SAMPLES || 30;
         const lastBucketIndex = sampleCount - 1;
@@ -1295,9 +1564,12 @@ async function handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileC
         const firstKnown = bucketList.find(b => b.value !== null)?.value ?? startThreshold;
         valuesToSend = bucketList.map((b, idx) => {
             const resolvedVal = b.value !== null ? b.value : firstKnown;
+            const standardFormattedValue = formatReadingValue(resolvedVal, tag.display_digits);
+            const formattedValue = interpretConfig ? interpretConfig.interpret(resolvedVal) : standardFormattedValue;
             return {
                 repeat_no: idx + 1,
-                value: formatReadingValue(resolvedVal, tag.display_digits),
+                value: formattedValue,
+                standard_formatted_value: standardFormattedValue,
                 raw_value: resolvedVal,
                 bucket_start: b.b_start,
                 bucket_end: b.b_end,
@@ -1305,6 +1577,10 @@ async function handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileC
                 executed_timestamp: formatExecutedTimestamp(b.b_start)
             };
         });
+    }
+
+    if (interpretConfig) {
+        console.log(`[BatchLine Case 3 Profile]: Applied [INTERPRET] mapping on tag "${tag.name}" (${interpretConfig.raw})`);
     }
 
     console.log(`[BatchLine Profile]: Pushing ${valuesToSend.length} values for captured first wave...`);
@@ -1340,6 +1616,7 @@ async function handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileC
         direction: startDirection,
         interval: intervalConfig ? intervalConfig.rawInterval : null,
         interval_minutes: intervalConfig ? intervalConfig.intervalMinutes : null,
+        interpret: interpretConfig ? { raw: interpretConfig.raw, mapping: interpretConfig.mapping } : null,
         wave_start: waveStart.toISOString(),
         wave_stop: waveStop.toISOString(),
         wave_duration_sec: Math.max(1, (waveStop - waveStart) / 1000),
@@ -1355,7 +1632,7 @@ async function handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileC
  * Case 3 - Submode: Uniform Range Recording (Record Mode)
  */
 // ✅
-async function handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig = null) {
+async function handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig = null, interpretConfig = null) {
     let metric = resolveMetric(ctx.refType);
 
     const { rows: allRows } = await query(`
@@ -1385,16 +1662,22 @@ async function handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalC
             intervalConfig.intervalMs,
             metric,
             tag.display_digits,
-            allRows[0]?.value ?? 0
+            allRows[0]?.value ?? 0,
+            interpretConfig
         );
     } else if (totalCount <= CONFIG.MAX_PROFILE_SAMPLES || durationMs <= 1000) {
-        valuesToSend = allRows.slice(0, CONFIG.MAX_PROFILE_SAMPLES).map((r, idx) => ({
-            repeat_no: idx + 1,
-            value: formatReadingValue(r.value, tag.display_digits),
-            raw_value: r.value,
-            ts: r.ts,
-            executed_timestamp: formatExecutedTimestamp(r.ts)
-        }));
+        valuesToSend = allRows.slice(0, CONFIG.MAX_PROFILE_SAMPLES).map((r, idx) => {
+            const standardFormattedValue = formatReadingValue(r.value, tag.display_digits);
+            const formattedValue = interpretConfig ? interpretConfig.interpret(r.value) : standardFormattedValue;
+            return {
+                repeat_no: idx + 1,
+                value: formattedValue,
+                standard_formatted_value: standardFormattedValue,
+                raw_value: r.value,
+                ts: r.ts,
+                executed_timestamp: formatExecutedTimestamp(r.ts)
+            };
+        });
     } else {
         const sampleCount = CONFIG.MAX_PROFILE_SAMPLES || 30;
         const lastBucketIndex = sampleCount - 1;
@@ -1449,9 +1732,12 @@ async function handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalC
         const firstKnown = bucketList.find(b => b.value !== null)?.value ?? 0;
         valuesToSend = bucketList.map((b, idx) => {
             const resolvedVal = b.value !== null ? b.value : firstKnown;
+            const standardFormattedValue = formatReadingValue(resolvedVal, tag.display_digits);
+            const formattedValue = interpretConfig ? interpretConfig.interpret(resolvedVal) : standardFormattedValue;
             return {
                 repeat_no: idx + 1,
-                value: formatReadingValue(resolvedVal, tag.display_digits),
+                value: formattedValue,
+                standard_formatted_value: standardFormattedValue,
                 raw_value: resolvedVal,
                 bucket_start: b.b_start,
                 bucket_end: b.b_end,
@@ -1459,6 +1745,10 @@ async function handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalC
                 executed_timestamp: formatExecutedTimestamp(b.b_start)
             };
         });
+    }
+
+    if (interpretConfig) {
+        console.log(`[BatchLine Case 3 Record]: Applied [INTERPRET] mapping on tag "${tag.name}" (${interpretConfig.raw})`);
     }
 
     console.log(`[BatchLine Record]: Pushing ${valuesToSend.length} consolidated values for tag ${tag.name}...`);
@@ -1480,7 +1770,7 @@ async function handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalC
         await reportError(`Failed to update BatchLine Case 3 record (${valuesToSend.length} items)`, ctx, cbResult?.data?.error?.detail || cbResult?.error);
     }
 
-    return res.json({
+    const responseData = {
         status: 'success',
         case: 3,
         mode: 'record',
@@ -1489,22 +1779,27 @@ async function handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalC
         metric: metric.toUpperCase(),
         ref_type: ctx.refType,
         ref_start_time: ctx.refStartTime,
-        ref_end_time: ctx.refEndTime,
         interval: intervalConfig ? intervalConfig.rawInterval : null,
         interval_minutes: intervalConfig ? intervalConfig.intervalMinutes : null,
+        interpret: interpretConfig ? { raw: interpretConfig.raw, mapping: interpretConfig.mapping } : null,
         total_samples: totalCount,
         records_sent: valuesToSend.length,
         records: valuesToSend,
         callback: cbResult,
         callbacks: cbResult ? [cbResult] : []
-    });
+    };
+    if (ctx.refEndTime) {
+        responseData.ref_end_time = ctx.refEndTime;
+    }
+
+    return res.json(responseData);
 }
 
 /**
  * Case 3 - Submode: Standard Statistical / Aggregate Calculations
  */
 // ✅
-async function handleAggregateMode(ctx, res, tag, actualStart, actualEnd, statField) {
+async function handleAggregateMode(ctx, res, tag, actualStart, actualEnd, statField, interpretConfig = null) {
     const { rows } = await query(`
         SELECT 
             COUNT(*)::int AS sample_count,
@@ -1543,9 +1838,14 @@ async function handleAggregateMode(ctx, res, tag, actualStart, actualEnd, statFi
         }
     }
 
-    const formattedValue = (statField === 'sample_count')
+    const standardFormattedValue = (statField === 'sample_count')
         ? String(rawResult)
         : formatReadingValue(rawResult, tag.display_digits);
+    const formattedValue = interpretConfig ? interpretConfig.interpret(rawResult) : standardFormattedValue;
+
+    if (interpretConfig) {
+        console.log(`[BatchLine Case 3 Aggregate]: Applied [INTERPRET] mapping on tag "${tag.name}": raw value ${rawResult} (${standardFormattedValue}) -> "${formattedValue}"`);
+    }
 
     const callbackResult = await sendBatchLineInstructionUpdate({
         refInstruction: ctx.refInstruction,
@@ -1555,18 +1855,19 @@ async function handleAggregateMode(ctx, res, tag, actualStart, actualEnd, statFi
             {
                 repeat_no: 1,
                 value: formattedValue,
+                executed_timestamp: formatExecutedTimestamp(actualEnd || new Date()),
                 executed_user_email: ctx.triggeredByEmail
             }
         ]
     });
 
     if (callbackResult?.ok) {
-        console.log(`[BatchLine Aggregate]: Successfully updated ${statField} for tag ${tag.name}`);
+        console.log(`[BatchLine Aggregate]: Successfully updated ${statField} for tag ${tag.name} with value "${formattedValue}"`);
     } else {
         await reportError('[BatchLine Aggregate]: Failed to update instruction', ctx, callbackResult?.data || callbackResult?.error);
     }
 
-    return res.json({
+    const responseData = {
         status: 'success',
         case: 3,
         batch_id: ctx.batchId,
@@ -1574,10 +1875,11 @@ async function handleAggregateMode(ctx, res, tag, actualStart, actualEnd, statFi
         ref_type: ctx.refType,
         operation: statField,
         ref_start_time: ctx.refStartTime,
-        ref_end_time: ctx.refEndTime,
         sample_count: stats.sample_count,
         raw_value: rawResult,
+        standard_formatted_value: standardFormattedValue,
         formatted_value: formattedValue,
+        interpret: interpretConfig ? { raw: interpretConfig.raw, mapping: interpretConfig.mapping } : null,
         statistics: {
             min: stats.min,
             max: stats.max,
@@ -1593,7 +1895,12 @@ async function handleAggregateMode(ctx, res, tag, actualStart, actualEnd, statFi
             sample_count: stats.sample_count
         },
         callback: callbackResult
-    });
+    };
+    if (ctx.refEndTime) {
+        responseData.ref_end_time = ctx.refEndTime;
+    }
+
+    return res.json(responseData);
 }
 
 /**
@@ -1623,13 +1930,22 @@ async function handleCase3TimeRange(ctx, res) {
     // -------------------------------------------------------------------------
     // Detect Modes (Strictly [RECORD] or [RECORD: ...] with 6 sub-scenarios)
     // -------------------------------------------------------------------------
-    const desc = typeof ctx.instructionDescription === 'string' ? ctx.instructionDescription : '';
+    const desc = [
+        typeof ctx.instructionDescription === 'string' ? ctx.instructionDescription : '',
+        getCombinedDescription(ctx)
+    ].filter(Boolean).join(' ');
+
+    const interpretConfig = extractInterpretMapping(desc);
+    if (interpretConfig) {
+        console.log(`[BatchLine Case 3]: Found [INTERPRET] mapping for instruction:`, interpretConfig.raw);
+    }
 
     // Strictly match [RECORD] or [RECORD: ...]
     const recordBlockMatch = desc.match(/\[RECORD(?::\s*([^\]]*))?\]/i);
     const isRecordTrigger = Boolean(recordBlockMatch);
 
     let isProfileMode = false;
+    let isSentinelMode = false;
     let profileConfig = null;
     let intervalConfig = null;
     let statField = null;
@@ -1676,8 +1992,9 @@ async function handleCase3TimeRange(ctx, res) {
             else durationMinutes = val;
         }
 
-        const sentinelMatch = content.match(/\b(SENTINEL|OPEN[-_]?ENDED)\b/i);
-        const isSentinelMode = Boolean(sentinelMatch);
+        const sentinelRegex = /\b(SENTINEL|OPEN[-_\s]?END(?:ED)?)\b/i;
+        const sentinelMatch = content.match(sentinelRegex) || desc.match(sentinelRegex);
+        isSentinelMode = Boolean(sentinelMatch);
 
         if (startMatch) {
             isProfileMode = true;
@@ -1703,9 +2020,16 @@ async function handleCase3TimeRange(ctx, res) {
     }
 
     // Determine endDate (support inferring from durationMinutes or explicit SENTINEL/OPEN_ENDED mode)
-    let endDate = ctx.refEndTime ? (parseBatchLineDate(ctx.refEndTime) || new Date(ctx.refEndTime)) : null;
-    if (typeof isSentinelMode !== 'undefined' && isSentinelMode) {
-        // Explicit SENTINEL or OPEN_ENDED keyword in [RECORD: ... SENTINEL]
+    let endDate = ctx.refEndTime ? parseBatchLineDate(ctx.refEndTime) : null;
+    if (endDate && isNaN(endDate.getTime())) {
+        endDate = null;
+    }
+
+    const isOpenEndRecord = isSentinelMode || (isRecordTrigger && intervalConfig && !endDate && !profileConfig?.durationMinutes);
+
+    if (isOpenEndRecord) {
+        isSentinelMode = true;
+        // Explicit SENTINEL or OPEN_ENDED keyword in [RECORD: ... SENTINEL] or open-ended interval record
         // Expand window with a 24-hour industrial safety watchdog ceiling awaiting stop signal from BatchLine
         const watchdogHours = 24;
         endDate = new Date(startDate.getTime() + watchdogHours * 60 * 60 * 1000);
@@ -1842,23 +2166,24 @@ async function handleCase3TimeRange(ctx, res) {
                 profileConfig.start,
                 profileConfig.direction,
                 profileConfig.stop,
-                profileConfig.durationMinutes
+                profileConfig.durationMinutes,
+                interpretConfig
             );
         }
 
         // Entire wave completed in the past: run standard historical profile
         console.log(`[BatchLine Case 3]: Identified historical profile mode for tag "${tag.name}" (batch: ${ctx.batchId})`);
-        return await handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileConfig, intervalConfig);
+        return await handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileConfig, intervalConfig, interpretConfig);
     }
 
     // -------------------------------------------------------------------------
     // Route 2: Record Mode (Future/Live Interval or Historical)
     // -------------------------------------------------------------------------
     if (isRecordTrigger) {
-        if (typeof isSentinelMode !== 'undefined' && isSentinelMode && !isProfileMode) {
+        if (isSentinelMode && !isProfileMode) {
             console.log(`[BatchLine Case 3]: Identified Continuous Sentinel Record Mode for tag "${tag.name}" (batch: ${ctx.batchId}, INTERVAL=${intervalConfig?.rawInterval || 'none'})`);
             const effInterval = intervalConfig || { rawInterval: '1m', intervalMinutes: 1, intervalMs: 60000 };
-            return await handleContinuousIntervalMode(ctx, res, tag, actualStart, effInterval, null, null);
+            return await handleContinuousIntervalMode(ctx, res, tag, actualStart, effInterval, null, null, interpretConfig);
         }
 
         if (actualEnd.getTime() > nowMs) {
@@ -1884,19 +2209,20 @@ async function handleCase3TimeRange(ctx, res) {
                 null,
                 null,
                 null,
-                null
+                null,
+                interpretConfig
             );
         }
 
         console.log(`[BatchLine Case 3]: Identified historical record mode for tag "${tag.name}" (batch: ${ctx.batchId})`);
-        return await handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig);
+        return await handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig, interpretConfig);
     }
 
     // -------------------------------------------------------------------------
     // Route 3: Standard Statistical / Aggregate Calculations
     // -------------------------------------------------------------------------
     console.log(`[BatchLine Case 3]: Identified aggregate mode "${statField}" for tag "${tag.name}" (batch: ${ctx.batchId})`);
-    return await handleAggregateMode(ctx, res, tag, actualStart, actualEnd, statField);
+    return await handleAggregateMode(ctx, res, tag, actualStart, actualEnd, statField, interpretConfig);
 }
 
 // ===========================================================================
@@ -1959,7 +2285,7 @@ function parsePrintLabelPayload(body = {}) {
                 const result = Array.isArray(inst.ActualResult) ? inst.ActualResult[inst.ActualResult.length - 1] : inst.ActualResult;
                 const val = result?.Value ? String(result.Value).trim() : null;
 
-                if (val && val.toLowerCase() !== 'skip instruction') {
+                if (val && !['skip instruction', 'null', 'undefined', 'none', ''].includes(val.toLowerCase())) {
                     parameters[key] = val;
                 }
                 if (result?.ExecutedUserEmail) {
@@ -2037,7 +2363,7 @@ const activeFutureIntervalJobs = new Map();
  * Immediately acknowledges HTTP webhook and starts a progressive 30-second cadence dispatcher,
  * sending sets of bucketed values to BatchLine every 30 seconds until RefEndTime.
  */
-async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig, startThreshold = null, startDirection = null, stopThreshold = null, durationMinutes = null) {
+async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig, startThreshold = null, startDirection = null, stopThreshold = null, durationMinutes = null, interpretConfig = null) {
     const metric = resolveMetric(ctx.refType);
     const intervalMs = intervalConfig.intervalMs;
     const startMs = actualStart.getTime();
@@ -2164,7 +2490,7 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
 
     // Acknowledge BatchLine webhook immediately with HTTP 200
     if (!res.headersSent) {
-        res.json({
+        const scheduledResponse = {
             status: 'scheduled',
             case: 3,
             scenario: scenarioNum,
@@ -2176,7 +2502,6 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
             tag: tag.name,
             ref_instruction: ctx.refInstruction,
             ref_start_time: ctx.refStartTime,
-            ref_end_time: actualEnd ? actualEnd.toISOString() : (new Date(endMs).toISOString()),
             start_threshold: startThreshold,
             direction: startThreshold !== null ? (isFall ? 'fall' : 'rise') : null,
             stop_threshold: stopThreshold,
@@ -2188,7 +2513,11 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
             metric: metric.toUpperCase(),
             total_expected_buckets: totalExpectedBuckets,
             transmission_cadence_sec: 30
-        });
+        };
+        if (ctx.refEndTime) {
+            scheduledResponse.ref_end_time = actualEnd ? actualEnd.toISOString() : (new Date(endMs).toISOString());
+        }
+        res.json(scheduledResponse);
     }
 
     let nextBucketIndex = 0;
@@ -2316,9 +2645,14 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
                     resolvedVal = lastKnown;
                 }
 
+                const standardFormattedValue = formatReadingValue(resolvedVal, tag.display_digits);
+                const formattedValue = interpretConfig ? interpretConfig.interpret(resolvedVal) : standardFormattedValue;
+
                 setOfValues.push({
                     repeat_no: b.index + 1,
-                    value: formatReadingValue(resolvedVal, tag.display_digits),
+                    value: formattedValue,
+                    standard_formatted_value: standardFormattedValue,
+                    raw_value: resolvedVal,
                     executed_timestamp: formatExecutedTimestamp(new Date(b.bStartMs)),
                     executed_user_email: ctx.triggeredByEmail || null
                 });
@@ -2436,7 +2770,7 @@ async function handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actual
  * sending sets of bucketed values to BatchLine every 30 seconds continuously until
  * a STOP request mentioning the RefInstruction is received.
  */
-async function handleContinuousIntervalMode(ctx, res, tag, actualStart, intervalConfig, startThreshold = null, startDirection = null) {
+async function handleContinuousIntervalMode(ctx, res, tag, actualStart, intervalConfig, startThreshold = null, startDirection = null, interpretConfig = null) {
     const metric = resolveMetric(ctx.refType);
     const intervalMs = intervalConfig.intervalMs;
     const startMs = actualStart.getTime();
@@ -2494,7 +2828,7 @@ async function handleContinuousIntervalMode(ctx, res, tag, actualStart, interval
 
     // Acknowledge BatchLine webhook immediately with HTTP 200
     if (!res.headersSent) {
-        res.json({
+        const responseData = {
             status: 'scheduled',
             case: 3,
             mode: 'record_interval_continuous',
@@ -2505,14 +2839,17 @@ async function handleContinuousIntervalMode(ctx, res, tag, actualStart, interval
             tag: tag.name,
             ref_instruction: ctx.refInstruction,
             ref_start_time: ctx.refStartTime,
-            ref_end_time: null,
             start_threshold: startThreshold,
             direction: startThreshold !== null ? (isFall ? 'fall' : 'rise') : null,
             interval: intervalConfig.rawInterval,
             interval_ms: intervalMs,
             metric: metric.toUpperCase(),
             transmission_cadence_sec: 30
-        });
+        };
+        if (ctx.refEndTime) {
+            responseData.ref_end_time = ctx.refEndTime;
+        }
+        res.json(responseData);
     }
 
     let nextBucketIndex = 0;
@@ -2612,9 +2949,14 @@ async function handleContinuousIntervalMode(ctx, res, tag, actualStart, interval
                     resolvedVal = lastKnown;
                 }
 
+                const standardFormattedValue = formatReadingValue(resolvedVal, tag.display_digits);
+                const formattedValue = interpretConfig ? interpretConfig.interpret(resolvedVal) : standardFormattedValue;
+
                 setOfValues.push({
                     repeat_no: b.index + 1,
-                    value: formatReadingValue(resolvedVal, tag.display_digits),
+                    value: formattedValue,
+                    standard_formatted_value: standardFormattedValue,
+                    raw_value: resolvedVal,
                     executed_timestamp: formatExecutedTimestamp(new Date(b.bStartMs)),
                     executed_user_email: ctx.triggeredByEmail || null
                 });
@@ -2781,6 +3123,29 @@ async function handlePrintLabelInstruction(req, res) {
             }
         }
 
+        ctx = {
+            topic: parsed.topic,
+            batchId: parsed.batchId,
+            callbackKey: parsed.callbackKey,
+            refElement: parsed.parameters.RefElement,
+            refInstruction: parsed.refInstruction,
+            refType: parsed.parameters.RefType,
+            triggeredByEmail: parsed.user?.executedUserEmail || req.body.TriggeredByEmail || null,
+            rawBody: req.body,
+            instruction: req.body
+        };
+
+        const printLabelDesc = getCombinedDescription(ctx) || [req.body.InstructionDescription, req.body.Description].filter(Boolean).join(' ');
+        const interpretConfig = extractInterpretMapping(printLabelDesc);
+        if (interpretConfig) {
+            console.log(`[BatchLine PrintLabel]: Found [INTERPRET] mapping for instruction:`, interpretConfig.raw);
+        }
+
+        const exceptionTriggers = extractExceptionTriggers(printLabelDesc, parsed.refInstruction);
+        if (exceptionTriggers.length > 0) {
+            return await handleBatchExceptionTrigger(ctx, res, exceptionTriggers);
+        }
+
         if (!parsed.parameters.RefElement) {
             await reportError('[BatchLine PrintLabel]: Missing required RefElement in instruction parameters', { batchId: parsed.batchId, callbackKey: parsed.callbackKey });
             return res.status(400).json({ error: 'Missing required RefElement in instruction parameters' });
@@ -2801,14 +3166,15 @@ async function handlePrintLabelInstruction(req, res) {
         let actualStart = startDate;
         let actualEnd = null;
 
-        if (parsed.parameters.RefEndTime) {
+        if (parsed.parameters.RefEndTime && !['null', 'undefined', 'none', ''].includes(String(parsed.parameters.RefEndTime).trim().toLowerCase())) {
             const endDate = parseBatchLineDate(parsed.parameters.RefEndTime);
-            if (!endDate || isNaN(endDate.getTime())) {
+            if (endDate && !isNaN(endDate.getTime())) {
+                [actualStart, actualEnd] = startDate > endDate ? [endDate, startDate] : [startDate, endDate];
+            } else {
                 const errMsg = `Invalid date format for RefEndTime ("${parsed.parameters.RefEndTime}")`;
                 await reportError(`[BatchLine PrintLabel]: ${errMsg}`, { batchId: parsed.batchId, callbackKey: parsed.callbackKey });
                 return res.status(400).json({ error: errMsg });
             }
-            [actualStart, actualEnd] = startDate > endDate ? [endDate, startDate] : [startDate, endDate];
         }
 
         ctx = {
@@ -2850,7 +3216,7 @@ async function handlePrintLabelInstruction(req, res) {
             const startThreshold = hasStart ? parseFloat(rawStart) : null;
             const startDirection = parsed.parameters.DIRECTION ? String(parsed.parameters.DIRECTION).trim().toLowerCase() : null;
             console.log(`[BatchLine PrintLabel]: Identified Continuous Interval Mode for tag "${tag.name}" (batch: ${ctx.batchId}, START=${startThreshold ?? 'none'}, DIRECTION=${startDirection ?? 'auto'}, INTERVAL=${intervalConfig.rawInterval}, Metric=${resolveMetric(ctx.refType)})`);
-            return await handleContinuousIntervalMode(ctx, res, tag, actualStart, intervalConfig, startThreshold, startDirection);
+            return await handleContinuousIntervalMode(ctx, res, tag, actualStart, intervalConfig, startThreshold, startDirection, interpretConfig);
         }
 
         // Mode 2: Future Interval Record Mode (INTERVAL specified and RefEndTime is in future)
@@ -2861,7 +3227,7 @@ async function handlePrintLabelInstruction(req, res) {
             const stopThreshold = hasStop ? parseFloat(rawStop) : null;
             const startDirection = parsed.parameters.DIRECTION ? String(parsed.parameters.DIRECTION).trim().toLowerCase() : null;
             console.log(`[BatchLine PrintLabel]: Identified Future Interval Record Mode for tag "${tag.name}" (batch: ${ctx.batchId}, START=${startThreshold ?? 'none'}, STOP=${stopThreshold ?? 'none'}, INTERVAL=${intervalConfig.rawInterval}, Metric=${resolveMetric(ctx.refType)}, RefEndTime in future: ${actualEnd.toISOString()})`);
-            return await handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig, startThreshold, startDirection, stopThreshold, durationMinutes);
+            return await handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig, startThreshold, startDirection, stopThreshold, durationMinutes, interpretConfig);
         }
 
         // Mode 2b: Future/Live Profile Mode (START is specified with future RefEndTime or DURATION extending into future)
@@ -2894,7 +3260,7 @@ async function handlePrintLabelInstruction(req, res) {
 
             if (effectiveEnd.getTime() > Date.now()) {
                 console.log(`[BatchLine PrintLabel]: Identified Future/Live Profile Mode for tag "${tag.name}" (batch: ${ctx.batchId}, START=${startThreshold}, DURATION=${durationMinutes ?? 'none'}m)`);
-                return await handleFutureIntervalRecordMode(ctx, res, tag, actualStart, effectiveEnd, effectiveIntervalConfig, startThreshold, startDirection, stopThreshold, durationMinutes);
+                return await handleFutureIntervalRecordMode(ctx, res, tag, actualStart, effectiveEnd, effectiveIntervalConfig, startThreshold, startDirection, stopThreshold, durationMinutes, interpretConfig);
             }
         }
 
@@ -2908,12 +3274,12 @@ async function handlePrintLabelInstruction(req, res) {
                 metric: resolveMetric(ctx.refType)
             };
             console.log(`[BatchLine PrintLabel]: Identified Profile Mode for tag "${tag.name}" (batch: ${ctx.batchId}, START=${profileConfig.start}, STOP=${profileConfig.stop}, INTERVAL=${intervalConfig?.rawInterval || 'none'}, Metric=${profileConfig.metric})`);
-            return await handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileConfig, intervalConfig);
+            return await handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileConfig, intervalConfig, interpretConfig);
         }
 
         // Mode 4: Record Mode (Default when START is omitted and RefEndTime is in past/now; uses interval if specified, or downsamples to MAX_PROFILE_SAMPLES)
         console.log(`[BatchLine PrintLabel]: Identified Record Mode for tag "${tag.name}" (batch: ${ctx.batchId}, INTERVAL=${intervalConfig?.rawInterval || 'none'}, Metric=${resolveMetric(ctx.refType)})`);
-        return await handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig);
+        return await handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig, interpretConfig);
     } catch (err) {
         console.error('[Print Label Instruction Webhook Error]:', err);
         await reportError('[Print Label Webhook Fatal Error]: ' + err.message, ctx || {}, err.stack);
@@ -2940,6 +3306,13 @@ router.post('/instruction', async (req, res) => {
         }
 
         ctx = extractInstructionPayload(req.body);
+
+        // Check for [EXCEPTION: REF=...] trigger across all description fields
+        const fullDesc = getCombinedDescription(ctx);
+        const exceptionTriggers = extractExceptionTriggers(fullDesc, ctx.refInstruction);
+        if (exceptionTriggers.length > 0) {
+            return await handleBatchExceptionTrigger(ctx, res, exceptionTriggers);
+        }
 
         if (ctx.rawEventType === undefined || ctx.rawEventType === null || ctx.rawEventType === '' || Number.isNaN(Number(ctx.rawEventType))) {
             // await reportError('[BatchLine Error]: Missing required EventType in instruction payload', ctx);
