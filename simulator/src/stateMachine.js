@@ -1,45 +1,49 @@
-// simulator/src/stateMachine.js
+/**
+ * Reactor State Machine & Chemical Process Physics Engine.
+ * Models ISA-88 phases, thermodynamics, fluid dynamics, reagent dosing,
+ * crystallization kinetics, and realistic sensor noise.
+ */
 
 export const REACTOR_PHASES = {
   R1: ['Idle', 'Charging', 'Heating', 'Distillation', 'Reaction hold', 'Cooling', 'Transfer', 'Clean'],
   R2: ['Idle', 'Receive', 'pH adjust', 'Settle & separate', 'Solvent swap', 'Filter & transfer', 'Clean'],
-  R3: ['Idle', 'Receive', 'Heat to dissolve', 'Cooling ramp', 'Age', 'Transfer', 'Clean']
+  R3: ['Idle', 'Receive', 'Heat to dissolve', 'Cooling ramp', 'Age', 'Transfer', 'Clean'],
 };
 
 export const PHASE_DURATIONS = {
   R1: {
-    'Idle': { min: 300, max: 1200 },       // 5m – 20m
-    'Charging': { min: 600, max: 1800 },   // 10m – 30m
-    'Heating': { min: 2700, max: 3300 },   // 45m – 55m
-    'Distillation': { min: 2100, max: 2700 }, // 35m – 45m (Azeotropic water/solvent distillation)
-    'Reaction hold': { min: 9600, max: 12000 }, // 160m – 200m (Metformin condensation hold)
-    'Cooling': { min: 2400, max: 3600 },   // 40m – 60m (Controlled cooling to ~80 °C safe transfer temp)
-    'Transfer': { min: 600, max: 1800 },   // 10m – 30m (Cooled transfer to R2)
-    'Clean': { min: 600, max: 1800 }       // 10m – 30m
+    'Idle': { min: 300, max: 1200 },              // 5m – 20m
+    'Charging': { min: 600, max: 1800 },          // 10m – 30m
+    'Heating': { min: 2700, max: 3300 },          // 45m – 55m
+    'Distillation': { min: 2100, max: 2700 },     // 35m – 45m (Azeotropic water/solvent distillation)
+    'Reaction hold': { min: 9600, max: 12000 },   // 160m – 200m (Condensation hold)
+    'Cooling': { min: 2400, max: 3600 },          // 40m – 60m (Controlled cooling to ~80 °C safe transfer)
+    'Transfer': { min: 600, max: 1800 },          // 10m – 30m (Cooled transfer to R2)
+    'Clean': { min: 600, max: 1800 },             // 10m – 30m
   },
   R2: {
     'Idle': { min: 300, max: 3600 },
-    'Receive': { min: 600, max: 1800 },    // Matched with R1 Transfer
+    'Receive': { min: 600, max: 1800 },           // Matched with R1 Transfer
     'pH adjust': { min: 2700, max: 5400 },
     'Settle & separate': { min: 1800, max: 3600 },
     'Solvent swap': { min: 3600, max: 7200 },
-    'Filter & transfer': { min: 600, max: 1800 }, // 10m – 30m (Polish filtration & inline transfer to R3)
-    'Clean': { min: 1800, max: 3600 }
+    'Filter & transfer': { min: 300, max: 720 }, // 5m – 12m (Inline polish transfer to R3)
+    'Clean': { min: 1800, max: 3600 },
   },
   R3: {
     'Idle': { min: 300, max: 3600 },
-    'Receive': { min: 600, max: 1800 },    // Matched with R2 Filter & transfer
+    'Receive': { min: 600, max: 1800 },           // Matched with R2 Filter & transfer
     'Heat to dissolve': { min: 1800, max: 3600 },
-    'Cooling ramp': { min: 14400, max: 18000 },  // 4h – 5h (realistic -12 to -15 °C/h cooling rate)
-    'Age': { min: 3600, max: 7200 },           // 1h – 2h
-    'Transfer': { min: 600, max: 1800 },       // 10m – 30m
-    'Clean': { min: 1800, max: 3600 }
-  }
+    'Cooling ramp': { min: 14400, max: 18000 },   // 4h – 5h (realistic -12 to -15 °C/h cooling rate)
+    'Age': { min: 3600, max: 7200 },              // 1h – 2h
+    'Transfer': { min: 600, max: 1800 },          // 10m – 30m
+    'Clean': { min: 1800, max: 3600 },
+  },
 };
 
 export class ReactorSimulation {
   constructor(asset, prng) {
-    this.asset = asset; // { id, code, capacity_l, role, material }
+    this.asset = asset; // { id, code, display_name, capacity_l, role, material }
     this.prng = prng;
     this.code = asset.code; // 'R1', 'R2', or 'R3'
 
@@ -48,34 +52,39 @@ export class ReactorSimulation {
     this.phaseDurationSec = 1800;
     this.phaseOccurrence = 1;
 
-    // ISA-88 Context
+    // ISA-88 Execution Context
     this.activeBatch = null;           // { id, batch_id, started_at }
     this.activeUnitProcedureId = null; // PK of current Unit Procedure event
     this.activePhaseEventId = null;    // PK of current Phase event
 
-    // Previous integer states for change-of-state detection
-    this.prevIntegerStates = {};
-
-    // Temperature history buffer for R3.COOL_RATE derivative (slope)
+    // Temperature history sliding window for derivative (dTEMP/dt)
     this.tempHistory = [];
 
-    // R1 Charge Filter Differential Pressure (FILTER_DP) State
-    this.filterClogBaseline = 0.55;    // Clean filter base DP (bar)
-    this.filterClogAccum = 0.0;        // Dirt accumulation across batches
-    this.filterAlarmTimerSec = 0;      // Continuous duration above threshold
+    // R1 Differential Pressure (FILTER_DP) State
+    this.filterClogBaseline = 0.55;    // Base DP across clean filter (bar)
+    this.filterClogAccum = 0.0;        // Accumulation across batches
+    this.filterAlarmTimerSec = 0;
     this.filterNeedsReplacement = false;
     this.chargeBatchCount = 0;
     this.batchCount = 0;
+
     // Overheat / Fault State
     this.tempFaultActive = false;
 
-    // Initialize values based on reactor type
+    // R2 & R3 Random Occasional Deviation Flags per Batch (low probability)
+    this.r2HasPhOvershoot = false;
+    this.r2HasDoseFlowSurge = false;
+    this.r2HasTempOverrun = false;
+    this.r3HasCoolRateGlitch = false;
+    this.r3HasAgitSpike = false;
+
+    // Tag values and quality (0 = Good, 1 = Uncertain, 2 = Bad)
     this.values = {};
     this.qualities = {};
-    this._initReactorValues();
+    this.initReactorValues();
   }
 
-  _initReactorValues() {
+  initReactorValues() {
     if (this.code === 'R1') {
       this.values = {
         TEMP: 22.0,
@@ -86,7 +95,7 @@ export class ReactorSimulation {
         VOL: 0.0,
         AGIT_RUN: 0,
         JKT_MODE: 0,
-        N2_BLANKET: 1
+        N2_BLANKET: 1,
       };
     } else if (this.code === 'R2') {
       this.values = {
@@ -97,7 +106,7 @@ export class ReactorSimulation {
         VOL: 0.0,
         AGIT_RUN: 0,
         DOSE_PUMP: 0,
-        N2_BLANKET: 1
+        N2_BLANKET: 1,
       };
     } else if (this.code === 'R3') {
       this.values = {
@@ -108,59 +117,37 @@ export class ReactorSimulation {
         VOL: 0.0,
         AGIT_RUN: 0,
         COOL_RAMP: 0,
-        SEEDED: 0
+        SEEDED: 0,
       };
     }
 
     for (const key of Object.keys(this.values)) {
-      this.qualities[key] = 0; // 0 = Good
+      this.qualities[key] = 0;
     }
   }
 
-  // First-order response helper with subtle, realistic Gaussian sensor noise (smooth, no zigzags)
-  approach(current, target, rateSec, noiseStdev, deltaSec = 1) {
-    if (deltaSec === 0) return current; // Frozen in place when simulation is paused
-    const step = (target - current) * (1 - Math.exp(-deltaSec / Math.max(1, rateSec)));
-    // Realistic micro-noise: provides authentic sensor feel without jagged random walk wander
+  /**
+   * First-order exponential lag response helper with subtle Gaussian sensor micro-noise.
+   */
+  approach(current, target, rateSec, noiseStdev = 0, deltaSec = 1) {
+    if (deltaSec <= 0 || !Number.isFinite(current)) return current;
+    const safeRate = Math.max(1, rateSec);
+    const step = (target - current) * (1 - Math.exp(-deltaSec / safeRate));
     const noise = noiseStdev > 0 ? this.prng.gaussian(0, noiseStdev * 0.1) : 0;
-    return current + step + noise;
+    const val = current + step + noise;
+    return Number.isFinite(val) ? val : target;
   }
 
-  // Advance simulation by deltaSeconds
+  /**
+   * Advance simulation time by deltaSec.
+   * Returns true if the active phase duration has expired.
+   */
   tick(deltaSec = 1) {
-    // If Idle without an active batch, remain in clean resting state indefinitely
+    // If Idle without an active batch, remain in clean resting state
     if (this.currentPhase === 'Idle' && !this.activeBatch) {
       this.phaseElapsedSec = 0;
-      if (this.code === 'R1') {
-        this.values.VOL = 0;
-        this.values.AGIT_RUN = 0;
-        this.values.AGIT = 0;
-        this.values.JKT_MODE = 0;
-        this.values.FILTER_DP = 0.0;
-        this.values.TEMP = this.approach(this.values.TEMP, 22.0, 300, 0.01, deltaSec);
-        this.values.JKT_TEMP = this.approach(this.values.JKT_TEMP, 20.0, 300, 0.01, deltaSec);
-        this.values.PRES = this.approach(this.values.PRES, 0.05, 300, 0.003, deltaSec);
-        this.values.N2_BLANKET = 1;
-      } else if (this.code === 'R2') {
-        this.values.VOL = 0;
-        this.values.PH = 7.0;
-        this.values.DOSE_FLOW = 0;
-        this.values.DOSE_PUMP = 0;
-        this.values.DOSE_TOTAL = 0;
-        this.values.AGIT_RUN = 0;
-        this.values.TEMP = this.approach(this.values.TEMP, 22.0, 300, 0.01, deltaSec);
-        this.values.N2_BLANKET = 1;
-      } else if (this.code === 'R3') {
-        this.values.VOL = 0;
-        this.values.TEMP = this.approach(this.values.TEMP, 22.0, 300, 0.01, deltaSec);
-        this.values.COOL_RATE = 0;
-        this.values.AGIT_RUN = 0;
-        this.values.AGIT = 0;
-        this.values.TURB = 0;
-        this.values.COOL_RAMP = 0;
-        this.values.SEEDED = 0;
-      }
-      return false; // Idle does not auto-expire without batch activity
+      this._applyRestingState(deltaSec);
+      return false;
     }
 
     this.phaseElapsedSec += deltaSec;
@@ -174,8 +161,39 @@ export class ReactorSimulation {
       this._tickR3(deltaSec, progress);
     }
 
-    // Check if current phase duration has elapsed
     return this.phaseElapsedSec >= this.phaseDurationSec;
+  }
+
+  _applyRestingState(dt) {
+    if (this.code === 'R1') {
+      this.values.VOL = 0;
+      this.values.AGIT_RUN = 0;
+      this.values.AGIT = 0;
+      this.values.JKT_MODE = 0;
+      this.values.FILTER_DP = 0.0;
+      this.values.TEMP = this.approach(this.values.TEMP, 22.0, 300, 0.01, dt);
+      this.values.JKT_TEMP = this.approach(this.values.JKT_TEMP, 20.0, 300, 0.01, dt);
+      this.values.PRES = this.approach(this.values.PRES, 0.05, 300, 0.003, dt);
+      this.values.N2_BLANKET = 1;
+    } else if (this.code === 'R2') {
+      this.values.VOL = 0;
+      this.values.PH = 7.0;
+      this.values.DOSE_FLOW = 0;
+      this.values.DOSE_PUMP = 0;
+      this.values.DOSE_TOTAL = 0;
+      this.values.AGIT_RUN = 0;
+      this.values.TEMP = this.approach(this.values.TEMP, 22.0, 300, 0.01, dt);
+      this.values.N2_BLANKET = 1;
+    } else if (this.code === 'R3') {
+      this.values.VOL = 0;
+      this.values.TEMP = this.approach(this.values.TEMP, 22.0, 300, 0.01, dt);
+      this.values.COOL_RATE = 0;
+      this.values.AGIT_RUN = 0;
+      this.values.AGIT = 0;
+      this.values.TURB = 0;
+      this.values.COOL_RAMP = 0;
+      this.values.SEEDED = 0;
+    }
   }
 
   // --- R1 Physics (Synthesis) ---
@@ -183,7 +201,6 @@ export class ReactorSimulation {
     const p = this.currentPhase;
     const v = this.values;
 
-    // Filter DP behavior: Liquid flows through charge filter only during 'Charging'
     if (p !== 'Charging') {
       v.FILTER_DP = Math.max(0, this.approach(v.FILTER_DP, 0.0, 10, 0.002, dt));
       this.filterAlarmTimerSec = 0;
@@ -204,7 +221,7 @@ export class ReactorSimulation {
       case 'Charging':
         const flowActive = prog >= 0.02 && prog <= 0.98;
         if (flowActive) {
-          const currentBatchDirt = ((prog - 0.02) / 0.96) * 0.15;
+          const currentBatchDirt = ((prog - 0.02) / 0.96) * 0.25;
           const targetDP = this.filterClogBaseline + this.filterClogAccum + currentBatchDirt;
           v.FILTER_DP = this.approach(v.FILTER_DP, targetDP, 15, 0.005, dt);
 
@@ -232,9 +249,15 @@ export class ReactorSimulation {
 
       case 'Heating':
         v.JKT_MODE = 1; // Heating
-        const jktTargetHeat = Math.min(160, v.TEMP + 16.0);
+        let targetTempHeat = 142.5;
+        // Thermal inertia overshoot peak at ~147.2 °C (alarm_high is 145.0 °C)
+        if (prog >= 0.82 && prog <= 0.96) {
+          const overshootProg = Math.sin(((prog - 0.82) / 0.14) * Math.PI);
+          targetTempHeat = 142.5 + overshootProg * 4.7; // Peaks at ~147.2 °C
+        }
+        const jktTargetHeat = Math.min(160, Math.max(v.TEMP + 16.0, targetTempHeat + 8.0));
         v.JKT_TEMP = this.approach(v.JKT_TEMP, jktTargetHeat, 90, 0.02, dt);
-        v.TEMP = this.approach(v.TEMP, 142.5, 220, 0.015, dt);
+        v.TEMP = this.approach(v.TEMP, targetTempHeat, 90, 0.015, dt);
         const presTarget = 0.2 + (v.TEMP / 142.5) * 1.6;
         v.PRES = this.approach(v.PRES, presTarget, 180, 0.008, dt);
         v.AGIT_RUN = 1;
@@ -248,7 +271,14 @@ export class ReactorSimulation {
         v.JKT_TEMP = this.approach(v.JKT_TEMP, 155.0, 90, 0.02, dt);
         v.TEMP = this.approach(v.TEMP, 141.5, 120, 0.015, dt);
         v.VOL = Math.max(3000, 3950 - prog * 950);
-        v.PRES = this.approach(v.PRES, 0.35, 120, 0.005, dt);
+
+        let targetPresDist = 0.35;
+        // Solvent vapor boil-up surge & condenser vent restriction peak at ~4.82 bar g (alarm_high is 4.50 bar g)
+        if (prog >= 0.14 && prog <= 0.32) {
+          const boilupProg = Math.sin(((prog - 0.14) / 0.18) * Math.PI);
+          targetPresDist = 0.35 + boilupProg * 4.47; // Peaks at ~4.82 bar g
+        }
+        v.PRES = this.approach(v.PRES, targetPresDist, 75, 0.005, dt);
         v.AGIT_RUN = 1;
         v.AGIT = this.approach(v.AGIT, 120, 60, 0.1, dt);
         v.N2_BLANKET = 1;
@@ -256,8 +286,14 @@ export class ReactorSimulation {
 
       case 'Reaction hold':
         v.JKT_MODE = 1;
+        let targetTempHold = 142.5;
+        // Exothermic condensation reaction surge peak at ~146.8 °C (alarm_high is 145.0 °C)
+        if (prog >= 0.35 && prog <= 0.52) {
+          const exothermProg = Math.sin(((prog - 0.35) / 0.17) * Math.PI);
+          targetTempHold = 142.5 + exothermProg * 4.3; // Peaks at ~146.8 °C
+        }
         v.JKT_TEMP = this.approach(v.JKT_TEMP, 143.0, 60, 0.015, dt);
-        v.TEMP = this.approach(v.TEMP, 142.5, 180, 0.01, dt);
+        v.TEMP = this.approach(v.TEMP, targetTempHold, 80, 0.01, dt);
         v.PRES = this.approach(v.PRES, 0.35, 180, 0.005, dt);
         v.AGIT_RUN = 1;
         v.AGIT = this.approach(v.AGIT, 140, 60, 0.1, dt);
@@ -266,8 +302,8 @@ export class ReactorSimulation {
         break;
 
       case 'Cooling':
-        const coolTarget = 142.5 - prog * 62.5; // Controlled linear ramp 142.5 °C -> 80.0 °C
-        v.JKT_MODE = 2; // Active cooling mode
+        const coolTarget = 142.5 - prog * 62.5; // Controlled linear ramp 142.5 -> 80.0 °C
+        v.JKT_MODE = 2; // Cooling
         const jktTargetCool = Math.max(20.0, v.TEMP - 30.0);
         v.JKT_TEMP = this.approach(v.JKT_TEMP, jktTargetCool, 90, 0.02, dt);
         v.TEMP = this.approach(v.TEMP, coolTarget, 140, 0.015, dt);
@@ -302,14 +338,14 @@ export class ReactorSimulation {
         break;
     }
 
-    // In explicit fault condition (overheat testing)
+    // Overheat fault simulation
     if (this.tempFaultActive && (p === 'Heating' || p === 'Distillation' || p === 'Reaction hold')) {
       v.JKT_MODE = 1;
       v.JKT_TEMP = this.approach(v.JKT_TEMP, 168.0, 60, 0.03, dt);
       v.TEMP = this.approach(v.TEMP, 152.0, 90, 0.02, dt);
     }
 
-    // Physical clamps
+    // Physical bounds clamps
     v.TEMP = Math.max(-20, Math.min(170, v.TEMP));
     v.JKT_TEMP = Math.max(-25, Math.min(180, v.JKT_TEMP));
     v.PRES = Math.max(-1, Math.min(6, v.PRES));
@@ -348,11 +384,18 @@ export class ReactorSimulation {
       case 'pH adjust':
         v.AGIT_RUN = 1;
         v.DOSE_PUMP = prog < 0.85 ? 1 : 0;
-        const targetFlow = v.DOSE_PUMP ? Math.max(30, (1 - prog * 0.85) * 250) : 0;
+        let targetFlow = v.DOSE_PUMP ? Math.max(30, (1 - prog * 0.85) * 250) : 0;
+        if (this.r2HasDoseFlowSurge && prog >= 0.10 && prog <= 0.25) {
+          targetFlow = 425; // Brief dosing valve surge (> 400 L/h)
+        }
         v.DOSE_FLOW = this.approach(v.DOSE_FLOW, targetFlow, 20, 0.1, dt);
         v.DOSE_TOTAL += (v.DOSE_FLOW / 3600.0) * dt;
         v.VOL = 3000 + v.DOSE_TOTAL;
-        const phTarget = 2.4 + (1 - Math.exp(-prog * 4.5)) * 4.6;
+        let phTarget = 2.4 + (1 - Math.exp(-prog * 4.5)) * 4.6;
+        if (this.r2HasPhOvershoot && prog >= 0.78 && prog <= 0.90) {
+          const overshoot = Math.sin(((prog - 0.78) / 0.12) * Math.PI);
+          phTarget += overshoot * 2.8; // Brief alkaline overshoot peaking at ~9.8 pH (> 9.5)
+        }
         v.PH = this.approach(v.PH, phTarget, 60, 0.005, dt);
         v.TEMP = this.approach(v.TEMP, 38.0 + (prog < 0.8 ? prog * 6 : 4.8), 120, 0.015, dt);
         v.N2_BLANKET = 1;
@@ -374,7 +417,11 @@ export class ReactorSimulation {
         v.AGIT_RUN = 1;
         v.DOSE_PUMP = 0;
         v.DOSE_FLOW = 0;
-        v.TEMP = this.approach(v.TEMP, 62.0, 200, 0.015, dt);
+        let targetSwapTemp = 62.0;
+        if (this.r2HasTempOverrun && prog >= 0.40 && prog <= 0.60) {
+          targetSwapTemp = 92.5; // Occasional solvent swap temperature creep (> 90.0 °C)
+        }
+        v.TEMP = this.approach(v.TEMP, targetSwapTemp, 200, 0.015, dt);
         const swapVol = prog < 0.6 ? 3100 - prog * 900 : 2560 + (prog - 0.6) * 400;
         v.VOL = this.approach(v.VOL, swapVol, 120, 0.05, dt);
         v.N2_BLANKET = 1;
@@ -401,7 +448,7 @@ export class ReactorSimulation {
         break;
     }
 
-    // Physical clamps
+    // Physical bounds clamps
     v.PH = Math.max(0, Math.min(14, v.PH));
     v.TEMP = Math.max(-10, Math.min(120, v.TEMP));
     v.DOSE_FLOW = Math.max(0, Math.min(500, v.DOSE_FLOW));
@@ -448,9 +495,16 @@ export class ReactorSimulation {
 
       case 'Cooling ramp':
         v.AGIT_RUN = 1;
-        v.AGIT = this.approach(v.AGIT, 75, 45, 0.1, dt);
+        let agitSpeedR3 = 75;
+        if (this.r3HasAgitSpike && prog >= 0.30 && prog <= 0.42) {
+          agitSpeedR3 = 145; // Brief slurry viscosity speed boost (> 140 rpm)
+        }
+        v.AGIT = this.approach(v.AGIT, agitSpeedR3, 45, 0.1, dt);
         v.COOL_RAMP = 1;
-        const rampTemp = 72.0 - prog * 60.0; // Controlled linear cooling 72 °C -> 12 °C
+        let rampTemp = 72.0 - prog * 60.0; // Controlled linear ramp 72 -> 12 °C
+        if (this.r3HasCoolRateGlitch && prog >= 0.40 && prog <= 0.52) {
+          rampTemp -= Math.sin(((prog - 0.40) / 0.12) * Math.PI) * 2.5; // Chiller pulse causing cooling rate dip < -20 °C/h
+        }
         v.TEMP = this.approach(v.TEMP, rampTemp, 50, 0.015, dt);
         if (prog >= 0.40) {
           v.SEEDED = 1;
@@ -492,7 +546,7 @@ export class ReactorSimulation {
         break;
     }
 
-    // Maintain sliding window to compute COOL_RATE (dTEMP/dt in °C/h) only during Cooling ramp
+    // Cooling rate sliding window derivative calculation
     if (p === 'Cooling ramp') {
       this.tempHistory.push({ t: this.phaseElapsedSec, temp: v.TEMP });
       if (this.tempHistory.length > 180) this.tempHistory.shift();
@@ -512,7 +566,7 @@ export class ReactorSimulation {
       v.COOL_RATE = 0.0;
     }
 
-    // Physical clamps
+    // Physical bounds clamps
     v.TEMP = Math.max(-20, Math.min(120, v.TEMP));
     v.COOL_RATE = Math.max(-30, Math.min(30, v.COOL_RATE));
     v.AGIT = Math.max(0, Math.min(150, v.AGIT));
@@ -520,10 +574,13 @@ export class ReactorSimulation {
     v.VOL = Math.max(0, Math.min(3000, v.VOL));
   }
 
-  // Transition to next phase in sequence or forced phase
+  /**
+   * Transition to the next phase in the defined sequence or a forced phase.
+   */
   transitionNextPhase(forcedPhase = null) {
     const prevPhase = this.currentPhase;
     const phases = REACTOR_PHASES[this.code];
+
     if (forcedPhase) {
       this.currentPhase = forcedPhase;
     } else {
@@ -539,19 +596,33 @@ export class ReactorSimulation {
     if (this.code === 'R1') {
       if (this.currentPhase === 'Charging' && prevPhase !== 'Charging') {
         this.chargeBatchCount++;
-        // Maintain clean filter DP baseline
-        this.filterClogAccum = 0.0;
+        // 1 exception every two batches: even batches foul the filter (> 1.5 bar)
+        if (this.chargeBatchCount % 2 === 0) {
+          this.filterClogAccum = 0.85; // Clogged cake pushes DP above 1.5 bar
+        } else {
+          this.filterClogAccum = 0.0;  // Clean baseline
+        }
       }
-      if ((this.currentPhase === 'Idle' || this.currentPhase === 'Clean') && this.filterNeedsReplacement) {
-        this.filterClogAccum = 0.0;
+      if (this.currentPhase === 'Idle' || this.currentPhase === 'Clean') {
         this.filterNeedsReplacement = false;
         this.filterAlarmTimerSec = 0;
+      }
+    } else if (this.code === 'R2') {
+      if (this.currentPhase === 'Receive' && prevPhase !== 'Receive') {
+        this.r2HasPhOvershoot = this.prng.next() < 0.15;
+        this.r2HasDoseFlowSurge = this.prng.next() < 0.10;
+        this.r2HasTempOverrun = this.prng.next() < 0.10;
+      }
+    } else if (this.code === 'R3') {
+      if (this.currentPhase === 'Receive' && prevPhase !== 'Receive') {
+        this.r3HasCoolRateGlitch = this.prng.next() < 0.20;
+        this.r3HasAgitSpike = this.prng.next() < 0.08;
       }
     }
 
     this.phaseElapsedSec = 0;
     this.tempHistory = [];
-    const durConfig = PHASE_DURATIONS[this.code][this.currentPhase];
+    const durConfig = PHASE_DURATIONS[this.code][this.currentPhase] || { min: 600, max: 1800 };
     this.phaseDurationSec = this.prng.rangeInt(durConfig.min, durConfig.max);
 
     return this.currentPhase;

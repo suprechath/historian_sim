@@ -1,15 +1,24 @@
 {
-  "name": "simulator",
+  "name": "historian-simulator",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Industrial reactor process historian simulator modelling AVEVA PI System with ISA-88 batch lifecycle",
+  "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node src/start.js",
+    "seed": "node src/seeder.js",
+    "engine": "node src/index.js",
+    "test": "node --test tests/**/*.test.js"
   },
-  "keywords": [],
+  "keywords": [
+    "historian",
+    "simulator",
+    "isa-88",
+    "chemical-reactor",
+    "timescaledb"
+  ],
   "author": "",
   "license": "ISC",
-  "description": "",
   "dependencies": {
     "dotenv": "^17.4.2",
     "pg": "^8.23.0"

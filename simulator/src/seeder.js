@@ -1,22 +1,28 @@
-// simulator/src/seeder.js
-import { pool } from './db.js';
+import { fileURLToPath } from 'url';
+import { pool, query, closePool } from './db.js';
 import { PRNG } from './prng.js';
 import { ReactorSimulation } from './stateMachine.js';
+import { logger } from './logger.js';
+import { config } from './config.js';
 
-const SEED = Date.now();
-const DAYS_TO_SEED = parseInt(process.argv[2] || '3', 10);
-const ARCHIVE_INTERVAL_SEC = 5;                           // 5-second archive persistence
-const BATCH_FLUSH_SIZE = 40000;                           // Multi-row array buffer size
+const ARCHIVE_INTERVAL_SEC = 5;
+const BATCH_FLUSH_SIZE = 40000;
 
-async function seedHistory() {
+/**
+ * Seed historical data for the simulation.
+ */
+export async function seedHistory({ days = config.autoSeedDays, seed = Date.now() } = {}) {
+  const daysToSeed = parseInt(days, 10) || 3;
   const client = await pool.connect();
-  const prng = new PRNG(SEED);
+  const prng = new PRNG(seed);
 
   try {
-    console.log(`\n--- Starting Historical Train Backfill (${DAYS_TO_SEED} days, seed: ${SEED}) ---`);
+    logger.info(`Starting Historical Train Backfill (${daysToSeed} days, seed: ${seed})...`, 'Seeder');
 
     // 1. Fetch Assets and Tags
-    const { rows: assets } = await client.query('SELECT id, code, display_name, capacity_l, role, material FROM assets ORDER BY id');
+    const { rows: assets } = await client.query(
+      'SELECT id, code, display_name, capacity_l, role, material FROM assets ORDER BY id'
+    );
     const { rows: tags } = await client.query(`
       SELECT id, name, asset_id, parameter, point_type, alarm_low, alarm_high, alarm_state_int 
       FROM tags ORDER BY id
@@ -27,26 +33,28 @@ async function seedHistory() {
     }
 
     const tagLookup = new Map();
-    tags.forEach(t => tagLookup.set(`${t.asset_id}_${t.parameter}`, t));
+    tags.forEach((t) => tagLookup.set(`${t.asset_id}_${t.parameter}`, t));
 
     // 2. Clean existing historical data and reset stale injected faults
-    console.log('Cleaning old historical records (monitoring, events, batches, batch_exceptions, readings, faults)...');
-    await client.query('TRUNCATE TABLE monitoring_outbox, monitoring_jobs, events, batches, batch_exceptions, injected_faults CASCADE');
+    logger.info('Cleaning old historical records (monitoring, events, batches, batch_exceptions, readings, faults)...', 'Seeder');
+    await client.query(
+      'TRUNCATE TABLE monitoring_outbox, monitoring_jobs, events, batches, batch_exceptions, injected_faults CASCADE'
+    );
     await client.query('TRUNCATE TABLE readings');
 
     // 3. Initialize Reactor State Machines (All start in Idle)
-    const reactors = assets.map(a => new ReactorSimulation(a, prng));
-    const r1 = reactors.find(r => r.code === 'R1');
-    const r2 = reactors.find(r => r.code === 'R2');
-    const r3 = reactors.find(r => r.code === 'R3');
+    const reactors = assets.map((a) => new ReactorSimulation(a, prng));
+    const r1 = reactors.find((r) => r.code === 'R1');
+    const r2 = reactors.find((r) => r.code === 'R2');
+    const r3 = reactors.find((r) => r.code === 'R3');
 
     const now = new Date();
-    const startTime = new Date(now.getTime() - DAYS_TO_SEED * 24 * 60 * 60 * 1000);
+    const startTime = new Date(now.getTime() - daysToSeed * 24 * 60 * 60 * 1000);
     let currentTime = new Date(startTime);
 
     let batchSeq = 1;
     let totalReadings = 0;
-    let trainBatch = null; // { id, batch_id, started_at }
+    let trainBatch = null;
 
     // Buffer arrays for high-performance UNNEST bulk insert
     let bufTagId = [];
@@ -78,17 +86,19 @@ async function seedHistory() {
 
     const flushExceptions = async () => {
       if (finishedExceptions.length === 0) return;
-      const bPks = finishedExceptions.map(e => e.batchPk);
-      const aIds = finishedExceptions.map(e => e.assetId);
-      const tIds = finishedExceptions.map(e => e.tagId);
-      const pNames = finishedExceptions.map(e => e.phaseName);
-      const eTypes = finishedExceptions.map(e => e.exceptionType);
-      const lVals = finishedExceptions.map(e => e.limitValue);
-      const pVals = finishedExceptions.map(e => e.peakValue);
-      const sAts = finishedExceptions.map(e => e.startedAt);
-      const eAts = finishedExceptions.map(e => e.endedAt);
-      const dSecs = finishedExceptions.map(e => e.durationSec);
-      const details = finishedExceptions.map(e => JSON.stringify({ peak: e.peakValue, limit: e.limitValue }));
+      const bPks = finishedExceptions.map((e) => e.batchPk);
+      const aIds = finishedExceptions.map((e) => e.assetId);
+      const tIds = finishedExceptions.map((e) => e.tagId);
+      const pNames = finishedExceptions.map((e) => e.phaseName);
+      const eTypes = finishedExceptions.map((e) => e.exceptionType);
+      const lVals = finishedExceptions.map((e) => e.limitValue);
+      const pVals = finishedExceptions.map((e) => e.peakValue);
+      const sAts = finishedExceptions.map((e) => e.startedAt);
+      const eAts = finishedExceptions.map((e) => e.endedAt);
+      const dSecs = finishedExceptions.map((e) => e.durationSec);
+      const details = finishedExceptions.map((e) =>
+        JSON.stringify({ peak: e.peakValue, limit: e.limitValue })
+      );
 
       await client.query(
         `INSERT INTO batch_exceptions (batch_pk, asset_id, tag_id, phase_name, exception_type, limit_value, peak_value, started_at, ended_at, duration_sec, details)
@@ -99,10 +109,9 @@ async function seedHistory() {
       finishedExceptions.length = 0;
     };
 
-    console.log(`Backfilling single-batch timeline from ${startTime.toISOString()} to ${now.toISOString()}...`);
+    logger.info(`Backfilling single-batch timeline from ${startTime.toISOString()} to ${now.toISOString()}...`, 'Seeder');
     let lastLoggedDay = -1;
 
-    // Helper to open a phase event
     const openPhaseEvent = async (sim, phaseName, batchPk, parentId = null) => {
       const { rows } = await client.query(
         `INSERT INTO events (batch_pk, asset_id, parent_id, name, level, occurrence, started_at)
@@ -112,7 +121,6 @@ async function seedHistory() {
       sim.activePhaseEventId = rows[0].id;
     };
 
-    // Helper to close an event
     const closeEvent = async (eventId) => {
       if (!eventId) return;
       await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [currentTime, eventId]);
@@ -123,10 +131,13 @@ async function seedHistory() {
       const daysElapsed = Math.floor((currentTime - startTime) / (24 * 60 * 60 * 1000));
       if (daysElapsed !== lastLoggedDay) {
         lastLoggedDay = daysElapsed;
-        console.log(`-> Backfilling Day ${daysElapsed + 1}/${DAYS_TO_SEED} (${totalReadings.toLocaleString()} readings persisted)`);
+        logger.info(
+          `Backfilling Day ${daysElapsed + 1}/${daysToSeed} (${totalReadings.toLocaleString()} readings persisted)`,
+          'Seeder'
+        );
       }
 
-      // 1. Train Orchestration: Ensure EXACTLY ONE batch is in the train
+      // 1. Train Orchestration: Ensure EXACTLY ONE batch in the train
       if (!trainBatch && r1.currentPhase === 'Idle') {
         const bStr = `B-${currentTime.getUTCFullYear()}-${String(batchSeq++).padStart(4, '0')}`;
         const { rows: bRows } = await client.query(
@@ -155,7 +166,6 @@ async function seedHistory() {
         const phaseFinished = sim.tick(ARCHIVE_INTERVAL_SEC);
 
         if (phaseFinished) {
-          // Close active phase event
           if (sim.activePhaseEventId) {
             await closeEvent(sim.activePhaseEventId);
             sim.activePhaseEventId = null;
@@ -181,7 +191,6 @@ async function seedHistory() {
                 await openPhaseEvent(sim, 'Cooling', trainBatch?.id, sim.activeUnitProcedureId);
                 break;
               case 'Cooling':
-                // Synchronized Handoff to R2!
                 const r1TransferDur = prng.rangeInt(900, 1500); // 15-25 min
                 sim.transitionNextPhase('Transfer');
                 sim.phaseDurationSec = r1TransferDur;
@@ -194,7 +203,6 @@ async function seedHistory() {
                 await openPhaseEvent(r2, 'Receive', trainBatch?.id, null);
                 break;
               case 'Transfer':
-                // R1 handoff complete! Close R1 unit procedure
                 if (sim.activeUnitProcedureId) {
                   await closeEvent(sim.activeUnitProcedureId);
                   sim.activeUnitProcedureId = null;
@@ -205,14 +213,15 @@ async function seedHistory() {
                 break;
               case 'Clean':
                 sim.transitionNextPhase('Idle');
-                // R1 stays in Idle until current train batch completes in R3
                 break;
             }
           } else if (sim.code === 'R2') {
             switch (sim.currentPhase) {
               case 'Receive':
-                // Material received from R1! Open R2 Unit Procedure
-                await client.query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [r2.asset.id, trainBatch.id]);
+                await client.query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [
+                  r2.asset.id,
+                  trainBatch.id,
+                ]);
                 const { rows: up2Rows } = await client.query(
                   `INSERT INTO events (batch_pk, asset_id, name, level, started_at)
                    VALUES ($1, $2, 'Unit procedure R2 — Workup', 'Unit Procedure', $3) RETURNING id`,
@@ -231,7 +240,6 @@ async function seedHistory() {
                 await openPhaseEvent(sim, 'Solvent swap', trainBatch?.id, sim.activeUnitProcedureId);
                 break;
               case 'Solvent swap':
-                // Synchronized Handoff to R3!
                 const r2TransferDur = prng.rangeInt(600, 1200); // 10-20 min
                 sim.transitionNextPhase('Filter & transfer');
                 sim.phaseDurationSec = r2TransferDur;
@@ -245,7 +253,6 @@ async function seedHistory() {
                 break;
               case 'Filter & transfer':
               case 'Transfer':
-                // R2 handoff complete! Close R2 unit procedure
                 if (sim.activeUnitProcedureId) {
                   await closeEvent(sim.activeUnitProcedureId);
                   sim.activeUnitProcedureId = null;
@@ -256,14 +263,15 @@ async function seedHistory() {
                 break;
               case 'Clean':
                 sim.transitionNextPhase('Idle');
-                // R2 stays in Idle
                 break;
             }
           } else if (sim.code === 'R3') {
             switch (sim.currentPhase) {
               case 'Receive':
-                // Material received from R2! Open R3 Unit Procedure
-                await client.query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [r3.asset.id, trainBatch.id]);
+                await client.query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [
+                  r3.asset.id,
+                  trainBatch.id,
+                ]);
                 const { rows: up3Rows } = await client.query(
                   `INSERT INTO events (batch_pk, asset_id, name, level, started_at)
                    VALUES ($1, $2, 'Unit procedure R3 — Crystallisation', 'Unit Procedure', $3) RETURNING id`,
@@ -286,7 +294,6 @@ async function seedHistory() {
                 await openPhaseEvent(sim, 'Transfer', trainBatch?.id, sim.activeUnitProcedureId);
                 break;
               case 'Transfer':
-                // Batch Completed!
                 if (sim.activeUnitProcedureId) {
                   await closeEvent(sim.activeUnitProcedureId);
                   sim.activeUnitProcedureId = null;
@@ -304,7 +311,6 @@ async function seedHistory() {
                 break;
               case 'Clean':
                 sim.transitionNextPhase('Idle');
-                // Train is fully cleared; R1 will now be eligible to start next batch!
                 break;
             }
           }
@@ -316,7 +322,7 @@ async function seedHistory() {
           if (!tag) continue;
 
           const val = sim.values[param];
-          const quality = 0; // Good quality
+          const quality = 0;
 
           const isInteger = tag.point_type === 'integer';
           const recordVal = isInteger ? (val !== null ? Math.round(val) : null) : val;
@@ -360,7 +366,7 @@ async function seedHistory() {
                 exceptionType: exType,
                 limitValue: limitVal,
                 peakValue: val,
-                startedAt: new Date(currentTime)
+                startedAt: new Date(currentTime),
               });
             } else {
               if (currentEx.exceptionType === 'HIGH_LIMIT' && val > currentEx.peakValue) {
@@ -371,17 +377,20 @@ async function seedHistory() {
             }
           } else if (currentEx) {
             seederActiveExceptions.delete(exKey);
-            const durationSec = Math.max(1, Math.round((currentTime.getTime() - currentEx.startedAt.getTime()) / 1000));
+            const durationSec = Math.max(
+              1,
+              Math.round((currentTime.getTime() - currentEx.startedAt.getTime()) / 1000)
+            );
             finishedExceptions.push({
               ...currentEx,
               endedAt: new Date(currentTime),
-              durationSec
+              durationSec,
             });
           }
         }
       }
 
-      // Flush readings when buffer is full
+      // Flush buffers when size reached
       if (bufTagId.length >= BATCH_FLUSH_SIZE) {
         await flushReadings();
       }
@@ -389,24 +398,26 @@ async function seedHistory() {
         await flushExceptions();
       }
 
-      // Advance by 5 seconds
       currentTime = new Date(currentTime.getTime() + ARCHIVE_INTERVAL_SEC * 1000);
     }
 
-    // Flush any remaining readings & exceptions
+    // Flush remaining readings & exceptions
     await flushReadings();
-    for (const [key, currentEx] of seederActiveExceptions.entries()) {
-      const durationSec = Math.max(1, Math.round((currentTime.getTime() - currentEx.startedAt.getTime()) / 1000));
+    for (const [, currentEx] of seederActiveExceptions.entries()) {
+      const durationSec = Math.max(
+        1,
+        Math.round((currentTime.getTime() - currentEx.startedAt.getTime()) / 1000)
+      );
       finishedExceptions.push({
         ...currentEx,
         endedAt: new Date(currentTime),
-        durationSec
+        durationSec,
       });
     }
     await flushExceptions();
 
     // 4. Update Snapshots with current live values
-    console.log('Writing final live snapshots cache...');
+    logger.info('Writing final live snapshots cache...', 'Seeder');
     const sTagIds = [];
     const sTimes = [];
     const sVals = [];
@@ -431,19 +442,38 @@ async function seedHistory() {
       [sTagIds, sTimes, sVals, sQualities]
     );
 
-    console.log(`\n=== Historical Backfill Completed Successfully! ===`);
-    console.log(`- Total Readings Persisted: ${totalReadings.toLocaleString()}`);
-    console.log(`- Total Batches Generated: ${batchSeq - 1}`);
-    console.log(`- Active In-Flight Batch: ${trainBatch ? trainBatch.batch_id : 'None (idle train)'}`);
-    console.log(`- Total Batch Exceptions Persisted: ${totalExceptionsCount}`);
+    logger.info('Historical Backfill Completed Successfully!', 'Seeder');
+    logger.info(`- Total Readings Persisted: ${totalReadings.toLocaleString()}`, 'Seeder');
+    logger.info(`- Total Batches Generated: ${batchSeq - 1}`, 'Seeder');
+    logger.info(
+      `- Active In-Flight Batch: ${trainBatch ? trainBatch.batch_id : 'None (idle train)'}`,
+      'Seeder'
+    );
+    logger.info(`- Total Batch Exceptions Persisted: ${totalExceptionsCount}`, 'Seeder');
 
-  } catch (err) {
-    console.error('Seeder encountered an error:', err);
-    throw err;
+    return {
+      totalReadings,
+      totalBatches: batchSeq - 1,
+      trainBatch,
+      totalExceptionsCount,
+    };
   } finally {
     client.release();
-    await pool.end();
   }
 }
 
-seedHistory();
+// Standalone CLI execution
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMain) {
+  const daysArg = parseInt(process.argv[2] || `${config.autoSeedDays}`, 10);
+  seedHistory({ days: daysArg })
+    .then(async () => {
+      await closePool();
+      process.exit(0);
+    })
+    .catch(async (err) => {
+      logger.error(`Seeder failed: ${err.message}`, 'Seeder', err);
+      await closePool();
+      process.exit(1);
+    });
+}

@@ -1,43 +1,44 @@
-import path from 'path';
-import { fileURLToPath } from 'url';
-import dotenv from 'dotenv';
-import { pool } from './db.js';
-import { spawnSync } from 'child_process';
-
-// Resolve and load root .env (two levels up from simulator/src)
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+import { waitForDatabase, query } from './db.js';
+import { seedHistory } from './seeder.js';
+import { config } from './config.js';
+import { logger } from './logger.js';
 
 async function bootstrap() {
   try {
-    const client = await pool.connect();
+    logger.info('Starting Reactor Process Historian Simulator Service...', 'Bootstrap');
 
-    // Check if readings already exist
-    const { rows } = await client.query('SELECT 1 FROM readings LIMIT 1;');
-    client.release();
+    // 1. Resiliently wait for database readiness and schema initialization
+    await waitForDatabase(45, 1500);
+
+    // 2. Check if historical readings exist
+    const { rows } = await query('SELECT 1 FROM readings LIMIT 1;');
 
     if (rows.length === 0) {
-      const daysToSeed = process.env.AUTO_SEED_DAYS;
-      console.log(`--- Empty Database Detected: Automatically seeding ${daysToSeed}-day history ---`);
-      const seedProcess = spawnSync('node', ['src/seeder.js', daysToSeed], {
-        stdio: 'inherit',
-        env: process.env
-      });
-
-      if (seedProcess.status !== 0) {
-        console.error('Auto-seeding failed. Starting continuous engine anyway...');
-      } else {
-        console.log('--- Auto-seeding complete! ---');
+      logger.info(
+        `Empty Database Detected: Automatically seeding ${config.autoSeedDays}-day history...`,
+        'Bootstrap'
+      );
+      try {
+        await seedHistory({ days: config.autoSeedDays });
+        logger.info('Auto-seeding completed successfully.', 'Bootstrap');
+      } catch (seedErr) {
+        logger.error(
+          `Auto-seeding encountered an error: ${seedErr.message}. Starting continuous engine anyway...`,
+          'Bootstrap',
+          seedErr
+        );
       }
     } else {
-      console.log('Historical readings present. Skipping auto-seeder.');
+      logger.info('Historical readings already present. Skipping auto-seeder.', 'Bootstrap');
     }
-  } catch (err) {
-    console.error('Startup check warning (DB might still be initializing):', err.message);
-  }
 
-  // Launch continuous 1-second simulation loop
-  await import('./index.js');
+    // 3. Launch continuous simulation engine
+    logger.info('Launching continuous simulation engine...', 'Bootstrap');
+    await import('./index.js');
+  } catch (err) {
+    logger.error(`Bootstrap fatal error: ${err.message}`, 'Bootstrap', err);
+    process.exit(1);
+  }
 }
 
 bootstrap();
