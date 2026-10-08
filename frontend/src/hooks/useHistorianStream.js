@@ -8,6 +8,7 @@ export function useHistorianStream() {
         mode: 'continuous',
         assignedBatchId: null,
         singleBatchStatus: 'idle',
+        batchQueue: [],
         reactors: { R1: { phase: 'Idle' }, R2: { phase: 'Idle' }, R3: { phase: 'Idle' } },
         tags: []
     });

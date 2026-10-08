@@ -6,7 +6,7 @@ import dotenv from 'dotenv';
 import { query, ensureDefaultApiKey, pool } from './db.js';
 import { authAndAudit } from './middleware/authAndAudit.js';
 import externalRoutes from './routes/external.js';
-import uiRoutes from './routes/ui.js';
+import uiRoutes, { ensureSimulationControl } from './routes/ui.js';
 import { startJobsWorker } from './jobsWorker.js';
 
 // Resolve and load root .env (two levels up from api/src)
@@ -64,6 +64,7 @@ app.use((err, req, res, next) => {
 
 // 4. Initialize Database Seed Keys, Dispatcher Worker, and Listen
 await ensureDefaultApiKey();
+await ensureSimulationControl();
 startJobsWorker();
 
 const server = app.listen(PORT, () => {

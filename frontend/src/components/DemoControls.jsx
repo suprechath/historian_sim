@@ -6,17 +6,22 @@ export default function DemoControls({
     mode = 'continuous',
     assignedBatchId = null,
     singleBatchStatus = 'idle',
+    batchQueue = [],
     running = true,
     speed = 1,
     reactors = {}
 }) {
     const [panelTab, setPanelTab] = useState('batch'); // 'batch' | 'faults'
     const [batchInput, setBatchInput] = useState('');
-    const [startImmediate, setStartImmediate] = useState(true);
-    const [clearTrain, setClearTrain] = useState(false);
+    const [startImmediate, setStartImmediate] = useState(false);
+    const [resetDownstream, setResetDownstream] = useState(false);
     const [actionMsg, setActionMsg] = useState(null); // { type: 'success' | 'error', text: '' }
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [faults, setFaults] = useState([]);
+
+    const pendingBatches = (batchQueue || []).filter(
+        (b) => b.status === 'waiting_r1' || b.status === 'in_queue'
+    );
 
     const fetchFaults = async () => {
         try {
@@ -56,8 +61,8 @@ export default function DemoControls({
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     batchId: batchInput.trim(),
-                    startImmediately,
-                    clearTrain,
+                    startImmediately: Boolean(startImmediate && !resetDownstream),
+                    resetDownstream: Boolean(!startImmediate && resetDownstream),
                     resume
                 })
             });
@@ -65,12 +70,9 @@ export default function DemoControls({
             if (!res.ok) {
                 setActionMsg({ type: 'error', text: data.error || 'Failed to assign batch' });
             } else {
-                setActionMsg({
-                    type: 'success',
-                    text: resume
-                        ? `Batch ${data.assignedBatchId} assigned & simulation resumed!`
-                        : `Batch ${data.assignedBatchId} assigned to R1. Simulator set to single-batch mode.`
-                });
+                // Green box message is not needed
+                setActionMsg(null);
+                setBatchInput('');
             }
         } catch (err) {
             setActionMsg({ type: 'error', text: err.message || 'Connection error' });
@@ -124,11 +126,19 @@ export default function DemoControls({
         fetchFaults();
     };
 
-    const skipPhase = async () => {
+    const skipPhase = async (asset = selectedReactor) => {
         await fetch('/ui/simulation/phase/skip', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ asset: selectedReactor })
+            body: JSON.stringify({ asset })
+        });
+    };
+
+    const skipProcess = async (asset = selectedReactor) => {
+        await fetch('/ui/simulation/process/skip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ asset })
         });
     };
 
@@ -147,44 +157,21 @@ export default function DemoControls({
                         type="button"
                         className={`section-tab ${panelTab === 'faults' ? 'active' : ''}`}
                         onClick={() => setPanelTab('faults')}>
-                        ⚡ Faults & Phase
+                        ⚡ Faults
                     </button>
                 </div>
-                <span className="demo-col-badge">
-                    {panelTab === 'batch' ? (mode === 'single' ? 'Single' : 'Cont.') : `${selectedReactor}`}
-                </span>
             </div>
 
             <div className="demo-col-body">
-                {panelTab === 'batch' ? (
-                    /* ---------------- BATCH CONTROL PANEL ---------------- */
-                    <div className="batch-ctrl-container">
-                        {/* Mode Switcher */}
-                        <div className="batch-mode-selector">
-                            <span className="batch-selector-label">Mode:</span>
-                            <div className="batch-mode-toggle-group">
-                                <button
-                                    type="button"
-                                    className={`mode-toggle-btn ${mode === 'continuous' ? 'active' : ''}`}
-                                    onClick={handleSwitchContinuous}
-                                    disabled={isSubmitting}
-                                    title="Automatic uninterrupted multi-batch simulation">
-                                    🔄 Continuous
-                                </button>
-                                <button
-                                    type="button"
-                                    className={`mode-toggle-btn ${mode === 'single' ? 'active' : ''}`}
-                                    onClick={() => {}}
-                                    title="Produce only one user-assigned batch and stop">
-                                    🎯 Single Batch
-                                </button>
-                            </div>
-                        </div>
-
+                <div className="demo-tab-content-area">
+                    {panelTab === 'batch' ? (
+                        /* ---------------- BATCH CONTROL PANEL ---------------- */
+                        <div className="batch-ctrl-container">
                         {/* Custom Batch Form */}
                         <div className="batch-form-box">
+                            {/* 1. Enter Batch Number */}
                             <div className="batch-input-label-row">
-                                <label htmlFor="custom-batch-input">Assign Desired Batch #:</label>
+                                <label htmlFor="custom-batch-input">Batch Number:</label>
                                 <button
                                     type="button"
                                     className="btn-link-preset"
@@ -206,69 +193,58 @@ export default function DemoControls({
                                     onChange={(e) => setBatchInput(e.target.value)}
                                     onKeyDown={(e) => {
                                         if (e.key === 'Enter') {
-                                            handleAssignBatch(!running);
+                                            handleAssignBatch();
                                         }
                                     }}
-                                    placeholder="e.g. B-2026-9999 or 42"
+                                    placeholder="e.g. B-2026-1001"
                                     disabled={isSubmitting}
                                 />
                             </div>
 
-                            <label className="batch-check-label">
+                            {/* 2. Start immediately checkbox */}
+                            <label className={`batch-check-label ${resetDownstream ? 'disabled' : ''}`}>
                                 <input
                                     type="checkbox"
                                     checked={startImmediate}
-                                    onChange={(e) => setStartImmediate(e.target.checked)}
+                                    disabled={resetDownstream}
+                                    onChange={(e) => {
+                                        const checked = e.target.checked;
+                                        setStartImmediate(checked);
+                                        if (checked) {
+                                            setResetDownstream(false);
+                                        }
+                                    }}
                                 />
-                                <span>Start immediately in R1 (aborts prior batch)</span>
+                                <span>Start immediately</span>
                             </label>
 
-                            <label className="batch-check-label">
+                            {/* 3. Reset all downstream checkbox (disabled when Start immediately is selected) */}
+                            <label className={`batch-check-label ${startImmediate ? 'disabled' : ''}`}>
                                 <input
                                     type="checkbox"
-                                    checked={clearTrain}
-                                    onChange={(e) => setClearTrain(e.target.checked)}
+                                    checked={resetDownstream}
+                                    disabled={startImmediate}
+                                    onChange={(e) => {
+                                        const checked = e.target.checked;
+                                        setResetDownstream(checked);
+                                        if (checked) {
+                                            setStartImmediate(false);
+                                        }
+                                    }}
                                 />
-                                <span>Line clearance (reset downstream R2 & R3 to Idle)</span>
+                                <span>Reset all downstream</span>
                             </label>
 
-                            {/* Pause Awareness and Actions */}
-                            {!running ? (
-                                <div className="batch-paused-actions">
-                                    <div className="batch-pause-alert">
-                                        <span className="alert-dot" /> Simulator is paused
-                                    </div>
-                                    <div className="batch-btn-duo">
-                                        <button
-                                            type="button"
-                                            className="demo-pill-btn batch-primary-btn"
-                                            onClick={() => handleAssignBatch(true)}
-                                            disabled={isSubmitting}
-                                            title="Assign batch and resume simulator immediately">
-                                            <span className="btn-icon">▶</span>
-                                            <span className="btn-text">Send & Resume</span>
-                                        </button>
-                                        <button
-                                            type="button"
-                                            className="demo-pill-btn batch-secondary-btn"
-                                            onClick={() => handleAssignBatch(false)}
-                                            disabled={isSubmitting}
-                                            title="Assign batch into R1 but leave simulator paused">
-                                            <span className="btn-icon">⏸</span>
-                                            <span className="btn-text">Send (Stay Paused)</span>
-                                        </button>
-                                    </div>
-                                </div>
-                            ) : (
-                                <button
-                                    type="button"
-                                    className="demo-pill-btn batch-primary-btn"
-                                    onClick={() => handleAssignBatch(false)}
-                                    disabled={isSubmitting}>
-                                    <span className="btn-icon">🚀</span>
-                                    <span className="btn-text">Produce Assigned Batch</span>
-                                </button>
-                            )}
+                            {/* 4. Assign Batch Button */}
+                            <button
+                                type="button"
+                                className="demo-pill-btn batch-primary-btn"
+                                onClick={() => handleAssignBatch()}
+                                disabled={isSubmitting || !batchInput.trim()}
+                                title={!batchInput.trim() ? 'Enter a batch number' : 'Assign batch to simulator'}>
+                                <span className="btn-icon">📋</span>
+                                <span className="btn-text">Assign Batch</span>
+                            </button>
                         </div>
 
                         {/* Inline Feedback Message */}
@@ -283,63 +259,73 @@ export default function DemoControls({
 
                         {/* Real-time Status Card */}
                         <div className="batch-status-panel">
+                            {/* Manual Batch Request Table */}
                             <div className="batch-status-header">
-                                <span className="status-title">Active Production State</span>
-                                <span className={`status-pill ${mode === 'single' ? (singleBatchStatus === 'completed' ? 'pill-completed' : 'pill-single') : 'pill-continuous'}`}>
-                                    {mode === 'single'
-                                        ? (singleBatchStatus === 'completed' ? '✔ Completed' : '🎯 Single Active')
-                                        : '🔄 Continuous Train'}
+                                <span className="status-title" style={{ color: '#000000' }}>Manual Batch Request</span>
+                                <span className={`status-pill ${pendingBatches.length > 0 ? 'pill-single' : 'pill-continuous'}`}>
+                                    {pendingBatches.length > 0 ? `${pendingBatches.length} Queued` : '0 Queued'}
                                 </span>
                             </div>
-                            <div className="batch-status-body">
-                                {mode === 'single' ? (
-                                    <>
-                                        <div className="batch-stat-row">
-                                            <span className="stat-label">Assigned Batch:</span>
-                                            <span className="stat-val mono"><b>{assignedBatchId || 'None'}</b></span>
-                                        </div>
-                                        <div className="batch-stat-desc">
-                                            {singleBatchStatus === 'completed' ? (
-                                                <span className="text-ok">Assigned batch finished. Simulator holding idle.</span>
-                                            ) : (
-                                                <span className="text-info">Simulator will produce only this batch, then stop.</span>
-                                            )}
-                                        </div>
-                                        {mode === 'single' && (
-                                            <button
-                                                type="button"
-                                                className="btn-restore-link"
-                                                onClick={handleSwitchContinuous}>
-                                                Return to Continuous Mode &rarr;
-                                            </button>
-                                        )}
-                                    </>
-                                ) : (
-                                    <>
-                                        <div className="batch-stat-row">
-                                            <span className="stat-label">Train Batches:</span>
-                                            <span className="stat-val mono">
-                                                {reactors.R1?.batchId || 'Idle'} &rarr; {reactors.R2?.batchId || 'Idle'} &rarr; {reactors.R3?.batchId || 'Idle'}
-                                            </span>
-                                        </div>
-                                        <div className="batch-stat-desc">
-                                            Auto-generating batches indefinitely.
-                                        </div>
-                                    </>
-                                )}
-                            </div>
-                        </div>
 
-                        {/* Quick Phase Advancer */}
-                        <div className="demo-btn-stack" style={{ marginTop: 'auto' }}>
-                            <button
-                                type="button"
-                                className="demo-pill-btn skip-pill-btn"
-                                onClick={skipPhase}
-                                title={`Advance current batch phase for ${selectedReactor}`}>
-                                <span className="skip-icon">⏩</span>
-                                <span className="btn-text">Skip {selectedReactor} Phase</span>
-                            </button>
+                            <div className="manual-batch-table-wrap">
+                                <table className="manual-batch-table">
+                                    <thead>
+                                        <tr>
+                                            <th style={{ width: '40%', color: '#000000' }}>Batch Number</th>
+                                            <th style={{ width: '60%', color: '#000000' }}>Batch status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {pendingBatches.length === 0 ? (
+                                            <tr>
+                                                <td colSpan="2" className="empty-batch-cell">
+                                                    No pending manual batch requests
+                                                </td>
+                                            </tr>
+                                        ) : (
+                                            pendingBatches.map((item) => (
+                                                <tr key={item.id || item.batchId}>
+                                                    <td className="mono batch-id-cell"><b>{item.batchId}</b></td>
+                                                    <td className="batch-status-cell">
+                                                        {item.status === 'waiting_r1'
+                                                            ? 'Wait currect Batch in R1 finished'
+                                                            : 'Waits till current batches finished'}
+                                                    </td>
+                                                </tr>
+                                            ))
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            {/* Active Batch Status for Each Reactor */}
+                            <div className="batch-status-header" style={{ marginTop: '8px' }}>
+                                <span className="status-title" style={{ color: '#000000' }}>Active Batch Status</span>
+                            </div>
+                            <div className="manual-batch-table-wrap">
+                                <table className="manual-batch-table">
+                                    <thead>
+                                        <tr>
+                                            <th style={{ width: '33.33%', textAlign: 'center', color: '#000000' }}>R1</th>
+                                            <th style={{ width: '33.33%', textAlign: 'center', color: '#000000' }}>R2</th>
+                                            <th style={{ width: '33.33%', textAlign: 'center', color: '#000000' }}>R3</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td className="mono batch-id-cell" style={{ textAlign: 'center' }}>
+                                                <b>{reactors?.R1?.batchId || '-'}</b>
+                                            </td>
+                                            <td className="mono batch-id-cell" style={{ textAlign: 'center' }}>
+                                                <b>{reactors?.R2?.batchId || '-'}</b>
+                                            </td>
+                                            <td className="mono batch-id-cell" style={{ textAlign: 'center' }}>
+                                                <b>{reactors?.R3?.batchId || '-'}</b>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
                 ) : (
@@ -386,18 +372,6 @@ export default function DemoControls({
                             </button>
                         </div>
 
-                        {/* Batch Sequencer Action */}
-                        <div className="demo-btn-stack">
-                            <button
-                                type="button"
-                                className="demo-pill-btn skip-pill-btn"
-                                onClick={skipPhase}
-                                title={`Advance current batch phase for ${selectedReactor}`}>
-                                <span className="skip-icon">⏩</span>
-                                <span className="btn-text">Skip {selectedReactor} Phase</span>
-                            </button>
-                        </div>
-
                         {/* Bottom Status / Clear Footer */}
                         <div className="demo-col-footer" style={{ marginTop: 'auto' }}>
                             <div className="demo-footer-status">
@@ -418,6 +392,63 @@ export default function DemoControls({
                         </div>
                     </div>
                 )}
+                </div>
+
+                {/* Modern Fast-Forward Skip Sequencer Card - Identical position in both tabs */}
+                <div className="modern-skip-card">
+                    <div className="skip-card-header">
+                        <div className="skip-card-title-group">
+                            <span className="skip-card-icon">⚡</span>
+                            <span className="skip-card-title">Fast-Forward Sequencer</span>
+                        </div>
+                        <span className="skip-card-badge">Instant Override</span>
+                    </div>
+
+                    <table className="modern-skip-table">
+                        <thead>
+                            <tr>
+                                {['R1', 'R2', 'R3'].map(r => (
+                                    <th key={`hdr-${r}`}>
+                                        <div className={`reactor-col-badge r-${r.toLowerCase()}`}>
+                                            <span className="reactor-badge-dot" />
+                                            <span className="reactor-badge-name">{r}</span>
+                                        </div>
+                                    </th>
+                                ))}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                {['R1', 'R2', 'R3'].map(r => (
+                                    <td key={`phase-${r}`}>
+                                        <button
+                                            type="button"
+                                            className="modern-skip-btn btn-skip-phase"
+                                            onClick={() => skipPhase(r)}
+                                            title={`Advance ${r} to next batch phase`}>
+                                            <span className="btn-icon">⏩</span>
+                                            <span className="btn-label">Skip Phase</span>
+                                        </button>
+                                    </td>
+                                ))}
+                            </tr>
+                            <tr>
+                                {['R1', 'R2', 'R3'].map(r => (
+                                    <td key={`proc-${r}`}>
+                                        <button
+                                            type="button"
+                                            className="modern-skip-btn btn-skip-process"
+                                            onClick={() => skipProcess(r)}
+                                            title={`Bypass entire ${r} reactor process & transfer out`}>
+                                            <span className="btn-icon">⏭️</span>
+                                            <span className="btn-label">Skip Process</span>
+                                        </button>
+                                    </td>
+                                ))}
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
     );

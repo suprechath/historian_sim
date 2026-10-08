@@ -39,7 +39,7 @@ export default function PlantOverview() {
                     </div>
                     <div className="mimic-side-col">
                         <p className="shead">
-                            <b>Simulator Controls</b> Batch mode, phase skip & faults
+                            <b>Simulator Controls</b>
                         </p>
                         <DemoControls
                             selectedReactor={selectedReactor}
@@ -47,6 +47,7 @@ export default function PlantOverview() {
                             mode={stream.mode}
                             assignedBatchId={stream.assignedBatchId}
                             singleBatchStatus={stream.singleBatchStatus}
+                            batchQueue={stream.batchQueue || []}
                             running={stream.running}
                             speed={stream.speed}
                             reactors={stream.reactors}

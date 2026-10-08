@@ -8,13 +8,14 @@ export class ControlService {
   async getControlState() {
     try {
       const { rows } = await query(
-        'SELECT running, speed, phase_skip_asset, mode, assigned_batch_id, batch_command, single_batch_status FROM simulation_control WHERE id = 1'
+        'SELECT running, speed, phase_skip_asset, process_skip_asset, mode, assigned_batch_id, batch_command, single_batch_status FROM simulation_control WHERE id = 1'
       );
       if (rows.length > 0) {
         return {
           running: rows[0].running ?? true,
           speed: Math.max(1, Math.min(3600, rows[0].speed || 1)),
           phaseSkipAsset: rows[0].phase_skip_asset || null,
+          processSkipAsset: rows[0].process_skip_asset || null,
           mode: rows[0].mode || 'continuous',
           assignedBatchId: rows[0].assigned_batch_id || null,
           batchCommand: rows[0].batch_command || null,
@@ -29,6 +30,7 @@ export class ControlService {
       running: true,
       speed: 1,
       phaseSkipAsset: null,
+      processSkipAsset: null,
       mode: 'continuous',
       assignedBatchId: null,
       batchCommand: null,
@@ -65,7 +67,18 @@ export class ControlService {
   }
 
   /**
-   * Acknowledge user batch command.
+   * Clear processed process_skip_asset trigger.
+   */
+  async clearProcessSkip() {
+    try {
+      await query('UPDATE simulation_control SET process_skip_asset = NULL WHERE id = 1');
+    } catch (err) {
+      logger.error(`Failed to clear process skip: ${err.message}`, 'ControlService');
+    }
+  }
+
+  /**
+   * Acknowledge user batch command when starting running.
    */
   async ackBatchCommand(batchId) {
     try {
@@ -75,6 +88,31 @@ export class ControlService {
       );
     } catch (err) {
       logger.error(`Failed to ack batch command: ${err.message}`, 'ControlService');
+    }
+  }
+
+  /**
+   * Clear batch command flag in simulation_control.
+   */
+  async clearBatchCommand() {
+    try {
+      await query('UPDATE simulation_control SET batch_command = NULL, updated_at = NOW() WHERE id = 1');
+    } catch (err) {
+      logger.error(`Failed to clear batch command: ${err.message}`, 'ControlService');
+    }
+  }
+
+  /**
+   * Acknowledge user batch command while batch remains in pending queue.
+   */
+  async ackBatchCommandPending(batchId, status) {
+    try {
+      await query(
+        "UPDATE simulation_control SET batch_command = NULL, assigned_batch_id = $1, single_batch_status = $2, updated_at = NOW() WHERE id = 1",
+        [batchId, status]
+      );
+    } catch (err) {
+      logger.error(`Failed to ack pending batch command: ${err.message}`, 'ControlService');
     }
   }
 

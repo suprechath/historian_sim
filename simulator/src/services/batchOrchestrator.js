@@ -126,44 +126,100 @@ export class BatchOrchestrator {
   /**
    * Handle user-initiated batch command.
    */
-  async handleUserBatchCommand(assignedBatchId, now, controlService) {
+  async handleUserBatchCommand(assignedBatchId, batchCommand, now, controlService) {
+    if (batchCommand === 'start_omit_existing') {
+      // Combination 3: Omit existing batch across the whole plant and start R1 with new batch immediately
+      await withTransaction(async (client) => {
+        for (const vessel of this.reactors) {
+          if (vessel.activePhaseEventId) {
+            await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, vessel.activePhaseEventId]);
+            vessel.activePhaseEventId = null;
+          }
+          if (vessel.activeUnitProcedureId) {
+            await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, vessel.activeUnitProcedureId]);
+            vessel.activeUnitProcedureId = null;
+          }
+          vessel.activeBatch = null;
+          vessel.transitionNextPhase('Idle');
+          vessel.phaseElapsedSec = 0;
+        }
+
+        if (this.trainBatch) {
+          await client.query(
+            "UPDATE batches SET ended_at = $1, status = 'Aborted', current_asset_id = NULL WHERE id = $2",
+            [now, this.trainBatch.id]
+          );
+          await client.query(
+            "UPDATE batch_queue SET status = 'aborted', updated_at = $1 WHERE batch_id = $2 AND status = 'running'",
+            [now, this.trainBatch.batch_id]
+          );
+          logger.info(`Aborted existing batch ${this.trainBatch.batch_id} to start assigned batch immediately`, 'BatchOrchestrator');
+          this.trainBatch = null;
+        }
+      });
+    }
+
+    // Acknowledge the batchCommand flag in simulation_control
+    await controlService.clearBatchCommand();
+
+    // Check batch_queue in FIFO order and start next eligible batch
+    await this._checkAndStartNextQueuedBatch(now, controlService);
+  }
+
+  /**
+   * Check batch_queue in Postgres and start the next eligible manual batch in R1.
+   */
+  async _checkAndStartNextQueuedBatch(now, controlService) {
+    if (this.r1.currentPhase !== 'Idle' || this.r1.activeBatch) {
+      return false;
+    }
+
+    try {
+      const { rows: pending } = await query(`
+        SELECT id, batch_id, command, status
+        FROM batch_queue
+        WHERE status IN ('waiting_r1', 'in_queue', 'pending_omit')
+        ORDER BY id ASC;
+      `);
+
+      if (pending.length === 0) {
+        return false;
+      }
+
+      const isTrainIdle = !this.trainBatch && this.r1.currentPhase === 'Idle' && this.r2.currentPhase === 'Idle' && this.r3.currentPhase === 'Idle';
+
+      let eligible = null;
+      for (const item of pending) {
+        if (item.command === 'start_omit_existing' || item.status === 'pending_omit') {
+          eligible = item;
+          break;
+        }
+        if (item.command === 'start_immediate' || item.status === 'waiting_r1') {
+          eligible = item;
+          break;
+        }
+        if (item.command === 'start_queue' || item.status === 'in_queue') {
+          if (isTrainIdle) {
+            eligible = item;
+            break;
+          }
+        }
+      }
+
+      if (!eligible) {
+        return false;
+      }
+
+      await this._startBatchInR1(eligible.batch_id, now, controlService);
+      return true;
+    } catch (err) {
+      logger.error(`Error checking batch queue: ${err.message}`, 'BatchOrchestrator');
+      return false;
+    }
+  }
+
+  async _startBatchInR1(batchIdStr, now, controlService) {
     await withTransaction(async (client) => {
-      // Displace all active events & batches across all vessels
-      for (const vessel of this.reactors) {
-        if (vessel.activePhaseEventId) {
-          await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, vessel.activePhaseEventId]);
-          vessel.activePhaseEventId = null;
-        }
-        if (vessel.activeUnitProcedureId) {
-          await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, vessel.activeUnitProcedureId]);
-          vessel.activeUnitProcedureId = null;
-        }
-        vessel.activeBatch = null;
-        vessel.transitionNextPhase('Idle');
-        vessel.phaseElapsedSec = 0;
-      }
-
-      if (this.trainBatch) {
-        await client.query(
-          "UPDATE batches SET ended_at = $1, status = 'Aborted', current_asset_id = NULL WHERE id = $2",
-          [now, this.trainBatch.id]
-        );
-        logger.info(
-          `Displaced active batch ${this.trainBatch.batch_id} for user command batch`,
-          'BatchOrchestrator'
-        );
-        this.trainBatch = null;
-      }
-
-      let batchIdStr = (assignedBatchId || '').trim();
-      if (!batchIdStr) {
-        const year = now.getUTCFullYear();
-        batchIdStr = `B-${year}-${String(this.batchSeq++).padStart(4, '0')}`;
-      } else if (/^\d+$/.test(batchIdStr)) {
-        const year = now.getUTCFullYear();
-        batchIdStr = `B-${year}-${batchIdStr.padStart(4, '0')}`;
-      }
-
       const { rows: existing } = await client.query('SELECT id FROM batches WHERE batch_id = $1', [batchIdStr]);
       if (existing.length > 0) {
         batchIdStr = `${batchIdStr}-${Date.now().toString().slice(-4)}`;
@@ -174,14 +230,15 @@ export class BatchOrchestrator {
          VALUES ($1, 'API-7734', 'v2.1', $2, $3, 'Running') RETURNING id`,
         [batchIdStr, this.r1.asset.id, now]
       );
-      this.trainBatch = { id: bRows[0].id, batch_id: batchIdStr, started_at: now };
-      this.r1.activeBatch = this.trainBatch;
+      const newBatch = { id: bRows[0].id, batch_id: batchIdStr, started_at: now };
+      this.trainBatch = newBatch;
+      this.r1.activeBatch = newBatch;
 
       // Open Unit Procedure event for R1
       const { rows: upRows } = await client.query(
         `INSERT INTO events (batch_pk, asset_id, name, level, started_at)
          VALUES ($1, $2, 'Unit procedure R1 — Synthesis', 'Unit Procedure', $3) RETURNING id`,
-        [this.trainBatch.id, this.r1.asset.id, now]
+        [newBatch.id, this.r1.asset.id, now]
       );
       this.r1.activeUnitProcedureId = upRows[0].id;
 
@@ -190,12 +247,18 @@ export class BatchOrchestrator {
       const { rows: phRows } = await client.query(
         `INSERT INTO events (batch_pk, asset_id, parent_id, name, level, occurrence, started_at)
          VALUES ($1, $2, $3, 'Charging', 'Phase', $4, $5) RETURNING id`,
-        [this.trainBatch.id, this.r1.asset.id, this.r1.activeUnitProcedureId, this.r1.phaseOccurrence || 1, now]
+        [newBatch.id, this.r1.asset.id, this.r1.activeUnitProcedureId, this.r1.phaseOccurrence || 1, now]
       );
       this.r1.activePhaseEventId = phRows[0].id;
 
+      // Update batch_queue status to 'running'
+      await client.query(
+        "UPDATE batch_queue SET status = 'running', updated_at = $1 WHERE batch_id = $2 AND status IN ('waiting_r1', 'in_queue', 'pending_omit')",
+        [now, batchIdStr]
+      );
+
       await controlService.ackBatchCommand(batchIdStr);
-      logger.info(`Started user-assigned batch ${batchIdStr} in R1 (Charging)`, 'BatchOrchestrator');
+      logger.info(`Started batch ${batchIdStr} in R1 (Charging)`, 'BatchOrchestrator');
     });
   }
 
@@ -203,36 +266,52 @@ export class BatchOrchestrator {
    * Advance batch lifecycle during continuous simulation.
    */
   async tick(simMode, simRunning, simSpeed, phaseSkipAsset, now, controlService) {
-    // 1. In continuous mode, start new batch if train is completely empty and R1 is Idle
-    if (simMode === 'continuous' && simRunning && !this.trainBatch && this.r1.currentPhase === 'Idle') {
-      const year = now.getUTCFullYear();
-      let bRows = [];
-      let batchIdStr = '';
-      while (bRows.length === 0) {
-        batchIdStr = `B-${year}-${String(this.batchSeq++).padStart(4, '0')}`;
-        const res = await query(
-          `INSERT INTO batches (batch_id, product_code, recipe_version, current_asset_id, started_at, status)
-           VALUES ($1, 'API-7734', 'v2.1', $2, $3, 'Running')
-           ON CONFLICT (batch_id) DO NOTHING RETURNING id`,
-          [batchIdStr, this.r1.asset.id, now]
-        );
-        bRows = res.rows;
-      }
-      this.trainBatch = { id: bRows[0].id, batch_id: batchIdStr, started_at: now };
-      this.r1.activeBatch = this.trainBatch;
+    // 0. If R1 is idle, check if any pending manual batch in queue is eligible to start
+    let queuedBatchStarted = false;
+    if (this.r1.currentPhase === 'Idle' && !this.r1.activeBatch) {
+      queuedBatchStarted = await this._checkAndStartNextQueuedBatch(now, controlService);
+    }
 
-      // Open Unit Procedure event for R1
-      const { rows: upRows } = await query(
-        `INSERT INTO events (batch_pk, asset_id, name, level, started_at)
-         VALUES ($1, $2, 'Unit procedure R1 — Synthesis', 'Unit Procedure', $3) RETURNING id`,
-        [this.trainBatch.id, this.r1.asset.id, now]
+    // 1. If train is completely empty and R1 is Idle:
+    // If no queued manual batch just started and no pending manual batches in queue, continue random batch!
+    if (simRunning && !this.trainBatch && this.r1.currentPhase === 'Idle' && !queuedBatchStarted) {
+      const { rows: pendingManual } = await query(
+        "SELECT id FROM batch_queue WHERE status IN ('waiting_r1', 'in_queue', 'pending_omit') LIMIT 1"
       );
-      this.r1.activeUnitProcedureId = upRows[0].id;
+      if (pendingManual.length === 0) {
+        if (simMode === 'single') {
+          await query("UPDATE simulation_control SET mode = 'continuous', single_batch_status = 'idle', assigned_batch_id = NULL, updated_at = NOW() WHERE id = 1");
+        }
 
-      // Transition R1 into Charging
-      this.r1.transitionNextPhase('Charging');
-      await this.openPhaseEvent(this.r1, 'Charging', this.trainBatch.id, this.r1.activeUnitProcedureId, now);
-      logger.info(`Started Batch ${batchIdStr} in R1 (Charging)`, 'BatchOrchestrator');
+        const year = now.getUTCFullYear();
+        let bRows = [];
+        let batchIdStr = '';
+        while (bRows.length === 0) {
+          batchIdStr = `B-${year}-${String(this.batchSeq++).padStart(4, '0')}`;
+          const res = await query(
+            `INSERT INTO batches (batch_id, product_code, recipe_version, current_asset_id, started_at, status)
+             VALUES ($1, 'API-7734', 'v2.1', $2, $3, 'Running')
+             ON CONFLICT (batch_id) DO NOTHING RETURNING id`,
+            [batchIdStr, this.r1.asset.id, now]
+          );
+          bRows = res.rows;
+        }
+        this.trainBatch = { id: bRows[0].id, batch_id: batchIdStr, started_at: now };
+        this.r1.activeBatch = this.trainBatch;
+
+        // Open Unit Procedure event for R1
+        const { rows: upRows } = await query(
+          `INSERT INTO events (batch_pk, asset_id, name, level, started_at)
+           VALUES ($1, $2, 'Unit procedure R1 — Synthesis', 'Unit Procedure', $3) RETURNING id`,
+          [this.trainBatch.id, this.r1.asset.id, now]
+        );
+        this.r1.activeUnitProcedureId = upRows[0].id;
+
+        // Transition R1 into Charging
+        this.r1.transitionNextPhase('Charging');
+        await this.openPhaseEvent(this.r1, 'Charging', this.trainBatch.id, this.r1.activeUnitProcedureId, now);
+        logger.info(`Started continuous random batch ${batchIdStr} in R1 (Charging)`, 'BatchOrchestrator');
+      }
     }
 
     // 2. Advance simulation ticks for R1, R2, R3
@@ -296,6 +375,7 @@ export class BatchOrchestrator {
           break;
         case 'Clean':
           sim.transitionNextPhase('Idle');
+          await this._checkAndStartNextQueuedBatch(now, controlService);
           break;
       }
     } else if (sim.code === 'R2') {
@@ -387,11 +467,19 @@ export class BatchOrchestrator {
               "UPDATE batches SET ended_at = $1, status = 'Completed', current_asset_id = NULL WHERE id = $2",
               [now, this.trainBatch.id]
             );
+            await query(
+              "UPDATE batch_queue SET status = 'completed', updated_at = $1 WHERE batch_id = $2 AND status = 'running'",
+              [now, finishedId]
+            );
             logger.info(`Batch ${finishedId} Completed successfully!`, 'BatchOrchestrator');
             this.trainBatch = null;
 
-            if (simMode === 'single') {
-              await controlService.updateSingleBatchStatus('completed');
+            const started = await this._checkAndStartNextQueuedBatch(now, controlService);
+            if (!started) {
+              const { rows: rem } = await query("SELECT id FROM batch_queue WHERE status IN ('waiting_r1', 'in_queue', 'pending_omit') LIMIT 1");
+              if (rem.length === 0) {
+                await query("UPDATE simulation_control SET mode = 'continuous', single_batch_status = 'idle', assigned_batch_id = NULL, updated_at = NOW() WHERE id = 1");
+              }
             }
           }
           sim.activeBatch = null;
@@ -407,5 +495,144 @@ export class BatchOrchestrator {
 
   getActiveTrainBatch() {
     return this.trainBatch;
+  }
+
+  async skipReactorProcess(assetCode, now, simMode, controlService) {
+    if (assetCode === 'R1') {
+      const sim = this.r1;
+      if (sim.currentPhase === 'Idle') return;
+
+      if (sim.activePhaseEventId) {
+        await this.closeEvent(sim.activePhaseEventId, now);
+        sim.activePhaseEventId = null;
+      }
+
+      if (sim.currentPhase === 'Clean') {
+        sim.transitionNextPhase('Idle');
+        await this._checkAndStartNextQueuedBatch(now, controlService);
+        return;
+      }
+
+      if (sim.activeUnitProcedureId) {
+        await this.closeEvent(sim.activeUnitProcedureId, now);
+        sim.activeUnitProcedureId = null;
+      }
+
+      if (this.trainBatch) {
+        this.r2.activeBatch = this.trainBatch;
+        await query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [this.r2.asset.id, this.trainBatch.id]);
+
+        if (!this.r2.activeUnitProcedureId) {
+          const { rows: up2Rows } = await query(
+            `INSERT INTO events (batch_pk, asset_id, name, level, started_at)
+             VALUES ($1, $2, 'Unit procedure R2 — Workup', 'Unit Procedure', $3) RETURNING id`,
+            [this.trainBatch.id, this.r2.asset.id, now]
+          );
+          this.r2.activeUnitProcedureId = up2Rows[0].id;
+        }
+
+        if (this.r2.activePhaseEventId) {
+          await this.closeEvent(this.r2.activePhaseEventId, now);
+          this.r2.activePhaseEventId = null;
+        }
+
+        this.r2.transitionNextPhase('pH adjust');
+        await this.openPhaseEvent(this.r2, 'pH adjust', this.trainBatch.id, this.r2.activeUnitProcedureId, now);
+        logger.info(`Batch ${this.trainBatch.batch_id} skipped R1 process -> transferred to R2 (pH adjust)`, 'BatchOrchestrator');
+      }
+
+      sim.activeBatch = null;
+      sim.transitionNextPhase('Idle');
+      await this._checkAndStartNextQueuedBatch(now, controlService);
+
+    } else if (assetCode === 'R2') {
+      const sim = this.r2;
+      if (sim.currentPhase === 'Idle') return;
+
+      if (sim.activePhaseEventId) {
+        await this.closeEvent(sim.activePhaseEventId, now);
+        sim.activePhaseEventId = null;
+      }
+
+      if (sim.currentPhase === 'Clean') {
+        sim.transitionNextPhase('Idle');
+        return;
+      }
+
+      if (sim.activeUnitProcedureId) {
+        await this.closeEvent(sim.activeUnitProcedureId, now);
+        sim.activeUnitProcedureId = null;
+      }
+
+      if (this.trainBatch) {
+        this.r3.activeBatch = this.trainBatch;
+        await query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [this.r3.asset.id, this.trainBatch.id]);
+
+        if (!this.r3.activeUnitProcedureId) {
+          const { rows: up3Rows } = await query(
+            `INSERT INTO events (batch_pk, asset_id, name, level, started_at)
+             VALUES ($1, $2, 'Unit procedure R3 — Crystallisation', 'Unit Procedure', $3) RETURNING id`,
+            [this.trainBatch.id, this.r3.asset.id, now]
+          );
+          this.r3.activeUnitProcedureId = up3Rows[0].id;
+        }
+
+        if (this.r3.activePhaseEventId) {
+          await this.closeEvent(this.r3.activePhaseEventId, now);
+          this.r3.activePhaseEventId = null;
+        }
+
+        this.r3.transitionNextPhase('Heat to dissolve');
+        await this.openPhaseEvent(this.r3, 'Heat to dissolve', this.trainBatch.id, this.r3.activeUnitProcedureId, now);
+        logger.info(`Batch ${this.trainBatch.batch_id} skipped R2 process -> transferred to R3 (Heat to dissolve)`, 'BatchOrchestrator');
+      }
+
+      sim.activeBatch = null;
+      sim.transitionNextPhase('Idle');
+
+    } else if (assetCode === 'R3') {
+      const sim = this.r3;
+      if (sim.currentPhase === 'Idle') return;
+
+      if (sim.activePhaseEventId) {
+        await this.closeEvent(sim.activePhaseEventId, now);
+        sim.activePhaseEventId = null;
+      }
+
+      if (sim.currentPhase === 'Clean') {
+        sim.transitionNextPhase('Idle');
+        return;
+      }
+
+      if (sim.activeUnitProcedureId) {
+        await this.closeEvent(sim.activeUnitProcedureId, now);
+        sim.activeUnitProcedureId = null;
+      }
+
+      if (this.trainBatch) {
+        const finishedId = this.trainBatch.batch_id;
+        await query(
+          "UPDATE batches SET ended_at = $1, status = 'Completed', current_asset_id = NULL WHERE id = $2",
+          [now, this.trainBatch.id]
+        );
+        await query(
+          "UPDATE batch_queue SET status = 'completed', updated_at = $1 WHERE batch_id = $2 AND status = 'running'",
+          [now, finishedId]
+        );
+        logger.info(`Batch ${finishedId} Completed via R3 process skip!`, 'BatchOrchestrator');
+        this.trainBatch = null;
+
+        const started = await this._checkAndStartNextQueuedBatch(now, controlService);
+        if (!started) {
+          const { rows: rem } = await query("SELECT id FROM batch_queue WHERE status IN ('waiting_r1', 'in_queue', 'pending_omit') LIMIT 1");
+          if (rem.length === 0) {
+            await query("UPDATE simulation_control SET mode = 'continuous', single_batch_status = 'idle', assigned_batch_id = NULL, updated_at = NOW() WHERE id = 1");
+          }
+        }
+      }
+
+      sim.activeBatch = null;
+      sim.transitionNextPhase('Idle');
+    }
   }
 }

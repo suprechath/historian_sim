@@ -61,7 +61,9 @@ const TIME_RANGES = [
     { label: '1h', hours: 1, tickIntervalMin: 10 },
     { label: '3h', hours: 3, tickIntervalMin: 30 },
     { label: '6h', hours: 6, tickIntervalMin: 60 },
-    { label: '12h', hours: 12, tickIntervalMin: 120 }
+    { label: '12h', hours: 12, tickIntervalMin: 120 },
+    { label: '24h', hours: 24, tickIntervalMin: 240 },
+    { label: '3d', hours: 72, tickIntervalMin: 720 }
 ];
 
 function formatTime(d) {
@@ -95,6 +97,7 @@ function formatDuration(ms) {
 function toDatetimeLocalString(date) {
     if (!date) return '';
     const d = new Date(date);
+    if (isNaN(d.getTime())) return '';
     const pad = (n) => String(n).padStart(2, '0');
     const y = d.getFullYear();
     const m = pad(d.getMonth() + 1);
@@ -102,13 +105,34 @@ function toDatetimeLocalString(date) {
     const h = pad(d.getHours());
     const min = pad(d.getMinutes());
     const s = pad(d.getSeconds());
-    return `${y}-${m}-${day}T${h}:${min}:${s}`;
+    return `${y}-${m}-${day} ${h}:${min}:${s}`;
 }
 
 function parseDatetimeLocal(str) {
     if (!str) return null;
-    const d = new Date(str);
-    return isNaN(d.getTime()) ? null : d;
+    if (str instanceof Date) return isNaN(str.getTime()) ? null : str;
+    const s = String(str).trim();
+    if (!s) return null;
+
+    const timeOnlyMatch = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (timeOnlyMatch) {
+        const now = new Date();
+        const d = new Date(
+            now.getFullYear(),
+            now.getMonth(),
+            now.getDate(),
+            parseInt(timeOnlyMatch[1], 10),
+            parseInt(timeOnlyMatch[2], 10),
+            parseInt(timeOnlyMatch[3] || '0', 10)
+        );
+        return isNaN(d.getTime()) ? null : d;
+    }
+
+    const normalized = s.replace(' ', 'T');
+    const d = new Date(normalized);
+    if (!isNaN(d.getTime())) return d;
+    const dRaw = new Date(s);
+    return isNaN(dRaw.getTime()) ? null : dRaw;
 }
 
 function getTickInterval(spanMs) {
@@ -149,11 +173,31 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
     const [timeRange, setTimeRange] = useState(3); // Default 3 hours
     const [customRange, setCustomRange] = useState(null); // null or { from: Date, to: Date }
     const [isCustomRangeOpen, setIsCustomRangeOpen] = useState(false);
+    const [rangeError, setRangeError] = useState(null);
     const [dragSelection, setDragSelection] = useState(null); // { startX, currentX, startTime, currentTime }
     const [time1Input, setTime1Input] = useState('');
     const [time2Input, setTime2Input] = useState('');
     const [hiddenTags, setHiddenTags] = useState(new Set());
     const [hover, setHover] = useState(null); // { mouseX, mouseY, time, nearestPoints, activePhase }
+    const [isCollapsed, setIsCollapsed] = useState(() => {
+        try {
+            return localStorage.getItem('historian_trend_collapsed') === 'true';
+        } catch {
+            return false;
+        }
+    });
+
+    const toggleCollapse = () => {
+        setIsCollapsed(prev => {
+            const next = !prev;
+            try {
+                localStorage.setItem('historian_trend_collapsed', String(next));
+            } catch {
+                // Ignore storage errors
+            }
+            return next;
+        });
+    };
 
     // Reset hidden tags whenever user switches reactor
     useEffect(() => {
@@ -193,8 +237,19 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
         return () => ro.disconnect();
     }, []);
 
+    // Re-check width immediately upon expanding
+    useEffect(() => {
+        if (!isCollapsed && containerRef.current) {
+            const w = containerRef.current.clientWidth;
+            if (w > 0) {
+                setCanvasWidth(Math.floor(w));
+            }
+        }
+    }, [isCollapsed]);
+
     // Fetch time-series readings and phase events
     useEffect(() => {
+        if (isCollapsed) return;
         let isSubscribed = true;
 
         const fetchData = () => {
@@ -214,7 +269,7 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
 
             Promise.all([
                 fetch(`/ui/readings?tags=${tagList}&from=${fromDate.toISOString()}&to=${toDate.toISOString()}&resolution=${resParam}`).then(r => r.json()),
-                fetch(`/ui/events?asset=${selectedReactor}&level=Phase&from=${fromDate.toISOString()}&to=${toDate.toISOString()}&limit=150`).then(r => r.json())
+                fetch(`/ui/events?asset=${selectedReactor}&level=Phase&from=${fromDate.toISOString()}&to=${toDate.toISOString()}&limit=600`).then(r => r.json())
             ]).then(([readingsRes, eventsRes]) => {
                 if (!isSubscribed) return;
                 setReadings(readingsRes.data || []);
@@ -229,7 +284,7 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
             isSubscribed = false;
             clearInterval(timer);
         };
-    }, [selectedReactor, timeRange, customRange, clock, activeParams]);
+    }, [isCollapsed, selectedReactor, timeRange, customRange, customRange ? null : clock, activeParams]);
 
     // Compute latest readings map for live legend display
     const latestValues = useMemo(() => {
@@ -266,17 +321,22 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
         return { t0, t1, span, L, Rp, x0, cw, y0, ch };
     }, [clock, timeRange, customRange, canvasWidth, canvasHeight]);
 
-    // Sync input values when customRange or bounds change
+    // Initialize input values once on initial mount
+    useEffect(() => {
+        const now = clock ? new Date(clock).getTime() : Date.now();
+        const start = now - timeRange * 3600 * 1000;
+        setTime1Input(toDatetimeLocalString(new Date(start)));
+        setTime2Input(toDatetimeLocalString(new Date(now)));
+    }, []);
+
+    // Sync input values ONLY when customRange changes (e.g. drag selection, pan, zoom, or presets)
+    // NEVER overwrite while user is editing in live mode!
     useEffect(() => {
         if (customRange) {
             setTime1Input(toDatetimeLocalString(customRange.from));
             setTime2Input(toDatetimeLocalString(customRange.to));
-        } else {
-            const { t0, t1 } = bounds;
-            setTime1Input(toDatetimeLocalString(new Date(t0)));
-            setTime2Input(toDatetimeLocalString(new Date(t1)));
         }
-    }, [customRange, bounds]);
+    }, [customRange]);
 
     // Unit analysis for Overlay mode (determines if Y-axis can be displayed)
     const overlayUnitInfo = useMemo(() => {
@@ -427,24 +487,50 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
         });
     };
 
+    const toggleCustomRangePanel = () => {
+        setIsCustomRangeOpen(prev => {
+            const next = !prev;
+            if (next && !customRange) {
+                // Initialize input fields with current visible chart bounds at the moment user opens panel
+                const { t0, t1 } = bounds;
+                setTime1Input(toDatetimeLocalString(new Date(t0)));
+                setTime2Input(toDatetimeLocalString(new Date(t1)));
+            }
+            if (!next) {
+                setRangeError(null);
+            }
+            return next;
+        });
+    };
+
     const handleResetToLive = () => {
         setCustomRange(null);
         setIsCustomRangeOpen(false);
+        setRangeError(null);
     };
 
     const handleApplyCustomRange = (e) => {
         e?.preventDefault();
+        setRangeError(null);
         const d1 = parseDatetimeLocal(time1Input);
         const d2 = parseDatetimeLocal(time2Input);
         if (!d1 || !d2) {
-            alert('Please select both Start Time (Time 1) and End Time (Time 2).');
+            setRangeError('Please select both Start Time (Time 1) and End Time (Time 2).');
             return;
         }
         if (d1.getTime() >= d2.getTime()) {
-            alert('Start Time (Time 1) must be strictly before End Time (Time 2).');
+            setRangeError('Start Time (Time 1) must be strictly before End Time (Time 2).');
             return;
         }
+        setRangeError(null);
         setCustomRange({ from: d1, to: d2 });
+    };
+
+    const handleSetTime1Offset = (hours) => {
+        const refEnd = parseDatetimeLocal(time2Input) || (clock ? new Date(clock) : new Date());
+        const newStart = new Date(refEnd.getTime() - hours * 3600 * 1000);
+        setTime1Input(toDatetimeLocalString(newStart));
+        setRangeError(null);
     };
 
     const setQuickPreset = (hours) => {
@@ -452,6 +538,7 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
         const start = new Date(end.getTime() - hours * 3600 * 1000);
         setTime1Input(toDatetimeLocalString(start));
         setTime2Input(toDatetimeLocalString(end));
+        setRangeError(null);
         setCustomRange({ from: start, to: end });
     };
 
@@ -469,6 +556,7 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
         const end = ev.ended_at ? new Date(ev.ended_at) : (clock ? new Date(clock) : new Date());
         setTime1Input(toDatetimeLocalString(start));
         setTime2Input(toDatetimeLocalString(end));
+        setRangeError(null);
         setCustomRange({ from: start, to: end });
     };
 
@@ -565,6 +653,7 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
 
     // Main Canvas Paint Loop
     useEffect(() => {
+        if (isCollapsed) return;
         const canvas = canvasRef.current;
         if (!canvas) return;
 
@@ -1011,310 +1100,368 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
             });
         }
 
-    }, [readings, events, clock, selectedReactor, canvasWidth, canvasHeight, timeRange, customRange, dragSelection, hiddenTags, bounds, hover, activeParams, viewMode, laneLayout, overlayUnitInfo, TAG_CONFIG]);
+    }, [isCollapsed, readings, events, clock, selectedReactor, canvasWidth, canvasHeight, timeRange, customRange, dragSelection, hiddenTags, bounds, hover, activeParams, viewMode, laneLayout, overlayUnitInfo, TAG_CONFIG]);
 
     return (
-        <div className="panel trend" ref={containerRef}>
-            {/* Header: Title, View Mode Picker, Time Range Selector, Reactor Picker */}
+        <div className={`panel trend ${isCollapsed ? 'collapsed' : ''}`} ref={containerRef}>
+            {/* Header: Title, View Mode Picker, Time Range Selector, Reactor Picker, Collapse Button */}
             <div className="thead">
-                <div className="trend-title-group">
-                    <h3>{selectedReactor} Trend Analysis</h3>
-                    <span className="trend-subtitle">Time-series telemetry & ISA-88 phase overlays</span>
-                </div>
-
-                {/* View Mode Toggle: Stacked (Grafana multi-level) vs Overlay */}
-                <div className="view-mode-toggle" role="group" aria-label="Chart layout">
-                    <button
-                        type="button"
-                        className={viewMode === 'stacked' ? 'active' : ''}
-                        onClick={() => setViewMode('stacked')}
-                        title="Stacked Multi-Level Lanes (Grafana style)">
-                        <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" style={{ marginRight: 4 }}>
-                            <rect x="1" y="2" width="14" height="3" rx="1" />
-                            <rect x="1" y="7" width="14" height="3" rx="1" />
-                            <rect x="1" y="12" width="14" height="3" rx="1" />
-                        </svg>
-                        Stacked
-                    </button>
-                    <button
-                        type="button"
-                        className={viewMode === 'overlay' ? 'active' : ''}
-                        onClick={() => setViewMode('overlay')}
-                        title="Unified Single-Canvas Overlay">
-                        <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" style={{ marginRight: 4 }}>
-                            <rect x="1" y="2" width="14" height="12" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-                            <path d="M3 11 L7 6 L10 9 L13 4" fill="none" stroke="currentColor" strokeWidth="1.8" />
-                        </svg>
-                        Overlay
-                    </button>
-                </div>
-
-                {/* Time Range Selector: 5m, 15m, 30m, 1h, 3h, 6h, 12h | Custom */}
-                <div className="range-picker" role="group" aria-label="Time range selection">
-                    {TIME_RANGES.map(r => (
-                        <button
-                            key={r.label}
-                            type="button"
-                            className={!customRange && Math.abs(timeRange - r.hours) < 0.001 ? 'active' : ''}
-                            onClick={() => {
-                                setCustomRange(null);
-                                setTimeRange(r.hours);
-                            }}
-                            title={`View last ${r.label}`}>
-                            {r.label}
-                        </button>
-                    ))}
-                    <button
-                        type="button"
-                        className={customRange || isCustomRangeOpen ? 'active custom-btn' : 'custom-btn'}
-                        onClick={() => setIsCustomRangeOpen(prev => !prev)}
-                        title="Select specific custom time range (Time 1 to Time 2)">
-                        <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style={{ marginRight: 3 }}>
-                            <path d="M8 0a8 8 0 100 16A8 8 0 008 0zm0 14.5A6.5 6.5 0 118 1.5a6.5 6.5 0 010 13z" />
-                            <path d="M8 3.5a.75.75 0 00-.75.75v4c0 .2.08.39.22.53l2.5 2.5a.75.75 0 101.06-1.06L8.75 7.94V4.25A.75.75 0 008 3.5z" />
-                        </svg>
-                        Custom
-                    </button>
-                </div>
-
-                {/* Reactor Switcher */}
-                <div className="tsel" role="group" aria-label="Reactor selection">
-                    {['R1', 'R2', 'R3'].map(r => (
-                        <button
-                            key={r}
-                            type="button"
-                            aria-pressed={selectedReactor === r}
-                            onClick={() => onSelectReactor(r)}>
-                            {r}
-                        </button>
-                    ))}
-                </div>
-            </div>
-
-            {/* Custom Range Indicator Bar (when custom range is active) */}
-            {customRange && (
-                <div className="custom-range-bar">
-                    <div className="cr-info">
-                        <span className="cr-icon">⏱</span>
-                        <span className="cr-label">Selected Range:</span>
-                        <span className="cr-tag time1"><b>Time 1:</b> {formatFullDateTime(customRange.from)}</span>
-                        <span className="cr-arrow">→</span>
-                        <span className="cr-tag time2"><b>Time 2:</b> {formatFullDateTime(customRange.to)}</span>
-                        <span className="cr-duration">({formatDuration(customRange.to - customRange.from)})</span>
-                    </div>
-                    <div className="cr-actions">
-                        <button type="button" onClick={handlePanLeft} title="Pan earlier by 50%">◀ Pan</button>
-                        <button type="button" onClick={handlePanRight} title="Pan later by 50%">Pan ▶</button>
-                        <button type="button" onClick={handleZoomIn} title="Zoom in 2x">Zoom +</button>
-                        <button type="button" onClick={handleZoomOut} title="Zoom out 2x">Zoom &minus;</button>
-                        <button
-                            type="button"
-                            className="cr-edit-btn"
-                            onClick={() => setIsCustomRangeOpen(prev => !prev)}
-                            title="Edit Time 1 and Time 2 values">
-                            {isCustomRangeOpen ? 'Hide Inputs' : 'Edit Range'}
-                        </button>
-                        <button
-                            type="button"
-                            className="cr-reset-btn"
-                            onClick={handleResetToLive}
-                            title="Exit custom range and return to Live simulator stream">
-                            ✕ Return to Live
-                        </button>
-                    </div>
-                </div>
-            )}
-
-            {/* Custom Range Input Panel */}
-            {isCustomRangeOpen && (
-                <div className="custom-range-panel">
-                    <form onSubmit={handleApplyCustomRange} className="cr-form">
-                        <div className="cr-inputs-grid">
-                            <div className="cr-input-group">
-                                <label htmlFor="cr-time1">
-                                    <span className="cr-badge time1-badge">Time 1</span>
-                                    <b>Start Time (From)</b>
-                                </label>
-                                <input
-                                    id="cr-time1"
-                                    type="datetime-local"
-                                    step="1"
-                                    value={time1Input}
-                                    onChange={(e) => setTime1Input(e.target.value)}
-                                    required
-                                />
-                            </div>
-                            <div className="cr-input-group">
-                                <label htmlFor="cr-time2">
-                                    <span className="cr-badge time2-badge">Time 2</span>
-                                    <b>End Time (To)</b>
-                                </label>
-                                <div className="cr-input-with-action">
-                                    <input
-                                        id="cr-time2"
-                                        type="datetime-local"
-                                        step="1"
-                                        value={time2Input}
-                                        onChange={(e) => setTime2Input(e.target.value)}
-                                        required
-                                    />
-                                    <button
-                                        type="button"
-                                        className="cr-now-btn"
-                                        onClick={() => {
-                                            const nowTime = clock ? new Date(clock) : new Date();
-                                            setTime2Input(toDatetimeLocalString(nowTime));
-                                        }}
-                                        title="Set Time 2 to current simulator clock">
-                                        Set to Now
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Quick Presets & Batch Jump */}
-                        <div className="cr-presets-row">
-                            <span className="cr-preset-label">Quick Presets:</span>
-                            <button type="button" onClick={() => setQuickPreset(15 / 60)}>Last 15m</button>
-                            <button type="button" onClick={() => setQuickPreset(30 / 60)}>Last 30m</button>
-                            <button type="button" onClick={() => setQuickPreset(1)}>Last 1h</button>
-                            <button type="button" onClick={() => setQuickPreset(3)}>Last 3h</button>
-                            <button type="button" onClick={() => setQuickPreset(6)}>Last 6h</button>
-
-                            {phaseOptions.length > 0 && (
-                                <div className="cr-phase-select-wrap">
-                                    <select
-                                        onChange={handlePhaseSelect}
-                                        defaultValue=""
-                                        title="Jump to a specific batch phase">
-                                        <option value="" disabled>Select Recent Batch Phase…</option>
-                                        {phaseOptions.map(p => (
-                                            <option key={p.id} value={p.id}>
-                                                {p.batch_id ? `[${p.batch_id}] ` : ''}{p.name} ({formatTime(p.started_at)} {p.ended_at ? '→ ' + formatTime(p.ended_at) : 'Active'})
-                                            </option>
-                                        ))}
-                                    </select>
-                                </div>
-                            )}
-                        </div>
-
-                        <div className="cr-form-footer">
-                            <span className="cr-tip">
-                                💡 <b>Pro Tip:</b> You can also click and drag horizontally on the chart to select "Time 1" to "Time 2" directly. Double-click the chart to return to Live view.
-                            </span>
-                            <div className="cr-btn-actions">
-                                <button type="button" className="cr-cancel-btn" onClick={() => setIsCustomRangeOpen(false)}>
-                                    Close
-                                </button>
-                                {customRange && (
-                                    <button type="button" className="cr-reset-live-btn" onClick={handleResetToLive}>
-                                        Reset to Live
-                                    </button>
-                                )}
-                                <button type="submit" className="cr-apply-btn">
-                                    ✓ Apply Time Range
-                                </button>
-                            </div>
-                        </div>
-                    </form>
-                </div>
-            )}
-
-            {/* Canvas Container with Interactive Tooltip & Drag Selection */}
-            <div
-                className="trend-canvas-wrap"
-                onMouseDown={handleMouseDown}
-                onMouseMove={handleMouseMove}
-                onMouseLeave={handleMouseLeave}
-                onDoubleClick={handleDoubleClick}
-                title="Click and drag horizontally on the chart to select Time 1 → Time 2. Double-click to reset to Live.">
-                <canvas ref={canvasRef} />
-
-                {/* Floating Inspection Tooltip */}
-                {hover && (
-                    <div
-                        className="trend-tooltip"
-                        style={{
-                            left: Math.min(canvasWidth - 210, Math.max(12, hover.mouseX + 16)),
-                            top: Math.min(canvasHeight - 190, Math.max(10, hover.mouseY - 40))
-                        }}>
-                        <div className="tt-header">
-                            <span className="tt-time">{formatTime(hover.time)}</span>
-                            {hover.activePhase && (
-                                <span
-                                    className="tt-phase"
-                                    style={{
-                                        background: getComputedStyle(document.documentElement).getPropertyValue(`--${getPhaseSlug(hover.activePhase.name)}`).trim() || '#6c757d'
-                                    }}>
-                                    {hover.activePhase.name}
-                                </span>
-                            )}
-                        </div>
-
-                        {hover.activePhase?.batch_id && (
-                            <div className="tt-batch">Batch: <b>{hover.activePhase.batch_id}</b></div>
+                <div
+                    className="trend-title-group trend-title-clickable"
+                    onClick={toggleCollapse}
+                    title={isCollapsed ? "Click to expand Trend Analysis" : "Click to collapse Trend Analysis"}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <h3>{selectedReactor} Trend Analysis</h3>
+                        {isCollapsed && (
+                            <span className="trend-collapsed-pill">Collapsed</span>
                         )}
-
-                        <div className="tt-readings">
-                            {activeParams.map(param => {
-                                if (hiddenTags.has(param)) return null;
-                                const conf = TAG_CONFIG[param];
-                                const pt = hover.nearestPoints[param];
-                                const valStr = pt?.value !== null && pt?.value !== undefined
-                                    ? Number(pt.value).toFixed(conf.digits)
-                                    : '—';
-
-                                return (
-                                    <div key={param} className="tt-row">
-                                        <span className="tt-tag-name">
-                                            <i style={{ background: conf.col }} />
-                                            {conf.d}:
-                                        </span>
-                                        <span className="tt-tag-val">
-                                            <b>{valStr}</b> {conf.u}
-                                        </span>
-                                    </div>
-                                );
-                            })}
-                        </div>
                     </div>
-                )}
+                    <span className="trend-subtitle">
+                        {isCollapsed ? 'Click Expand or header to view telemetry' : 'Time-series telemetry & ISA-88 phase overlays'}
+                    </span>
+                </div>
+
+                <div className="thead-right-actions">
+                    {!isCollapsed && (
+                        <>
+                            {/* View Mode Toggle: Stacked (Grafana multi-level) vs Overlay */}
+                            <div className="view-mode-toggle" role="group" aria-label="Chart layout">
+                                <button
+                                    type="button"
+                                    className={viewMode === 'stacked' ? 'active' : ''}
+                                    onClick={() => setViewMode('stacked')}
+                                    title="Stacked Multi-Level Lanes (Grafana style)">
+                                    <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" style={{ marginRight: 4 }}>
+                                        <rect x="1" y="2" width="14" height="3" rx="1" />
+                                        <rect x="1" y="7" width="14" height="3" rx="1" />
+                                        <rect x="1" y="12" width="14" height="3" rx="1" />
+                                    </svg>
+                                    Stacked
+                                </button>
+                                <button
+                                    type="button"
+                                    className={viewMode === 'overlay' ? 'active' : ''}
+                                    onClick={() => setViewMode('overlay')}
+                                    title="Unified Single-Canvas Overlay">
+                                    <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" style={{ marginRight: 4 }}>
+                                        <rect x="1" y="2" width="14" height="12" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+                                        <path d="M3 11 L7 6 L10 9 L13 4" fill="none" stroke="currentColor" strokeWidth="1.8" />
+                                    </svg>
+                                    Overlay
+                                </button>
+                            </div>
+
+                            {/* Time Range Selector: 5m, 15m, 30m, 1h, 3h, 6h, 12h | Custom */}
+                            <div className="range-picker" role="group" aria-label="Time range selection">
+                                {TIME_RANGES.map(r => (
+                                    <button
+                                        key={r.label}
+                                        type="button"
+                                        className={!customRange && Math.abs(timeRange - r.hours) < 0.001 ? 'active' : ''}
+                                        onClick={() => {
+                                            setCustomRange(null);
+                                            setTimeRange(r.hours);
+                                        }}
+                                        title={`View last ${r.label}`}>
+                                        {r.label}
+                                    </button>
+                                ))}
+                                <button
+                                    type="button"
+                                    className={customRange || isCustomRangeOpen ? 'active custom-btn' : 'custom-btn'}
+                                    onClick={toggleCustomRangePanel}
+                                    title="Select specific custom time range (Time 1 to Time 2)">
+                                    <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style={{ marginRight: 3 }}>
+                                        <path d="M8 0a8 8 0 100 16A8 8 0 008 0zm0 14.5A6.5 6.5 0 118 1.5a6.5 6.5 0 010 13z" />
+                                        <path d="M8 3.5a.75.75 0 00-.75.75v4c0 .2.08.39.22.53l2.5 2.5a.75.75 0 101.06-1.06L8.75 7.94V4.25A.75.75 0 008 3.5z" />
+                                    </svg>
+                                    Custom
+                                </button>
+                            </div>
+                        </>
+                    )}
+
+                    {/* Reactor Switcher */}
+                    <div className="tsel" role="group" aria-label="Reactor selection">
+                        {['R1', 'R2', 'R3'].map(r => (
+                            <button
+                                key={r}
+                                type="button"
+                                aria-pressed={selectedReactor === r}
+                                onClick={() => onSelectReactor(r)}>
+                                {r}
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* Collapse / Expand Toggle Button */}
+                    <button
+                        type="button"
+                        className={`trend-collapse-btn ${isCollapsed ? 'collapsed' : ''}`}
+                        onClick={toggleCollapse}
+                        title={isCollapsed ? "Expand Trend Canvas" : "Collapse Trend Canvas"}
+                        aria-expanded={!isCollapsed}>
+                        <svg
+                            width="12"
+                            height="12"
+                            viewBox="0 0 16 16"
+                            fill="currentColor"
+                            style={{
+                                transition: 'transform 0.2s ease',
+                                transform: isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)'
+                            }}>
+                            <path d="M7.247 11.14 2.451 5.658C1.885 5.013 2.345 4 3.204 4h9.592a1 1 0 0 1 .753 1.659l-4.796 5.48a1 1 0 0 1-1.506 0z" />
+                        </svg>
+                        <span>{isCollapsed ? 'Expand' : 'Collapse'}</span>
+                    </button>
+                </div>
             </div>
 
-            {/* Scale Note */}
-            <div className="axnote">
-                <span className="axnote-hint">
-                    {viewMode === 'overlay' && !overlayUnitInfo.hasSameUnits
-                        ? 'Overlay mode: Normalized relative scale (Y-axes hidden for mixed units) · Hover to inspect values'
-                        : viewMode === 'overlay' && overlayUnitInfo.hasSameUnits
-                            ? `Overlay mode: Left vertical axis in ${overlayUnitInfo.unit} · Hover to inspect values`
-                            : 'Stacked mode: Left vertical axis per active chart · Deselected tags cut off chart & auto-scale layout'}
-                </span>
-            </div>
+            {/* Collapsible Chart Body */}
+            {!isCollapsed && (
+                <div className="trend-body">
 
-            {/* Interactive Legend with Latest Value Readout & Toggleability */}
-            <div className="legend-toolbar">
-                {activeParams.map(p => {
-                    const conf = TAG_CONFIG[p];
-                    const isHidden = hiddenTags.has(p);
-                    const liveVal = latestValues[p] !== null && latestValues[p] !== undefined
-                        ? Number(latestValues[p]).toFixed(conf.digits)
-                        : '—';
+                    {/* Custom Range Indicator Bar (when custom range is active) */}
+                    {customRange && (
+                        <div className="custom-range-bar">
+                            <div className="cr-info">
+                                <span className="cr-icon">⏱</span>
+                                <span className="cr-label">Selected Range:</span>
+                                <span className="cr-tag time1"><b>Time 1:</b> {formatFullDateTime(customRange.from)}</span>
+                                <span className="cr-arrow">→</span>
+                                <span className="cr-tag time2"><b>Time 2:</b> {formatFullDateTime(customRange.to)}</span>
+                                <span className="cr-duration">({formatDuration(customRange.to - customRange.from)})</span>
+                            </div>
+                            <div className="cr-actions">
+                                <button type="button" onClick={handlePanLeft} title="Pan earlier by 50%">◀ Pan</button>
+                                <button type="button" onClick={handlePanRight} title="Pan later by 50%">Pan ▶</button>
+                                <button type="button" onClick={handleZoomIn} title="Zoom in 2x">Zoom +</button>
+                                <button type="button" onClick={handleZoomOut} title="Zoom out 2x">Zoom &minus;</button>
+                                <button
+                                    type="button"
+                                    className="cr-edit-btn"
+                                    onClick={toggleCustomRangePanel}
+                                    title="Edit Time 1 and Time 2 values">
+                                    {isCustomRangeOpen ? 'Hide Inputs' : 'Edit Range'}
+                                </button>
+                                <button
+                                    type="button"
+                                    className="cr-reset-btn"
+                                    onClick={handleResetToLive}
+                                    title="Exit custom range and return to Live simulator stream">
+                                    ✕ Return to Live
+                                </button>
+                            </div>
+                        </div>
+                    )}
 
-                    return (
-                        <button
-                            key={p}
-                            type="button"
-                            className={`legend-pill ${isHidden ? 'hidden-trace' : ''}`}
-                            onClick={() => toggleTag(p)}
-                            title={isHidden ? `Show ${conf.d}` : `Hide ${conf.d}`}>
-                            <span className="pill-dot" style={{ background: isHidden ? '#9da5aa' : conf.col }} />
-                            <span className="pill-label">{conf.d}:</span>
-                            <span className="pill-val">{liveVal} {conf.u}</span>
-                        </button>
-                    );
-                })}
-            </div>
+                    {/* Custom Range Input Panel */}
+                    {isCustomRangeOpen && (
+                        <div className="custom-range-panel">
+                            <form onSubmit={handleApplyCustomRange} className="cr-form">
+                                {rangeError && (
+                                    <div className="batch-msg-banner error" style={{ marginBottom: '8px' }}>
+                                        <span>⚠️ {rangeError}</span>
+                                        <button type="button" className="msg-close" onClick={() => setRangeError(null)}>×</button>
+                                    </div>
+                                )}
+                                <div className="cr-inputs-grid">
+                                    <div className="cr-input-group">
+                                        <label htmlFor="cr-time1">
+                                            <span className="cr-badge time1-badge">Time 1</span>
+                                            <b>Start Time (From)</b>
+                                        </label>
+                                        <input
+                                            id="cr-time1"
+                                            type="text"
+                                            placeholder="YYYY-MM-DD HH:mm:ss"
+                                            value={time1Input}
+                                            onChange={(e) => {
+                                                setTime1Input(e.target.value);
+                                                setRangeError(null);
+                                            }}
+                                            required
+                                        />
+                                    </div>
+                                    <div className="cr-input-group">
+                                        <label htmlFor="cr-time2">
+                                            <span className="cr-badge time2-badge">Time 2</span>
+                                            <b>End Time (To)</b>
+                                        </label>
+                                        <div className="cr-input-with-action">
+                                            <input
+                                                id="cr-time2"
+                                                type="text"
+                                                placeholder="YYYY-MM-DD HH:mm:ss"
+                                                value={time2Input}
+                                                onChange={(e) => {
+                                                    setTime2Input(e.target.value);
+                                                    setRangeError(null);
+                                                }}
+                                                required
+                                            />
+                                            <button
+                                                type="button"
+                                                className="cr-now-btn"
+                                                onClick={() => {
+                                                    const nowTime = clock ? new Date(clock) : new Date();
+                                                    setTime2Input(toDatetimeLocalString(nowTime));
+                                                    setRangeError(null);
+                                                }}
+                                                title="Set Time 2 to current simulator clock">
+                                                Set to Now
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Quick Presets & Batch Jump */}
+                                <div className="cr-presets-row">
+                                    <span className="cr-preset-label">Quick Presets:</span>
+                                    <button type="button" onClick={() => setQuickPreset(15 / 60)}>Last 15m</button>
+                                    <button type="button" onClick={() => setQuickPreset(30 / 60)}>Last 30m</button>
+                                    <button type="button" onClick={() => setQuickPreset(1)}>Last 1h</button>
+                                    <button type="button" onClick={() => setQuickPreset(3)}>Last 3h</button>
+                                    <button type="button" onClick={() => setQuickPreset(6)}>Last 6h</button>
+                                    <button type="button" onClick={() => setQuickPreset(12)}>Last 12h</button>
+                                    <button type="button" onClick={() => setQuickPreset(24)}>Last 24h</button>
+                                    <button type="button" onClick={() => setQuickPreset(72)}>Last 3d</button>
+
+                                    {phaseOptions.length > 0 && (
+                                        <div className="cr-phase-select-wrap">
+                                            <select
+                                                onChange={handlePhaseSelect}
+                                                defaultValue=""
+                                                title="Jump to a specific batch phase">
+                                                <option value="" disabled>Select Recent Batch Phase…</option>
+                                                {phaseOptions.map(p => (
+                                                    <option key={p.id} value={p.id}>
+                                                        {p.batch_id ? `[${p.batch_id}] ` : ''}{p.name} ({formatTime(p.started_at)} {p.ended_at ? '→ ' + formatTime(p.ended_at) : 'Active'})
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="cr-form-footer">
+                                    <span className="cr-tip">
+                                        💡 <b>Pro Tip:</b> You can also click and drag horizontally on the chart to select "Time 1" to "Time 2" directly. Double-click the chart to return to Live view.
+                                    </span>
+                                    <div className="cr-btn-actions">
+                                        <button type="button" className="cr-cancel-btn" onClick={() => setIsCustomRangeOpen(false)}>
+                                            Close
+                                        </button>
+                                        {customRange && (
+                                            <button type="button" className="cr-reset-live-btn" onClick={handleResetToLive}>
+                                                Reset to Live
+                                            </button>
+                                        )}
+                                        <button type="submit" className="cr-apply-btn">
+                                            ✓ Apply Time Range
+                                        </button>
+                                    </div>
+                                </div>
+                            </form>
+                        </div>
+                    )}
+
+                    {/* Canvas Container with Interactive Tooltip & Drag Selection */}
+                    <div
+                        className="trend-canvas-wrap"
+                        onMouseDown={handleMouseDown}
+                        onMouseMove={handleMouseMove}
+                        onMouseLeave={handleMouseLeave}
+                        onDoubleClick={handleDoubleClick}>
+                        <canvas ref={canvasRef} />
+
+                        {/* Floating Inspection Tooltip */}
+                        {hover && (
+                            <div
+                                className="trend-tooltip"
+                                style={{
+                                    left: Math.min(canvasWidth - 210, Math.max(12, hover.mouseX + 16)),
+                                    top: Math.min(canvasHeight - 190, Math.max(10, hover.mouseY - 40))
+                                }}>
+                                <div className="tt-header">
+                                    <span className="tt-time">{formatTime(hover.time)}</span>
+                                    {hover.activePhase && (
+                                        <span
+                                            className="tt-phase"
+                                            style={{
+                                                background: getComputedStyle(document.documentElement).getPropertyValue(`--${getPhaseSlug(hover.activePhase.name)}`).trim() || '#6c757d'
+                                            }}>
+                                            {hover.activePhase.name}
+                                        </span>
+                                    )}
+                                </div>
+
+                                {hover.activePhase?.batch_id && (
+                                    <div className="tt-batch">Batch: <b>{hover.activePhase.batch_id}</b></div>
+                                )}
+
+                                <div className="tt-readings">
+                                    {activeParams.map(param => {
+                                        if (hiddenTags.has(param)) return null;
+                                        const conf = TAG_CONFIG[param];
+                                        const pt = hover.nearestPoints[param];
+                                        const valStr = pt?.value !== null && pt?.value !== undefined
+                                            ? Number(pt.value).toFixed(conf.digits)
+                                            : '—';
+
+                                        return (
+                                            <div key={param} className="tt-row">
+                                                <span className="tt-tag-name">
+                                                    <i style={{ background: conf.col }} />
+                                                    {conf.d}:
+                                                </span>
+                                                <span className="tt-tag-val">
+                                                    <b>{valStr}</b> {conf.u}
+                                                </span>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Scale Note */}
+                    <div className="axnote">
+                        <span className="axnote-hint">
+                            {viewMode === 'overlay' && !overlayUnitInfo.hasSameUnits
+                                ? 'Overlay mode: Normalized relative scale (Y-axes hidden for mixed units) · Hover to inspect values'
+                                : viewMode === 'overlay' && overlayUnitInfo.hasSameUnits
+                                    ? `Overlay mode: Left vertical axis in ${overlayUnitInfo.unit} · Hover to inspect values`
+                                    : 'Stacked mode: Left vertical axis per active chart · Deselected tags cut off chart & auto-scale layout'}
+                        </span>
+                    </div>
+
+                    {/* Interactive Legend with Latest Value Readout & Toggleability */}
+                    <div className="legend-toolbar">
+                        {activeParams.map(p => {
+                            const conf = TAG_CONFIG[p];
+                            const isHidden = hiddenTags.has(p);
+                            const liveVal = latestValues[p] !== null && latestValues[p] !== undefined
+                                ? Number(latestValues[p]).toFixed(conf.digits)
+                                : '—';
+
+                            return (
+                                <button
+                                    key={p}
+                                    type="button"
+                                    className={`legend-pill ${isHidden ? 'hidden-trace' : ''}`}
+                                    onClick={() => toggleTag(p)}
+                                    title={isHidden ? `Show ${conf.d}` : `Hide ${conf.d}`}>
+                                    <span className="pill-dot" style={{ background: isHidden ? '#9da5aa' : conf.col }} />
+                                    <span className="pill-label">{conf.d}:</span>
+                                    <span className="pill-val">{liveVal} {conf.u}</span>
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

@@ -69,7 +69,7 @@ body {
     background: var(--field);
     color: var(--ink);
     font-family: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
-    font-size: 14px;
+    font-size: 13px;
     font-variant-numeric: tabular-nums;
     -webkit-font-smoothing: antialiased;
 }
@@ -90,9 +90,9 @@ body {
 header {
     display: flex;
     align-items: center;
-    gap: 22px;
+    gap: 18px;
     flex-wrap: wrap;
-    padding: 9px 18px;
+    padding: 8px 16px;
     background: var(--panel-2);
     border-bottom: 1px solid var(--edge-dark);
 }
@@ -109,14 +109,14 @@ header {
 
 .clock {
     font-family: 'IBM Plex Mono', monospace;
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 500;
 }
 
 .clock small {
     color: var(--ink-3);
     font-size: 11px;
-    margin-left: 5px;
+    margin-left: 4px;
     font-family: inherit;
 }
 
@@ -124,20 +124,20 @@ header {
     margin-left: auto;
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 14px;
 }
 
 .live {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     font-size: 12px;
     color: var(--ink-2);
 }
 
 .live i {
-    width: 7px;
-    height: 7px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
     background: var(--ok);
     display: block;
@@ -156,8 +156,8 @@ header {
 
 .speed button {
     font: inherit;
-    font-size: 12px;
-    padding: 3px 11px;
+    font-size: 11.5px;
+    padding: 2px 9px;
     border: 0;
     cursor: pointer;
     background: var(--panel);
@@ -178,10 +178,10 @@ header {
 .batch-mode-chip {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 3px 9px;
+    gap: 5px;
+    padding: 2px 7px;
     border-radius: 3px;
-    font-size: 11px;
+    font-size: 11.5px;
     font-weight: 500;
     border: 1px solid var(--edge-dark);
     background: var(--field);
@@ -208,7 +208,7 @@ header {
 }
 
 .batch-mode-chip .mode-chip-text {
-    font-size: 11px;
+    font-size: 11.5px;
     display: inline-flex;
     align-items: center;
     gap: 4px;
@@ -224,7 +224,7 @@ header {
 
 /* Main Layout */
 main {
-    padding: 14px 18px 36px;
+    padding: 10px 16px 28px;
     max-width: 100%;
     margin: 0 auto;
 }
@@ -232,8 +232,8 @@ main {
 .shead {
     display: flex;
     align-items: baseline;
-    gap: 10px;
-    margin: 0 0 8px;
+    gap: 8px;
+    margin: 0 0 6px;
     font-size: 12px;
     color: var(--ink-2);
 }
@@ -303,6 +303,15 @@ main {
     border: 1px solid var(--edge);
     border-radius: 4px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    transition: all 0.2s ease;
+}
+
+.panel.trend.collapsed {
+    padding-bottom: 10px;
+}
+
+.panel.trend.collapsed .thead {
+    margin-bottom: 0;
 }
 
 .thead {
@@ -319,15 +328,96 @@ main {
     gap: 1px;
 }
 
+.trend-title-clickable {
+    cursor: pointer;
+    user-select: none;
+    transition: opacity 0.15s ease;
+}
+
+.trend-title-clickable:hover {
+    opacity: 0.85;
+}
+
+.trend-collapsed-pill {
+    display: inline-flex;
+    align-items: center;
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: #475569;
+    color: #ffffff;
+}
+
+.thead-right-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.trend-collapse-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border: 1px solid var(--edge-dark);
+    border-radius: 3px;
+    cursor: pointer;
+    background: var(--field);
+    color: var(--ink);
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.trend-collapse-btn:hover {
+    background: var(--panel-2);
+    border-color: var(--ink);
+}
+
+.trend-collapse-btn.collapsed {
+    background: var(--ink);
+    border-color: var(--ink);
+    color: #ffffff;
+}
+
+.trend-collapse-btn.collapsed:hover {
+    background: #334155;
+}
+
+.trend-body {
+    display: flex;
+    flex-direction: column;
+    animation: fadeInTrend 0.2s ease;
+}
+
+@keyframes fadeInTrend {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
 .trend-title-group h3 {
     margin: 0;
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
     color: var(--ink);
 }
 
 .trend-subtitle {
-    font-size: 10px;
+    font-size: 10.5px;
     color: var(--ink-3);
 }
 
@@ -338,7 +428,6 @@ main {
     border-radius: 3px;
     overflow: hidden;
     background: var(--field);
-    margin-left: auto;
 }
 
 .view-mode-toggle button {
@@ -347,7 +436,7 @@ main {
     font: inherit;
     font-size: 11px;
     font-weight: 500;
-    padding: 2px 8px;
+    padding: 2px 7px;
     border: 0;
     cursor: pointer;
     background: transparent;
@@ -415,9 +504,9 @@ main {
 
 .tsel button {
     font: inherit;
-    font-size: 11px;
+    font-size: 11.5px;
     font-weight: 600;
-    padding: 2px 10px;
+    padding: 2px 8px;
     border: 0;
     cursor: pointer;
     background: transparent;
@@ -455,7 +544,7 @@ main {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 11px;
+    font-size: 11.5px;
     flex-wrap: wrap;
 }
 
@@ -479,7 +568,7 @@ main {
     padding: 2px 7px;
     border-radius: 3px;
     font-family: var(--mono, monospace);
-    font-size: 11px;
+    font-size: 11.5px;
 }
 
 .cr-tag.time1 b {
@@ -511,7 +600,7 @@ main {
     font: inherit;
     font-size: 10.5px;
     font-weight: 500;
-    padding: 2px 8px;
+    padding: 2px 7px;
     border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 3px;
     background: rgba(255, 255, 255, 0.1);
@@ -598,20 +687,21 @@ main {
 .cr-input-with-action {
     display: flex;
     gap: 6px;
+    align-items: center;
 }
 
-.cr-input-group input[type="datetime-local"] {
+.cr-input-group input {
     flex: 1;
     font-family: inherit;
-    font-size: 12px;
-    padding: 4px 8px;
+    font-size: 11.5px;
+    padding: 3px 8px;
     border: 1px solid var(--edge-dark);
     border-radius: 3px;
     background: #ffffff;
     color: var(--ink);
 }
 
-.cr-input-group input[type="datetime-local"]:focus {
+.cr-input-group input:focus {
     outline: none;
     border-color: #2563eb;
     box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
@@ -619,8 +709,8 @@ main {
 
 .cr-now-btn {
     font: inherit;
-    font-size: 11px;
-    padding: 3px 8px;
+    font-size: 10.5px;
+    padding: 2px 6px;
     white-space: nowrap;
     border: 1px solid var(--edge-dark);
     background: var(--panel);
@@ -643,7 +733,7 @@ main {
 }
 
 .cr-preset-label {
-    font-size: 11px;
+    font-size: 10.5px;
     font-weight: 600;
     color: var(--ink-2);
 }
@@ -651,7 +741,7 @@ main {
 .cr-presets-row button {
     font: inherit;
     font-size: 10.5px;
-    padding: 2px 7px;
+    padding: 2px 6px;
     border: 1px solid var(--edge);
     border-radius: 3px;
     background: var(--panel);
@@ -671,7 +761,7 @@ main {
 .cr-phase-select-wrap select {
     font: inherit;
     font-size: 11px;
-    padding: 2px 8px;
+    padding: 2px 6px;
     border: 1px solid var(--edge);
     border-radius: 3px;
     background: #ffffff;
@@ -705,7 +795,7 @@ main {
 .cr-cancel-btn {
     font: inherit;
     font-size: 11px;
-    padding: 4px 10px;
+    padding: 2px 7px;
     border: 1px solid var(--edge-dark);
     border-radius: 3px;
     background: var(--panel);
@@ -716,7 +806,7 @@ main {
 .cr-reset-live-btn {
     font: inherit;
     font-size: 11px;
-    padding: 4px 10px;
+    padding: 2px 7px;
     border: 1px solid #ef4444;
     border-radius: 3px;
     background: #fee2e2;
@@ -729,7 +819,7 @@ main {
     font: inherit;
     font-size: 11px;
     font-weight: 600;
-    padding: 4px 14px;
+    padding: 2px 9px;
     border: 1px solid #1d4ed8;
     border-radius: 3px;
     background: #2563eb;
@@ -768,8 +858,8 @@ main {
     backdrop-filter: blur(4px);
     border: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: 5px;
-    padding: 8px 10px;
-    min-width: 180px;
+    padding: 6px 9px;
+    min-width: 170px;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
     color: #e6ebed;
     font-size: 11px;
@@ -788,6 +878,7 @@ main {
 
 .tt-time {
     font-weight: 600;
+    font-size: 12px;
     letter-spacing: 0.3px;
     color: #ffffff;
     font-variant-numeric: tabular-nums;
@@ -795,7 +886,7 @@ main {
 
 .tt-phase {
     display: inline-block;
-    font-size: 9px;
+    font-size: 9.5px;
     font-weight: 600;
     padding: 1px 6px;
     border-radius: 2px;
@@ -805,9 +896,9 @@ main {
 }
 
 .tt-batch {
-    font-size: 10px;
+    font-size: 10.5px;
     color: #9cb0ba;
-    margin-bottom: 5px;
+    margin-bottom: 4px;
 }
 
 .tt-batch b {
@@ -857,7 +948,7 @@ main {
     align-items: center;
     justify-content: space-between;
     flex-wrap: wrap;
-    font-size: 10.5px;
+    font-size: 10px;
     color: var(--ink-3);
     margin-top: 4px;
     padding: 0 4px;
@@ -872,16 +963,16 @@ main {
 /* Interactive Legend Toolbar */
 .legend-toolbar {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     flex-wrap: wrap;
-    margin-top: 8px;
+    margin-top: 6px;
 }
 
 .legend-pill {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 3px 8px;
+    gap: 5px;
+    padding: 2px 6px;
     background: var(--field);
     border: 1px solid var(--edge);
     border-radius: 3px;
@@ -898,8 +989,8 @@ main {
 }
 
 .legend-pill .pill-dot {
-    width: 7px;
-    height: 7px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
     display: inline-block;
     flex-shrink: 0;
@@ -937,7 +1028,7 @@ main {
 table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: 11.5px;
 }
 
 thead th {
@@ -945,7 +1036,7 @@ thead th {
     font-weight: 500;
     font-size: 11px;
     color: var(--ink-2);
-    padding: 7px 9px;
+    padding: 4px 6px;
     background: var(--panel-2);
     border-bottom: 1px solid var(--edge-dark);
     position: sticky;
@@ -954,7 +1045,8 @@ thead th {
 }
 
 tbody td {
-    padding: 5px 9px;
+    padding: 3px 6px;
+    font-size: 11.5px;
     border-bottom: 1px solid rgba(0, 0, 0, 0.07);
 }
 
@@ -963,13 +1055,13 @@ tbody tr.grp td {
     font-weight: 600;
     font-size: 11px;
     color: var(--ink-2);
-    padding: 4px 9px;
+    padding: 3px 6px;
 }
 
 td.v {
     text-align: right;
     font-weight: 500;
-    font-size: 13px;
+    font-size: 12.5px;
 }
 
 td.v.alarm {
@@ -984,13 +1076,13 @@ td.v.bad {
 
 td.u {
     color: var(--ink-3);
-    font-size: 11px;
+    font-size: 10.5px;
     width: 46px;
 }
 
 .q {
-    font-size: 10px;
-    padding: 1px 5px;
+    font-size: 9.5px;
+    padding: 1px 4px;
     border-radius: 2px;
     border: 1px solid var(--edge-dark);
     color: var(--ink-2);
@@ -1010,18 +1102,18 @@ td.u {
 
 /* Demo Controls */
 .ctrls {
-    margin-top: 12px;
-    padding: 11px 13px;
+    margin-top: 10px;
+    padding: 8px 10px;
     display: flex;
-    gap: 8px;
+    gap: 6px;
     align-items: center;
     flex-wrap: wrap;
 }
 
 .btn {
     font: inherit;
-    font-size: 12px;
-    padding: 5px 12px;
+    font-size: 11px;
+    padding: 3px 8px;
     cursor: pointer;
     background: var(--panel-2);
     color: var(--ink);
@@ -1042,7 +1134,7 @@ td.u {
 /* Mimic Deck: ProcessMimic (Left) & DemoControls (Right) */
 .mimic-deck {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 250px;
+    grid-template-columns: 80% 20%;
     gap: 14px;
     align-items: stretch;
 }
@@ -1072,8 +1164,7 @@ td.u {
 .demo-col-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 6px 9px;
+    padding: 0;
     background: var(--panel-2);
     border-bottom: 1px solid var(--edge-dark);
 }
@@ -1090,7 +1181,7 @@ td.u {
     font: inherit;
     font-size: 11px;
     font-weight: 600;
-    padding: 2px 8px;
+    padding: 2px 7px;
     border: 0;
     border-right: 1px solid var(--edge);
     cursor: pointer;
@@ -1121,32 +1212,42 @@ td.u {
 }
 
 .demo-col-body {
-    padding: 9px;
+    padding: 8px;
     display: flex;
     flex-direction: column;
-    gap: 9px;
+    gap: 8px;
     flex: 1;
-    justify-content: space-between;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.demo-tab-content-area {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
 }
 
 .demo-btn-stack {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 5px;
 }
 
 .demo-pill-btn {
     width: 100%;
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    padding: 7px 9px;
+    gap: 7px;
+    padding: 5px 7px;
     background: var(--field);
     border: 1px solid var(--edge-dark);
     border-radius: 3px;
     cursor: pointer;
     font: inherit;
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 500;
     color: var(--ink);
     transition: all 0.15s ease;
@@ -1163,8 +1264,8 @@ td.u {
 }
 
 .demo-pill-btn .led-dot {
-    width: 7px;
-    height: 7px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
     background: #9aa2a7;
     flex-shrink: 0;
@@ -1193,11 +1294,233 @@ td.u {
 }
 
 .skip-pill-btn .skip-icon {
-    font-size: 11px;
+    font-size: 12px;
 }
 
 .skip-pill-btn:hover {
     background: #bcc3c8;
+}
+
+/* ==========================================================================
+   Modern Skip Sequencer Card (3 Rows x 3 Cols Fast-Forward Controls)
+   ========================================================================== */
+.modern-skip-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 9px;
+    background: #ffffff;
+    border: 1px solid var(--edge);
+    border-radius: 4px;
+    box-shadow: 0 1px 3px rgba(27, 33, 36, 0.06);
+    margin-top: auto;
+    flex-shrink: 0;
+}
+
+.skip-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 5px;
+    border-bottom: 1px solid var(--edge);
+}
+
+.skip-card-title-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.skip-card-icon {
+    font-size: 14px;
+    line-height: 1;
+}
+
+.skip-card-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #000000;
+    letter-spacing: -0.01em;
+}
+
+.skip-card-badge {
+    font-size: 9.5px;
+    font-weight: 600;
+    color: #2b4356;
+    background: #eef3f6;
+    padding: 1px 5px;
+    border-radius: 10px;
+    border: 1px solid #c9d6df;
+    letter-spacing: 0.02em;
+}
+
+/* Modern 3x3 Table */
+.modern-skip-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 3px 4px;
+    margin: 0;
+}
+
+.modern-skip-table th {
+    padding: 0;
+    text-align: center;
+    font-weight: 700;
+    background: transparent;
+    border: none;
+}
+
+/* Vessel Badges in Row 1 */
+.reactor-col-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    width: 100%;
+    padding: 3px 5px;
+    background: var(--panel-2);
+    border: 1px solid var(--edge);
+    border-radius: 3px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+.reactor-badge-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #0284c7;
+    box-shadow: 0 0 5px rgba(2, 132, 199, 0.5);
+}
+
+.reactor-col-badge.r-r1 .reactor-badge-dot {
+    background: #0284c7;
+    box-shadow: 0 0 5px rgba(2, 132, 199, 0.5);
+}
+
+.reactor-col-badge.r-r2 .reactor-badge-dot {
+    background: #7c3aed;
+    box-shadow: 0 0 5px rgba(124, 58, 237, 0.5);
+}
+
+.reactor-col-badge.r-r3 .reactor-badge-dot {
+    background: #059669;
+    box-shadow: 0 0 5px rgba(5, 150, 105, 0.5);
+}
+
+.reactor-badge-name {
+    font-size: 11px;
+    font-weight: 800;
+    color: #000000;
+    letter-spacing: 0.02em;
+}
+
+.modern-skip-table td {
+    padding: 0;
+    text-align: center;
+    vertical-align: middle;
+    border: none;
+    background: transparent;
+}
+
+/* Base button */
+.modern-skip-btn {
+    width: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 4px 3px;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: 3px;
+    cursor: pointer;
+    user-select: none;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: all 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.modern-skip-btn .btn-icon {
+    font-size: 13px;
+    line-height: 1;
+    display: inline-block;
+    vertical-align: middle;
+    transition: transform 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.modern-skip-btn .btn-label {
+    line-height: 1.2;
+}
+
+/* Row 2: Skip Phase Button (Crisp Surface + Slate Border) */
+.modern-skip-btn.btn-skip-phase {
+    background: #f0f7ff;
+    border: 1px solid #1e293b;
+    color: #1e293b;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.modern-skip-btn.btn-skip-phase:hover {
+    background: #ffffff;
+    border-color: #64748b;
+    color: #020617;
+    box-shadow: 0 3px 8px rgba(100, 116, 139, 0.2);
+    transform: translateY(-1.5px);
+}
+
+.modern-skip-btn.btn-skip-phase:hover .btn-icon {
+    transform: scale(1.22) translateX(1px);
+}
+
+.modern-skip-btn.btn-skip-phase:active {
+    background: #f1f5f9;
+    border-color: #475569;
+    transform: translateY(0.5px);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+/* Row 3: Skip Process Button (Deep-step Cool Blue Action) */
+.modern-skip-btn.btn-skip-process {
+    background: #ffeece;
+    border: 1px solid #723903;
+    color: #723903;
+    box-shadow: 0 1px 2px rgba(37, 99, 235, 0.06);
+}
+
+.modern-skip-btn.btn-skip-process:hover {
+    background: #fadeab;
+    border-color: #5e2e01;
+    color: #5e2e01;
+    box-shadow: 0 3px 10px rgba(37, 99, 235, 0.22);
+    transform: translateY(-1.5px);
+}
+
+.modern-skip-btn.btn-skip-process:hover .btn-icon {
+    transform: scale(1.24) translateX(1px);
+}
+
+.modern-skip-btn.btn-skip-process:active {
+    background: #bfdbfe;
+    border-color: #2563eb;
+    transform: translateY(0.5px);
+    box-shadow: 0 1px 2px rgba(37, 99, 235, 0.1);
+}
+
+.skip-btn-row {
+    display: flex;
+    gap: 5px;
+    width: 100%;
+}
+
+.skip-btn-row .skip-pill-btn {
+    flex: 1;
+    justify-content: center;
+    padding: 3px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-align: center;
+    gap: 4px;
 }
 
 .demo-col-footer {
@@ -1205,7 +1528,7 @@ td.u {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 5px 8px;
+    padding: 4px 7px;
     background: var(--panel-2);
     border: 1px solid var(--edge);
     border-radius: 3px;
@@ -1214,8 +1537,8 @@ td.u {
 .demo-footer-status {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    font-size: 11px;
+    gap: 5px;
+    font-size: 10.5px;
     font-weight: 500;
     color: var(--ink-2);
 }
@@ -1240,9 +1563,9 @@ td.u {
     border: 1px solid var(--edge-dark);
     border-radius: 2px;
     color: var(--ink-2);
-    font-size: 10px;
+    font-size: 9.5px;
     font-weight: 600;
-    padding: 2px 6px;
+    padding: 1px 5px;
     cursor: pointer;
     transition: all 0.15s ease;
 }
@@ -1258,19 +1581,24 @@ td.u {
    ------------------------------------------------------------- */
 .demo-section-tabs {
     display: flex;
-    border: 1px solid var(--edge-dark);
-    border-radius: 2px;
+    width: 100%;
+    border: 0;
+    border-radius: 0;
     overflow: hidden;
     background: var(--field);
 }
 
 .demo-section-tabs .section-tab {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     font: inherit;
-    font-size: 10.5px;
+    font-size: 11.5px;
     font-weight: 600;
-    padding: 3px 8px;
+    padding: 4px 8px;
     border: 0;
-    border-right: 1px solid var(--edge);
+    border-right: 1px solid var(--edge-dark);
     cursor: pointer;
     background: transparent;
     color: var(--ink-2);
@@ -1296,7 +1624,7 @@ td.u {
 .faults-ctrl-container {
     display: flex;
     flex-direction: column;
-    gap: 9px;
+    gap: 7px;
     flex: 1;
 }
 
@@ -1320,7 +1648,7 @@ td.u {
     align-items: center;
     justify-content: space-between;
     gap: 6px;
-    padding: 4px 6px;
+    padding: 3px 5px;
     background: var(--field);
     border: 1px solid var(--edge);
     border-radius: 3px;
@@ -1344,7 +1672,7 @@ td.u {
     font: inherit;
     font-size: 10.5px;
     font-weight: 600;
-    padding: 2px 7px;
+    padding: 2px 6px;
     border: 0;
     border-right: 1px solid var(--edge);
     cursor: pointer;
@@ -1371,8 +1699,8 @@ td.u {
 .batch-form-box {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding: 8px;
+    gap: 5px;
+    padding: 6px 8px;
     background: var(--panel-2);
     border: 1px solid var(--edge);
     border-radius: 3px;
@@ -1408,8 +1736,8 @@ td.u {
 
 .batch-text-input {
     width: 100%;
-    padding: 5px 8px;
-    font-size: 12px;
+    padding: 3px 6px;
+    font-size: 11.5px;
     border: 1px solid var(--edge-dark);
     border-radius: 2px;
     background: #ffffff;
@@ -1426,7 +1754,7 @@ td.u {
 .batch-check-label {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
     font-size: 10.5px;
     color: var(--ink-2);
     cursor: pointer;
@@ -1437,6 +1765,20 @@ td.u {
 .batch-check-label input {
     cursor: pointer;
     margin: 0;
+}
+
+.batch-check-label.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.batch-check-label.disabled input {
+    cursor: not-allowed;
+}
+
+.batch-check-hint {
+    color: var(--ink-3);
+    font-size: 9.5px;
 }
 
 /* Action Buttons */
@@ -1472,40 +1814,47 @@ td.u {
 .batch-paused-actions {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 5px;
     margin-top: 2px;
 }
 
 .batch-pause-alert {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
     font-size: 10.5px;
     font-weight: 600;
     color: var(--caution);
-    padding: 3px 6px;
+    padding: 2px 5px;
     background: rgba(179, 129, 11, 0.1);
     border: 1px solid rgba(179, 129, 11, 0.3);
     border-radius: 2px;
 }
 
 .batch-pause-alert .alert-dot {
-    width: 6px;
-    height: 6px;
+    width: 5px;
+    height: 5px;
     border-radius: 50%;
     background: var(--caution);
     animation: pulsePause 1.5s infinite;
 }
 
 @keyframes pulsePause {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.4;
+    }
 }
 
 .batch-btn-duo {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
 }
 
 /* Messages */
@@ -1513,11 +1862,11 @@ td.u {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 6px;
-    padding: 5px 8px;
+    gap: 8px;
+    padding: 4px 8px;
     border-radius: 3px;
     font-size: 11px;
-    line-height: 1.3;
+    line-height: 1.35;
 }
 
 .batch-msg-banner.success {
@@ -1542,37 +1891,37 @@ td.u {
     cursor: pointer;
     color: inherit;
     line-height: 1;
-    padding: 0 2px;
+    padding: 0 4px;
 }
 
 /* Status Monitor Card */
 .batch-status-panel {
-    background: var(--field);
+    background: var(--panel-2);
     border: 1px solid var(--edge);
     border-radius: 3px;
-    padding: 7px 9px;
+    padding: 6px 8px;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
 }
 
 .batch-status-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    font-size: 10px;
+    font-size: 10.5px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.3px;
     color: var(--ink-3);
-    border-bottom: 1px solid rgba(0, 0, 0, 0.07);
-    padding-bottom: 3px;
+    border-bottom: none;
+    padding-bottom: 2px;
 }
 
 .status-pill {
     font-size: 9.5px;
     font-weight: 700;
-    padding: 1px 6px;
+    padding: 1px 5px;
     border-radius: 2px;
     letter-spacing: 0.3px;
     text-transform: uppercase;
@@ -1620,7 +1969,7 @@ td.u {
 .batch-stat-desc {
     font-size: 10px;
     color: var(--ink-3);
-    line-height: 1.25;
+    line-height: 1.35;
 }
 
 .batch-stat-desc .text-ok {
@@ -1634,11 +1983,11 @@ td.u {
 }
 
 .btn-restore-link {
-    margin-top: 4px;
+    margin-top: 3px;
     background: transparent;
     border: 1px dashed var(--edge-dark);
     border-radius: 2px;
-    padding: 3px 6px;
+    padding: 2px 4px;
     font-size: 10px;
     font-weight: 600;
     color: var(--ink-2);
@@ -1652,6 +2001,79 @@ td.u {
     border-color: var(--ink);
     color: var(--ink);
 }
+
+/* Manual Batch Request Table */
+.manual-batch-table-wrap {
+    width: 100%;
+    margin-top: 3px;
+    border: 1px solid var(--edge);
+    border-radius: 2px;
+    background: #ffffff;
+    max-height: 180px;
+    overflow-y: auto;
+}
+
+.manual-batch-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11.5px;
+}
+
+.manual-batch-table th {
+    text-align: left;
+    padding: 3px 6px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #000000;
+    background: var(--panel);
+    border-bottom: 1px solid var(--edge-dark);
+    border-right: 1px solid var(--edge);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.manual-batch-table th:last-child {
+    border-right: none;
+}
+
+.manual-batch-table td {
+    padding: 3px 6px;
+    font-size: 11.5px;
+    border-bottom: 1px solid var(--edge);
+    border-right: 1px solid var(--edge);
+    vertical-align: middle;
+}
+
+.manual-batch-table td:last-child {
+    border-right: none;
+}
+
+.manual-batch-table tr:last-child td {
+    border-bottom: 0;
+}
+
+.manual-batch-table .batch-id-cell {
+    font-family: var(--font-mono, monospace);
+    font-weight: 600;
+    color: var(--ink);
+    white-space: nowrap;
+    font-size: 12px;
+}
+
+.manual-batch-table .batch-status-cell {
+    color: var(--ink-2);
+    font-size: 11px;
+}
+
+.manual-batch-table .empty-batch-cell {
+    text-align: center;
+    color: var(--ink-3);
+    font-style: italic;
+    padding: 8px 6px;
+    font-size: 10.5px;
+}
+
 
 /* Bottom Feed Grid: 1-Min Rollup Audit (Left) & Events/Alarms Feed (Right) */
 .bottom-feed-grid {
@@ -1739,7 +2161,7 @@ td.u {
     font: inherit;
     font-size: 10.5px;
     font-weight: 600;
-    padding: 2px 7px;
+    padding: 2px 6px;
     border: 0;
     border-right: 1px solid var(--edge);
     cursor: pointer;
@@ -1767,9 +2189,9 @@ td.u {
 
 .btn-refresh {
     font: inherit;
-    font-size: 11px;
+    font-size: 10.5px;
     font-weight: 500;
-    padding: 2px 7px;
+    padding: 2px 6px;
     background: var(--field);
     border: 1px solid var(--edge-dark);
     border-radius: 2px;
@@ -1793,10 +2215,10 @@ td.u {
 .rollup-empty,
 .events-empty {
     text-align: center;
-    padding: 30px !important;
+    padding: 20px !important;
     color: var(--ink-3);
     font-style: italic;
-    font-size: 12px;
+    font-size: 11px;
 }
 
 .tag-name-cell {
@@ -1838,7 +2260,7 @@ td.u {
     color: var(--ink-2);
     font-size: 10px;
     font-weight: 700;
-    padding: 1px 4px;
+    padding: 1px 5px;
     border-radius: 2px;
     font-family: 'IBM Plex Mono', monospace;
 }
@@ -1847,8 +2269,8 @@ td.u {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
-    padding: 1px 6px;
+    font-size: 10.5px;
+    padding: 1px 5px;
     border-radius: 2px;
     font-family: 'IBM Plex Mono', monospace;
 }
@@ -1890,7 +2312,7 @@ td.u {
     gap: 4px;
     font-size: 10px;
     font-weight: 700;
-    padding: 1px 6px;
+    padding: 1px 5px;
     border-radius: 2px;
     text-transform: uppercase;
     letter-spacing: 0.3px;
@@ -1933,9 +2355,9 @@ td.u {
 }
 
 .event-tag-sub {
-    font-size: 10px;
+    font-size: 9.5px;
     color: var(--ink-3);
-    margin-left: 6px;
+    margin-left: 4px;
     font-family: 'IBM Plex Mono', monospace;
 }
 
@@ -1950,7 +2372,7 @@ td.u {
 .status-active-pill {
     font-size: 9.5px;
     font-weight: 700;
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: 2px;
     letter-spacing: 0.4px;
 }

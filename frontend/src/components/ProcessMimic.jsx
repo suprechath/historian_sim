@@ -148,11 +148,11 @@ export default function ProcessMimic({ reactors, tags, selectedReactor, onSelect
         { label: 'Seeded', tag: rData.R3.seeded, type: 'mode' },
     ];
 
-    const renderReadoutTile = (x0, rows) => {
+    const renderReadoutTile = (x0, rows, y0 = 96) => {
         const tileW = 144;
         const rowH = 17;
         const tileH = Math.max(156, rows.length * rowH + 14);
-        const tileY = 96 - Math.max(0, (rows.length - 8) * 8);
+        const tileY = y0 - Math.max(0, (rows.length - 8) * 8);
 
         return (
             <g className="readout-tile">
@@ -309,7 +309,7 @@ export default function ProcessMimic({ reactors, tags, selectedReactor, onSelect
 
     return (
         <div className="panel mimic">
-            <svg viewBox="0 0 1180 330" aria-label="Process mimic">
+            <svg viewBox="65 15 1050 341" aria-label="Process mimic">
                 <defs>
                     <clipPath id="c1"><path d="M90 100 L90 196 Q90 224 132 224 Q174 224 174 196 L174 100 Z" /></clipPath>
                     <clipPath id="c2"><path d="M470 100 L470 196 Q470 224 512 224 Q554 224 554 196 L554 100 Z" /></clipPath>
@@ -400,7 +400,7 @@ export default function ProcessMimic({ reactors, tags, selectedReactor, onSelect
                 </g>
 
                 {/* R1 Readout Tiles */}
-                {renderReadoutTile(188, r1Rows)}
+                {renderReadoutTile(188, r1Rows, 105)}
 
                 {/* R2 Vessel Graphic */}
                 <g
@@ -441,7 +441,7 @@ export default function ProcessMimic({ reactors, tags, selectedReactor, onSelect
                 </g>
 
                 {/* R2 Readout Tiles */}
-                {renderReadoutTile(570, r2Rows)}
+                {renderReadoutTile(570, r2Rows, 99)}
 
                 {/* R3 Vessel Graphic */}
                 <g
@@ -482,7 +482,7 @@ export default function ProcessMimic({ reactors, tags, selectedReactor, onSelect
                 </g>
 
                 {/* R3 Readout Tiles */}
-                {renderReadoutTile(948, r3Rows)}
+                {renderReadoutTile(948, r3Rows, 99)}
             </svg>
         </div>
     );

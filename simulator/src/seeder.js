@@ -449,6 +449,15 @@ export async function seedHistory({ days = config.autoSeedDays, seed = Date.now(
       ON CONFLICT (id) DO UPDATE SET speed = 1, running = true, updated_at = NOW()
     `);
 
+    // 6. Refresh continuous aggregate readings_1min across the backfilled history
+    try {
+      logger.info('Materializing continuous aggregates for backfilled readings (readings_1min)...', 'Seeder');
+      await client.query("CALL refresh_continuous_aggregate('readings_1min', $1::timestamptz, NOW())", [startTime]);
+      logger.info('Continuous aggregate materialization completed.', 'Seeder');
+    } catch (aggErr) {
+      logger.warn(`Continuous aggregate refresh skipped: ${aggErr.message}`, 'Seeder');
+    }
+
     logger.info('Historical Backfill Completed Successfully!', 'Seeder');
     logger.info(`- Total Readings Persisted: ${totalReadings.toLocaleString()}`, 'Seeder');
     logger.info(`- Total Batches Generated: ${batchSeq - 1}`, 'Seeder');

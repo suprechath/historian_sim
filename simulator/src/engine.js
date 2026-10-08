@@ -135,15 +135,27 @@ export class SimulationEngine {
       const simSpeed = ctrl.speed;
       const simMode = ctrl.mode;
       const phaseSkipAsset = ctrl.phaseSkipAsset;
+      const processSkipAsset = ctrl.processSkipAsset;
 
       if (phaseSkipAsset) {
         await this.controlService.clearPhaseSkip();
+      }
+
+      if (processSkipAsset) {
+        await this.controlService.clearProcessSkip();
+        await this.batchOrchestrator.skipReactorProcess(
+          processSkipAsset,
+          now,
+          simMode,
+          this.controlService
+        );
       }
 
       // 2. Process User Batch Command
       if (ctrl.batchCommand) {
         await this.batchOrchestrator.handleUserBatchCommand(
           ctrl.assignedBatchId,
+          ctrl.batchCommand,
           now,
           this.controlService
         );

@@ -30,6 +30,17 @@ async function bootstrap() {
       }
     } else {
       logger.info('Historical readings already present. Skipping auto-seeder.', 'Bootstrap');
+      // Ensure continuous aggregates cover existing historical records
+      try {
+        const { rows: aggCheck } = await query('SELECT count(*) FROM readings_1min;');
+        if (parseInt(aggCheck[0]?.count || '0', 10) < 5000) {
+          logger.info('Backfilled continuous aggregates missing. Refreshing readings_1min...', 'Bootstrap');
+          await query("CALL refresh_continuous_aggregate('readings_1min', NOW() - INTERVAL '7 days', NOW());");
+          logger.info('Continuous aggregate refresh completed.', 'Bootstrap');
+        }
+      } catch (aggErr) {
+        // Non-blocking
+      }
     }
 
     // 3. Launch continuous simulation engine

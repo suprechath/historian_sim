@@ -31,9 +31,20 @@ export async function ensureSimulationControl() {
       ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS assigned_batch_id TEXT;
       ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS batch_command TEXT;
       ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS single_batch_status TEXT DEFAULT 'idle';
+      ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS process_skip_asset TEXT;
       INSERT INTO simulation_control (id, running, speed, mode)
       VALUES (1, true, 1, 'continuous')
       ON CONFLICT (id) DO NOTHING;
+
+      CREATE TABLE IF NOT EXISTS batch_queue (
+        id SERIAL PRIMARY KEY,
+        batch_id TEXT NOT NULL,
+        command TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'in_queue',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_batch_queue_status ON batch_queue(status);
     `);
 }
 
@@ -72,11 +83,15 @@ router.get('/stream', (req, res) => {
 
             // 1. Active phases & batches per vessel
             const { rows: reactors } = await query(`
-        SELECT a.code AS asset, b.batch_id, b.recipe_version, e.name AS phase
+        SELECT DISTINCT ON (a.id)
+          a.code AS asset, 
+          b.batch_id, 
+          b.recipe_version, 
+          e.name AS phase
         FROM assets a
-        LEFT JOIN batches b ON b.current_asset_id = a.id AND b.status = 'Running'
         LEFT JOIN events e ON e.asset_id = a.id AND e.level = 'Phase' AND e.ended_at IS NULL
-        ORDER BY a.id;
+        LEFT JOIN batches b ON b.id = e.batch_pk
+        ORDER BY a.id, e.started_at DESC NULLS LAST;
       `);
 
             const reactorMap = {};
@@ -118,6 +133,22 @@ router.get('/stream', (req, res) => {
         ORDER BY t.id;
       `);
 
+            // 3. Pending manual batch requests from batch_queue
+            let batchQueue = [];
+            try {
+                const { rows } = await query(`
+                  SELECT id, batch_id AS "batchId", command, status, created_at AS "createdAt"
+                  FROM batch_queue
+                  WHERE status IN ('waiting_r1', 'in_queue')
+                  ORDER BY id ASC;
+                `);
+                batchQueue = rows;
+            } catch (qErr) {
+                if (qErr.message?.includes('does not exist')) {
+                    await ensureSimulationControl();
+                }
+            }
+
             res.write(`data: ${JSON.stringify({
                 clock: new Date(),
                 running: currentSimState.running,
@@ -125,6 +156,7 @@ router.get('/stream', (req, res) => {
                 mode: currentSimState.mode,
                 assignedBatchId: currentSimState.assignedBatchId,
                 singleBatchStatus: currentSimState.singleBatchStatus,
+                batchQueue,
                 reactors: reactorMap,
                 tags
             })}\n\n`);
@@ -185,7 +217,7 @@ router.post('/simulation/state', async (req, res) => {
 
 // Assign and start a user-specified batch
 router.post('/simulation/batch/assign', async (req, res) => {
-    let { batchId, startImmediately = true, clearTrain = false, resume = false } = req.body;
+    let { batchId, startImmediate, startImmediately, resetDownstream = false, clearTrain = false, resume = false } = req.body;
     try {
         await ensureSimulationControl();
 
@@ -215,28 +247,62 @@ router.post('/simulation/batch/assign', async (req, res) => {
             });
         }
 
-        const cmd = clearTrain
-            ? 'start_immediate_clear_train'
-            : (startImmediately ? 'start_immediate' : 'start_queue');
+        // Check if batch ID is already pending in batch_queue
+        const { rows: pendingExisting } = await query(
+            "SELECT id, status FROM batch_queue WHERE batch_id = $1 AND status IN ('waiting_r1', 'in_queue')",
+            [cleanBatchId]
+        );
+        if (pendingExisting.length > 0) {
+            return res.status(400).json({
+                error: `Batch '${cleanBatchId}' is already in the manual request queue.`
+            });
+        }
+
+        const isStartImmediate = Boolean(startImmediate ?? startImmediately ?? false);
+        const isResetDownstream = Boolean(!isStartImmediate && (resetDownstream || clearTrain));
+
+        let cmd = 'start_queue';
+        let initialStatus = 'in_queue';
+
+        if (isStartImmediate) {
+            // Combination 1: Start immediately if R1 idle, else wait in queue of R1
+            cmd = 'start_immediate';
+            initialStatus = 'waiting_r1';
+        } else if (isResetDownstream) {
+            // Combination 3: Omit existing batch and start R1 with new batch immediately
+            cmd = 'start_omit_existing';
+            initialStatus = 'pending_omit';
+        } else {
+            // Combination 2: Wait till existing batch finishes R3
+            cmd = 'start_queue';
+            initialStatus = 'in_queue';
+        }
+
+        // Insert into batch_queue
+        const { rows: queueRows } = await query(`
+          INSERT INTO batch_queue (batch_id, command, status, created_at, updated_at)
+          VALUES ($1, $2, $3, NOW(), NOW())
+          RETURNING id, batch_id, command, status;
+        `, [cleanBatchId, cmd, initialStatus]);
 
         const { rows } = await query(`
           UPDATE simulation_control
           SET mode = 'single',
               assigned_batch_id = $1,
               batch_command = $2,
-              single_batch_status = 'pending',
-              running = CASE WHEN $3 THEN true ELSE running END,
+              single_batch_status = $3,
+              running = CASE WHEN $4 THEN true ELSE running END,
               updated_at = NOW()
           WHERE id = 1
           RETURNING running, speed, mode, assigned_batch_id, single_batch_status, updated_at;
-        `, [cleanBatchId, cmd, Boolean(resume)]);
+        `, [cleanBatchId, cmd, initialStatus, Boolean(resume)]);
 
         if (rows.length > 0) {
             simState.running = rows[0].running;
             simState.speed = rows[0].speed;
             simState.mode = rows[0].mode || 'single';
             simState.assignedBatchId = rows[0].assigned_batch_id || cleanBatchId;
-            simState.singleBatchStatus = rows[0].single_batch_status || 'pending';
+            simState.singleBatchStatus = rows[0].single_batch_status || initialStatus;
             simState.updatedAt = rows[0].updated_at;
         }
 
@@ -254,6 +320,11 @@ router.post('/simulation/batch/assign', async (req, res) => {
 router.post('/simulation/batch/continuous', async (req, res) => {
     try {
         await ensureSimulationControl();
+        await query(`
+          UPDATE batch_queue
+          SET status = 'aborted', updated_at = NOW()
+          WHERE status IN ('waiting_r1', 'in_queue');
+        `);
         const { rows } = await query(`
           UPDATE simulation_control
           SET mode = 'continuous',
@@ -306,6 +377,28 @@ router.post('/simulation/phase/skip', async (req, res) => {
         `, [assetRows[0].code]);
 
         res.json({ message: `Active phase skipped for ${asset}` });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/simulation/process/skip', async (req, res) => {
+    const { asset } = req.body;
+    try {
+        const { rows: assetRows } = await query('SELECT id, code FROM assets WHERE code = $1', [asset]);
+        if (assetRows.length === 0) return res.status(404).json({ error: `Asset '${asset}' not found` });
+
+        await ensureSimulationControl();
+
+        // Signal continuous simulator engine to skip entire reactor process
+        await query(`
+          UPDATE simulation_control
+          SET process_skip_asset = $1,
+              updated_at = NOW()
+          WHERE id = 1;
+        `, [assetRows[0].code]);
+
+        res.json({ message: `Entire reactor process skipped for ${asset}` });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -510,7 +603,23 @@ router.get('/readings', async (req, res) => {
       `;
         }
 
-        const { rows } = await query(sql, [tagList, fromDate, toDate]);
+        let { rows } = await query(sql, [tagList, fromDate, toDate]);
+
+        // Resilient fallback: if 1m continuous aggregate is not yet materialized for this range, calculate on the fly
+        if (targetRes === '1m' && rows.length === 0) {
+            const fallbackSql = `
+              SELECT time_bucket('1 minute', r.ts) AS "time", t.name AS "tag",
+                     avg(r.value) AS value, min(r.quality) AS quality
+              FROM readings r
+              JOIN tags t ON r.tag_id = t.id
+              WHERE t.name = ANY($1::text[]) AND r.ts >= $2 AND r.ts <= $3
+              GROUP BY 1, 2
+              ORDER BY 1 ASC;
+            `;
+            const fbRes = await query(fallbackSql, [tagList, fromDate, toDate]);
+            rows = fbRes.rows;
+        }
+
         res.json({ resolution: targetRes, autoDownsampled: downsampled, count: rows.length, data: rows });
     } catch (err) {
         res.status(500).json({ error: err.message });
