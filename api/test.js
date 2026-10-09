@@ -32,6 +32,7 @@ import {
 
 import { getHighExceptionDedupeKey } from './src/services/highExceptionService.js';
 import { jobRegistry } from './src/services/jobRegistry.js';
+import { extractBatchStatusPayload } from './src/services/batchQueueService.js';
 
 // ============================================================================
 // 1. FORMATTERS & DATE PARSING TESTS
@@ -247,4 +248,49 @@ test('jobRegistry registers, stops, and cleans up jobs safely', async () => {
     await jobRegistry.stopJob('test_key');
     assert.equal(stopped, true);
     assert.equal(jobRegistry.has('test_key'), false);
+});
+
+// ============================================================================
+// 5. BATCH STATUS WEBHOOK & QUEUE PAYLOAD TESTS
+// ============================================================================
+test('extractBatchStatusPayload extracts Started status and batchId correctly', () => {
+    const payload = {
+        Topic: 'batch_status.update',
+        Data: {
+            Batch: {
+                BatchId: 'ff_261009_3_1',
+                ProcessNumber: 'ff_261009_3',
+                ProductSpecificationId: 'FF_test',
+                ErpRecipeId: 'FF_test',
+                StageSpecificationId: 'FF_test',
+                BatchStatus: 'Started',
+                ExecutedDate: '2026-10-09T13:57:22+00:00',
+                ExecutedUser: '318, Supervisor1 CS (Supervisor)',
+                ExecutedUserEmail: 'sv1@cs.com'
+            }
+        }
+    };
+
+    const extracted = extractBatchStatusPayload(payload);
+    assert.equal(extracted.topic, 'batch_status.update');
+    assert.equal(extracted.batchId, 'ff_261009_3_1');
+    assert.equal(extracted.batchStatus, 'Started');
+    assert.equal(extracted.isStarted, true);
+});
+
+test('extractBatchStatusPayload returns isStarted=false for non-Started statuses', () => {
+    const payload = {
+        Topic: 'batch_status.update',
+        Data: {
+            Batch: {
+                BatchId: 'ff_261009_3_1',
+                BatchStatus: 'Completed'
+            }
+        }
+    };
+
+    const extracted = extractBatchStatusPayload(payload);
+    assert.equal(extracted.batchId, 'ff_261009_3_1');
+    assert.equal(extracted.batchStatus, 'Completed');
+    assert.equal(extracted.isStarted, false);
 });

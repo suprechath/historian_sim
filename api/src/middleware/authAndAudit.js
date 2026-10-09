@@ -5,7 +5,13 @@ export async function authAndAudit(req, res, next) {
     const start = performance.now();
     const apiKey = req.headers['x-api-key'];
 
-    const isWebhookRoute = req.path === '/instruction' || req.path === '/status';
+    const isWebhookRoute =
+        req.path === '/instruction' ||
+        req.path === '/status' ||
+        req.baseUrl === '/instruction' ||
+        req.baseUrl === '/status' ||
+        req.originalUrl.includes('/status') ||
+        req.originalUrl.includes('/instruction');
 
     if (!apiKey) {
         if (isWebhookRoute) {

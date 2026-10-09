@@ -11,6 +11,7 @@ import { handleCase1PointInTime } from '../services/case1Service.js';
 import { handleCase2PhaseTimestamp } from '../services/case2Service.js';
 import { handleCase3TimeRange } from '../services/case3Service.js';
 import { handlePrintLabelInstruction } from '../services/printLabelService.js';
+import { assignBatchToQueue, extractBatchStatusPayload } from '../services/batchQueueService.js';
 
 /**
  * Handles incoming BatchLine Instruction Webhook (/instruction)
@@ -92,10 +93,41 @@ export async function handleInstructionWebhook(req, res) {
  */
 export async function handleStatusPost(req, res) {
     try {
-        logger.info('StatusWebhook', 'Received status payload:', req.body);
+        // logger.info('StatusWebhook', 'Received status payload:', req.body);
+        const { isStarted, batchId, topic } = extractBatchStatusPayload(req.body);
+
+        let batchAssignment = null;
+        if (isStarted && batchId) {
+            logger.info('StatusWebhook', `BatchStatus 'Started' detected for BatchId '${batchId}'. Triggering automatic batch queue assignment with startImmediate=true...`);
+            try {
+                const result = await assignBatchToQueue({
+                    batchId,
+                    startImmediate: true,
+                    resetDownstream: false,
+                    resume: false
+                });
+                logger.info('StatusWebhook', `Batch '${result.cleanBatchId}' assigned to queue successfully with status '${result.initialStatus}'.`);
+                batchAssignment = {
+                    assigned: true,
+                    batchId: result.cleanBatchId,
+                    command: result.cmd,
+                    status: result.initialStatus,
+                    queueId: result.queueEntry?.id
+                };
+            } catch (assignErr) {
+                logger.warn('StatusWebhook', `Automatic batch assignment skipped/failed for batch '${batchId}': ${assignErr.message}`);
+                batchAssignment = {
+                    assigned: false,
+                    batchId,
+                    error: assignErr.message
+                };
+            }
+        }
+
         res.json({
             status: 'received',
-            topic: req.body?.Topic || null,
+            topic,
+            ...(batchAssignment ? { batchAssignment } : {}),
             timestamp: new Date()
         });
     } catch (err) {

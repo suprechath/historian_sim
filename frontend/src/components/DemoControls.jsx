@@ -167,231 +167,231 @@ export default function DemoControls({
                     {panelTab === 'batch' ? (
                         /* ---------------- BATCH CONTROL PANEL ---------------- */
                         <div className="batch-ctrl-container">
-                        {/* Custom Batch Form */}
-                        <div className="batch-form-box">
-                            {/* 1. Enter Batch Number */}
-                            <div className="batch-input-label-row">
-                                <label htmlFor="custom-batch-input">Batch Number:</label>
+                            {/* Custom Batch Form */}
+                            <div className="batch-form-box">
+                                {/* 1. Enter Batch Number */}
+                                <div className="batch-input-label-row">
+                                    <label htmlFor="custom-batch-input">Batch Number:</label>
+                                    <button
+                                        type="button"
+                                        className="btn-link-preset"
+                                        onClick={() => {
+                                            const year = new Date().getUTCFullYear();
+                                            const randSuffix = Math.floor(1000 + Math.random() * 9000);
+                                            setBatchInput(`B-${year}-${randSuffix}`);
+                                        }}>
+                                        Auto ID
+                                    </button>
+                                </div>
+
+                                <div className="batch-input-field-wrap">
+                                    <input
+                                        id="custom-batch-input"
+                                        type="text"
+                                        className="batch-text-input mono"
+                                        value={batchInput}
+                                        onChange={(e) => setBatchInput(e.target.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                                handleAssignBatch();
+                                            }
+                                        }}
+                                        placeholder="e.g. B-2026-1001"
+                                        disabled={isSubmitting}
+                                    />
+                                </div>
+
+                                {/* 2. Start immediately checkbox */}
+                                <label className={`batch-check-label ${resetDownstream ? 'disabled' : ''}`}>
+                                    <input
+                                        type="checkbox"
+                                        checked={startImmediate}
+                                        disabled={resetDownstream}
+                                        onChange={(e) => {
+                                            const checked = e.target.checked;
+                                            setStartImmediate(checked);
+                                            if (checked) {
+                                                setResetDownstream(false);
+                                            }
+                                        }}
+                                    />
+                                    <span>Start immediately</span>
+                                </label>
+
+                                {/* 3. Reset all downstream checkbox (disabled when Start immediately is selected) */}
+                                <label className={`batch-check-label ${startImmediate ? 'disabled' : ''}`}>
+                                    <input
+                                        type="checkbox"
+                                        checked={resetDownstream}
+                                        disabled={startImmediate}
+                                        onChange={(e) => {
+                                            const checked = e.target.checked;
+                                            setResetDownstream(checked);
+                                            if (checked) {
+                                                setStartImmediate(false);
+                                            }
+                                        }}
+                                    />
+                                    <span>Reset all downstream</span>
+                                </label>
+
+                                {/* 4. Assign Batch Button */}
                                 <button
                                     type="button"
-                                    className="btn-link-preset"
-                                    onClick={() => {
-                                        const year = new Date().getUTCFullYear();
-                                        const randSuffix = Math.floor(1000 + Math.random() * 9000);
-                                        setBatchInput(`B-${year}-${randSuffix}`);
-                                    }}>
-                                    Auto ID
+                                    className="demo-pill-btn batch-primary-btn"
+                                    onClick={() => handleAssignBatch()}
+                                    disabled={isSubmitting || !batchInput.trim()}
+                                    title={!batchInput.trim() ? 'Enter a batch number' : 'Assign batch to simulator'}>
+                                    <span className="btn-icon">📋</span>
+                                    <span className="btn-text">Assign Batch</span>
                                 </button>
                             </div>
 
-                            <div className="batch-input-field-wrap">
-                                <input
-                                    id="custom-batch-input"
-                                    type="text"
-                                    className="batch-text-input mono"
-                                    value={batchInput}
-                                    onChange={(e) => setBatchInput(e.target.value)}
-                                    onKeyDown={(e) => {
-                                        if (e.key === 'Enter') {
-                                            handleAssignBatch();
-                                        }
-                                    }}
-                                    placeholder="e.g. B-2026-1001"
-                                    disabled={isSubmitting}
-                                />
-                            </div>
+                            {/* Inline Feedback Message */}
+                            {actionMsg && (
+                                <div className={`batch-msg-banner ${actionMsg.type}`}>
+                                    <span className="msg-text">{actionMsg.text}</span>
+                                    <button type="button" onClick={() => setActionMsg(null)} className="msg-close">
+                                        &times;
+                                    </button>
+                                </div>
+                            )}
 
-                            {/* 2. Start immediately checkbox */}
-                            <label className={`batch-check-label ${resetDownstream ? 'disabled' : ''}`}>
-                                <input
-                                    type="checkbox"
-                                    checked={startImmediate}
-                                    disabled={resetDownstream}
-                                    onChange={(e) => {
-                                        const checked = e.target.checked;
-                                        setStartImmediate(checked);
-                                        if (checked) {
-                                            setResetDownstream(false);
-                                        }
-                                    }}
-                                />
-                                <span>Start immediately</span>
-                            </label>
+                            {/* Real-time Status Card */}
+                            <div className="batch-status-panel">
+                                {/* Manual Batch Request Table */}
+                                <div className="batch-status-header">
+                                    <span className="status-title" style={{ color: '#000000' }}>Manual Batch Request</span>
+                                    <span className={`status-pill ${pendingBatches.length > 0 ? 'pill-single' : 'pill-continuous'}`}>
+                                        {pendingBatches.length > 0 ? `${pendingBatches.length} Queued` : '0 Queued'}
+                                    </span>
+                                </div>
 
-                            {/* 3. Reset all downstream checkbox (disabled when Start immediately is selected) */}
-                            <label className={`batch-check-label ${startImmediate ? 'disabled' : ''}`}>
-                                <input
-                                    type="checkbox"
-                                    checked={resetDownstream}
-                                    disabled={startImmediate}
-                                    onChange={(e) => {
-                                        const checked = e.target.checked;
-                                        setResetDownstream(checked);
-                                        if (checked) {
-                                            setStartImmediate(false);
-                                        }
-                                    }}
-                                />
-                                <span>Reset all downstream</span>
-                            </label>
-
-                            {/* 4. Assign Batch Button */}
-                            <button
-                                type="button"
-                                className="demo-pill-btn batch-primary-btn"
-                                onClick={() => handleAssignBatch()}
-                                disabled={isSubmitting || !batchInput.trim()}
-                                title={!batchInput.trim() ? 'Enter a batch number' : 'Assign batch to simulator'}>
-                                <span className="btn-icon">📋</span>
-                                <span className="btn-text">Assign Batch</span>
-                            </button>
-                        </div>
-
-                        {/* Inline Feedback Message */}
-                        {actionMsg && (
-                            <div className={`batch-msg-banner ${actionMsg.type}`}>
-                                <span className="msg-text">{actionMsg.text}</span>
-                                <button type="button" onClick={() => setActionMsg(null)} className="msg-close">
-                                    &times;
-                                </button>
-                            </div>
-                        )}
-
-                        {/* Real-time Status Card */}
-                        <div className="batch-status-panel">
-                            {/* Manual Batch Request Table */}
-                            <div className="batch-status-header">
-                                <span className="status-title" style={{ color: '#000000' }}>Manual Batch Request</span>
-                                <span className={`status-pill ${pendingBatches.length > 0 ? 'pill-single' : 'pill-continuous'}`}>
-                                    {pendingBatches.length > 0 ? `${pendingBatches.length} Queued` : '0 Queued'}
-                                </span>
-                            </div>
-
-                            <div className="manual-batch-table-wrap">
-                                <table className="manual-batch-table">
-                                    <thead>
-                                        <tr>
-                                            <th style={{ width: '40%', color: '#000000' }}>Batch Number</th>
-                                            <th style={{ width: '60%', color: '#000000' }}>Batch status</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {pendingBatches.length === 0 ? (
+                                <div className="manual-batch-table-wrap">
+                                    <table className="manual-batch-table">
+                                        <thead>
                                             <tr>
-                                                <td colSpan="2" className="empty-batch-cell">
-                                                    No pending manual batch requests
-                                                </td>
+                                                <th style={{ width: '40%', color: '#000000' }}>Batch Number</th>
+                                                <th style={{ width: '60%', color: '#000000' }}>Batch status</th>
                                             </tr>
-                                        ) : (
-                                            pendingBatches.map((item) => (
-                                                <tr key={item.id || item.batchId}>
-                                                    <td className="mono batch-id-cell"><b>{item.batchId}</b></td>
-                                                    <td className="batch-status-cell">
-                                                        {item.status === 'waiting_r1'
-                                                            ? 'Wait currect Batch in R1 finished'
-                                                            : 'Waits till current batches finished'}
+                                        </thead>
+                                        <tbody>
+                                            {pendingBatches.length === 0 ? (
+                                                <tr>
+                                                    <td colSpan="2" className="empty-batch-cell">
+                                                        No pending manual batch requests
                                                     </td>
                                                 </tr>
-                                            ))
-                                        )}
-                                    </tbody>
-                                </table>
-                            </div>
+                                            ) : (
+                                                pendingBatches.map((item) => (
+                                                    <tr key={item.id || item.batchId}>
+                                                        <td className="mono batch-id-cell"><b>{item.batchId}</b></td>
+                                                        <td className="batch-status-cell">
+                                                            {item.status === 'waiting_r1'
+                                                                ? 'Wait currect Batch in R1 finished'
+                                                                : 'Waits till current batches finished'}
+                                                        </td>
+                                                    </tr>
+                                                ))
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
 
-                            {/* Active Batch Status for Each Reactor */}
-                            <div className="batch-status-header" style={{ marginTop: '8px' }}>
-                                <span className="status-title" style={{ color: '#000000' }}>Active Batch Status</span>
-                            </div>
-                            <div className="manual-batch-table-wrap">
-                                <table className="manual-batch-table">
-                                    <thead>
-                                        <tr>
-                                            <th style={{ width: '33.33%', textAlign: 'center', color: '#000000' }}>R1</th>
-                                            <th style={{ width: '33.33%', textAlign: 'center', color: '#000000' }}>R2</th>
-                                            <th style={{ width: '33.33%', textAlign: 'center', color: '#000000' }}>R3</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <tr>
-                                            <td className="mono batch-id-cell" style={{ textAlign: 'center' }}>
-                                                <b>{reactors?.R1?.batchId || '-'}</b>
-                                            </td>
-                                            <td className="mono batch-id-cell" style={{ textAlign: 'center' }}>
-                                                <b>{reactors?.R2?.batchId || '-'}</b>
-                                            </td>
-                                            <td className="mono batch-id-cell" style={{ textAlign: 'center' }}>
-                                                <b>{reactors?.R3?.batchId || '-'}</b>
-                                            </td>
-                                        </tr>
-                                    </tbody>
-                                </table>
+                                {/* Active Batch Status for Each Reactor */}
+                                <div className="batch-status-header" style={{ marginTop: '8px' }}>
+                                    <span className="status-title" style={{ color: '#000000' }}>Active Batch Status</span>
+                                </div>
+                                <div className="manual-batch-table-wrap">
+                                    <table className="manual-batch-table">
+                                        <thead>
+                                            <tr>
+                                                <th style={{ width: '33.33%', textAlign: 'center', color: '#000000' }}>R1</th>
+                                                <th style={{ width: '33.33%', textAlign: 'center', color: '#000000' }}>R2</th>
+                                                <th style={{ width: '33.33%', textAlign: 'center', color: '#000000' }}>R3</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <tr>
+                                                <td className="mono batch-id-cell" style={{ textAlign: 'center' }}>
+                                                    <b>{reactors?.R1?.batchId || '-'}</b>
+                                                </td>
+                                                <td className="mono batch-id-cell" style={{ textAlign: 'center' }}>
+                                                    <b>{reactors?.R2?.batchId || '-'}</b>
+                                                </td>
+                                                <td className="mono batch-id-cell" style={{ textAlign: 'center' }}>
+                                                    <b>{reactors?.R3?.batchId || '-'}</b>
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
                             </div>
                         </div>
-                    </div>
-                ) : (
-                    /* ---------------- FAULTS & PHASE PANEL ---------------- */
-                    <div className="faults-ctrl-container">
-                        {/* Target Vessel Selector Tabs */}
-                        <div className="demo-vessel-tabs-row">
-                            <span className="vessel-label">Select Vessel:</span>
-                            <div className="demo-vessel-tabs" role="group" aria-label="Target vessel">
-                                {['R1', 'R2', 'R3'].map(r => (
-                                    <button
-                                        key={r}
-                                        type="button"
-                                        className={`vessel-tab ${selectedReactor === r ? 'active' : ''}`}
-                                        onClick={() => onSelectReactor && onSelectReactor(r)}>
-                                        {r}
-                                    </button>
-                                ))}
+                    ) : (
+                        /* ---------------- FAULTS & PHASE PANEL ---------------- */
+                        <div className="faults-ctrl-container">
+                            {/* Target Vessel Selector Tabs */}
+                            <div className="demo-vessel-tabs-row">
+                                <span className="vessel-label">Select Vessel:</span>
+                                <div className="demo-vessel-tabs" role="group" aria-label="Target vessel">
+                                    {['R1', 'R2', 'R3'].map(r => (
+                                        <button
+                                            key={r}
+                                            type="button"
+                                            className={`vessel-tab ${selectedReactor === r ? 'active' : ''}`}
+                                            onClick={() => onSelectReactor && onSelectReactor(r)}>
+                                            {r}
+                                        </button>
+                                    ))}
+                                </div>
                             </div>
-                        </div>
 
-                        {/* Fault Triggers */}
-                        <div className="demo-btn-stack">
-                            <button
-                                type="button"
-                                className={`demo-pill-btn ${hasDropout ? 'fault-active' : ''}`}
-                                onClick={() => toggleFault('dropout')}
-                                title={`Toggle sensor dropout fault on ${selectedReactor}.TEMP`}>
-                                <span className={`led-dot ${hasDropout ? 'led-red' : ''}`} />
-                                <span className="btn-text">
-                                    {hasDropout ? 'Recover Sensor' : 'Fail Sensor (Dropout)'}
-                                </span>
-                            </button>
-
-                            <button
-                                type="button"
-                                className={`demo-pill-btn ${hasDrift ? 'fault-active' : ''}`}
-                                onClick={() => toggleFault('drift')}
-                                title={`Toggle temperature drift on ${selectedReactor}.TEMP (+6.0°C fault)`}>
-                                <span className={`led-dot ${hasDrift ? 'led-amber' : ''}`} />
-                                <span className="btn-text">
-                                    {hasDrift ? 'Stop Drift' : 'Start Temp Drift'}
-                                </span>
-                            </button>
-                        </div>
-
-                        {/* Bottom Status / Clear Footer */}
-                        <div className="demo-col-footer" style={{ marginTop: 'auto' }}>
-                            <div className="demo-footer-status">
-                                <span className={`status-indicator ${faults.length > 0 ? 'alarm' : 'ok'}`} />
-                                <span className="status-text">
-                                    {faults.length > 0 ? `${faults.length} Fault(s) Active` : 'No Faults'}
-                                </span>
-                            </div>
-                            {faults.length > 0 && (
+                            {/* Fault Triggers */}
+                            <div className="demo-btn-stack">
                                 <button
                                     type="button"
-                                    className="btn-clear-inline"
-                                    onClick={clearAllFaults}
-                                    title="Clear all injected faults">
-                                    Reset All
+                                    className={`demo-pill-btn ${hasDropout ? 'fault-active' : ''}`}
+                                    onClick={() => toggleFault('dropout')}
+                                    title={`Toggle sensor dropout fault on ${selectedReactor}.TEMP`}>
+                                    <span className={`led-dot ${hasDropout ? 'led-red' : ''}`} />
+                                    <span className="btn-text">
+                                        {hasDropout ? 'Recover Sensor' : 'Fail Sensor (Dropout)'}
+                                    </span>
                                 </button>
-                            )}
+
+                                <button
+                                    type="button"
+                                    className={`demo-pill-btn ${hasDrift ? 'fault-active' : ''}`}
+                                    onClick={() => toggleFault('drift')}
+                                    title={`Toggle temperature drift on ${selectedReactor}.TEMP (+6.0°C fault)`}>
+                                    <span className={`led-dot ${hasDrift ? 'led-amber' : ''}`} />
+                                    <span className="btn-text">
+                                        {hasDrift ? 'Stop Drift' : 'Start Temp Drift'}
+                                    </span>
+                                </button>
+                            </div>
+
+                            {/* Bottom Status / Clear Footer */}
+                            <div className="demo-col-footer" style={{ marginTop: 'auto' }}>
+                                <div className="demo-footer-status">
+                                    <span className={`status-indicator ${faults.length > 0 ? 'alarm' : 'ok'}`} />
+                                    <span className="status-text">
+                                        {faults.length > 0 ? `${faults.length} Fault(s) Active` : 'No Faults'}
+                                    </span>
+                                </div>
+                                {faults.length > 0 && (
+                                    <button
+                                        type="button"
+                                        className="btn-clear-inline"
+                                        onClick={clearAllFaults}
+                                        title="Clear all injected faults">
+                                        Reset All
+                                    </button>
+                                )}
+                            </div>
                         </div>
-                    </div>
-                )}
+                    )}
                 </div>
 
                 {/* Modern Fast-Forward Skip Sequencer Card - Identical position in both tabs */}

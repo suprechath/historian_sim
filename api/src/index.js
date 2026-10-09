@@ -6,6 +6,11 @@ import dotenv from 'dotenv';
 import { query, ensureDefaultApiKey, pool } from './db.js';
 import { authAndAudit } from './middleware/authAndAudit.js';
 import externalRoutes from './routes/external.js';
+import {
+    handleInstructionWebhook,
+    handleStatusPost,
+    handleStatusGet
+} from './controllers/externalController.js';
 import uiRoutes, { ensureSimulationControl } from './routes/ui.js';
 import { startJobsWorker } from './jobsWorker.js';
 import { ensureForwardedExceptionsTable } from './dal/externalDal.js';
@@ -34,6 +39,9 @@ app.get('/health', async (req, res) => {
 // 2. Mount External Integration Layer (Authenticated + Audited)
 // Open for external systems (Batchline / MES / ERP) via X-API-Key
 app.use(['/api/v1', '/external'], authAndAudit, externalRoutes);
+app.post('/status', authAndAudit, handleStatusPost);
+app.get('/status', authAndAudit, handleStatusGet);
+app.post('/instruction', authAndAudit, handleInstructionWebhook);
 
 // Middleware: Restrict /ui routes exclusively to the frontend gateway proxy
 const requireFrontendGateway = (req, res, next) => {
