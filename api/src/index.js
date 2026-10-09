@@ -8,6 +8,8 @@ import { authAndAudit } from './middleware/authAndAudit.js';
 import externalRoutes from './routes/external.js';
 import uiRoutes, { ensureSimulationControl } from './routes/ui.js';
 import { startJobsWorker } from './jobsWorker.js';
+import { ensureForwardedExceptionsTable } from './dal/externalDal.js';
+import { jobRegistry } from './services/jobRegistry.js';
 
 // Resolve and load root .env (two levels up from api/src)
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -65,6 +67,7 @@ app.use((err, req, res, next) => {
 // 4. Initialize Database Seed Keys, Dispatcher Worker, and Listen
 await ensureDefaultApiKey();
 await ensureSimulationControl();
+await ensureForwardedExceptionsTable();
 startJobsWorker();
 
 const server = app.listen(PORT, () => {
@@ -79,6 +82,7 @@ const server = app.listen(PORT, () => {
 const shutdown = () => {
     console.log('\n[Historian Service] Gracefully terminating HTTP server & DB pool...');
     server.close(async () => {
+        await jobRegistry.stopAllJobs();
         await pool.end();
         console.log('[Historian Service] DB connection pool closed. Process terminated.');
         process.exit(0);
