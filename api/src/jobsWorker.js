@@ -1,7 +1,12 @@
 import { query } from './db.js';
+import { logger } from './utils/logger.js';
+
+let workerInterval = null;
 
 export function startJobsWorker() {
-    setInterval(async () => {
+    if (workerInterval) return;
+
+    workerInterval = setInterval(async () => {
         try {
             // 1. Fetch active push jobs due for execution
             const { rows: jobs } = await query(`
@@ -92,7 +97,14 @@ export function startJobsWorker() {
         `, [nextSeq, nextFire, job.id]);
             }
         } catch (err) {
-            console.error('Monitoring job worker error:', err.message);
+            logger.error('MonitoringJobWorker', 'Worker iteration error', { error: err.message });
         }
     }, 3000);
+}
+
+export function stopJobsWorker() {
+    if (workerInterval) {
+        clearInterval(workerInterval);
+        workerInterval = null;
+    }
 }
