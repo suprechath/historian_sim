@@ -3,3 +3,5 @@
 simulator/node_modules
 api/node_modules
 frontend/node_modules
+integration-service/node_modules
+grafana
