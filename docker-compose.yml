@@ -91,20 +91,36 @@ services:
     #   - "${FRONTEND_PORT:-80}:80"
     depends_on:
       - api
-      - integration-service
+      # - integration-service
+      - adminer
 
-  # Cloudflare Tunnel Container
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: historian_tunnel
+  # Tunnel 1: Dedicated to Operator UI & Telemetry Stream
+  ngrok-ui:
+    image: ngrok/ngrok:latest
+    container_name: historian_ngrok_ui
     restart: unless-stopped
-    command: tunnel --no-autoupdate run
+    command:
+      - "http"
+      - "--url=${NGROK_DOMAIN_UI}"
+      - "frontend:80"
     environment:
-      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN_UI}
     depends_on:
       - frontend
+
+  # Tunnel 2: Dedicated strictly to BatchLine / External Webhooks
+  ngrok-integration:
+    image: ngrok/ngrok:latest
+    container_name: historian_ngrok_integration
+    restart: unless-stopped
+    command:
+      - "http"
+      - "--url=${NGROK_DOMAIN_INTEGRATION}"
+      - "integration-service:4001"
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN_INTEGRATION}
+    depends_on:
       - integration-service
-      - adminer
   # grafana:
   #   image: grafana/grafana:latest
   #   container_name: historian_grafana
