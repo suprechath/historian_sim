@@ -60,6 +60,7 @@ export default function PlantOverview() {
                         selectedReactor={selectedReactor}
                         onSelectReactor={setSelectedReactor}
                         clock={stream.clock}
+                        tags={stream.tags}
                     />
                 </div>
 

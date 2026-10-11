@@ -164,7 +164,7 @@ function formatTimeShort(d, rangeHours) {
     return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${date.toTimeString().slice(0, 5)}`;
 }
 
-export default function TrendCanvas({ selectedReactor, onSelectReactor, clock }) {
+export default function TrendCanvas({ selectedReactor, onSelectReactor, clock, tags = [] }) {
     const containerRef = useRef(null);
     const canvasRef = useRef(null);
     const [readings, setReadings] = useState([]);
@@ -186,6 +186,11 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
             return false;
         }
     });
+
+    const clockRef = useRef(clock);
+    useEffect(() => {
+        clockRef.current = clock;
+    }, [clock]);
 
     const toggleCollapse = () => {
         setIsCollapsed(prev => {
@@ -247,7 +252,7 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
         }
     }, [isCollapsed]);
 
-    // Fetch time-series readings and phase events
+    // 1. Fetch time-series readings and phase events (Initial load, range/preset changes, and 60s background sync)
     useEffect(() => {
         if (isCollapsed) return;
         let isSubscribed = true;
@@ -258,7 +263,7 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
                 fromDate = customRange.from;
                 toDate = customRange.to;
             } else {
-                const nowTime = clock ? new Date(clock) : new Date();
+                const nowTime = clockRef.current ? new Date(clockRef.current) : new Date();
                 fromDate = new Date(nowTime.getTime() - timeRange * 3600 * 1000);
                 toDate = nowTime;
             }
@@ -278,28 +283,54 @@ export default function TrendCanvas({ selectedReactor, onSelectReactor, clock })
         };
 
         fetchData();
-        const timer = setInterval(fetchData, 10000);
+        const timer = setInterval(fetchData, 60000); // 60s gentle background sync
 
         return () => {
             isSubscribed = false;
             clearInterval(timer);
         };
-    }, [isCollapsed, selectedReactor, timeRange, customRange, customRange ? null : clock, activeParams]);
+    }, [isCollapsed, selectedReactor, timeRange, customRange, activeParams]);
 
-    // Compute latest readings map for live legend display
+    // 2. 1-Second Live Stream Point Append (0 extra network requests to DB)
+    useEffect(() => {
+        if (isCollapsed || customRange || !clock || !tags || tags.length === 0) return;
+
+        const timestampStr = new Date(clock).toISOString();
+        const prefix = `${selectedReactor}.`;
+        const currentPoints = tags
+            .filter(t => t.name && t.name.startsWith(prefix) && t.val !== undefined && t.val !== null)
+            .map(t => ({
+                time: timestampStr,
+                tag: t.name,
+                value: Number(t.val),
+                quality: 0
+            }));
+
+        if (currentPoints.length === 0) return;
+
+        setReadings(prev => {
+            // Memory guard: prune points older than time window to keep memory flat
+            const cutoffTime = new Date(new Date(clock).getTime() - (timeRange + 0.1) * 3600 * 1000).toISOString();
+            const trimmed = prev.length > 30000 ? prev.filter(r => r.time >= cutoffTime) : prev;
+            return [...trimmed, ...currentPoints];
+        });
+    }, [clock, tags, selectedReactor, customRange, timeRange, isCollapsed]);
+
+    // 3. Compute latest readings map for live legend display (0-latency from live SSE stream)
     const latestValues = useMemo(() => {
         const map = {};
         activeParams.forEach(param => {
             const fullTagName = `${selectedReactor}.${param}`;
-            const series = readings.filter(r => r.tag === fullTagName && r.value !== null);
-            if (series.length > 0) {
-                map[param] = series[series.length - 1].value;
+            const liveTag = Array.isArray(tags) ? tags.find(t => t.name === fullTagName) : null;
+            if (liveTag && liveTag.val !== undefined && liveTag.val !== null) {
+                map[param] = liveTag.val;
             } else {
-                map[param] = null;
+                const series = readings.filter(r => r.tag === fullTagName && r.value !== null);
+                map[param] = series.length > 0 ? series[series.length - 1].value : null;
             }
         });
         return map;
-    }, [readings, activeParams, selectedReactor]);
+    }, [readings, activeParams, selectedReactor, tags]);
 
     // Canvas boundary calculations
     const bounds = useMemo(() => {

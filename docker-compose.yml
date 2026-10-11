@@ -95,16 +95,19 @@ services:
       - adminer
 
   # Tunnel 1: Dedicated to Operator UI & Telemetry Stream
-  ngrok-ui:
-    image: ngrok/ngrok:latest
-    container_name: historian_ngrok_ui
-    restart: unless-stopped
-    command:
-      - "http"
-      - "--url=${NGROK_DOMAIN_UI}"
-      - "frontend:80"
+  tailscale-ui:
+    image: tailscale/tailscale:latest
+    container_name: historian_tailscale_ui
+    hostname: historian-ui
     environment:
-      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN_UI}
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=true
+      - TS_SERVE_CONFIG=/config/serve.json
+    volumes:
+      - tailscale_data:/var/lib/tailscale
+      - ./tailscale/serve.json:/config/serve.json:ro
+    restart: unless-stopped
     depends_on:
       - frontend
 
@@ -148,3 +151,4 @@ services:
 
 volumes:
   pgdata: # grafanadata:
+  tailscale_data:
