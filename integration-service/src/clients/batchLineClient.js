@@ -115,86 +115,87 @@ export async function sendBatchLineInstructionUpdate({ refInstruction, batchId, 
 
         let attempt = 0;
         let chunkDelivered = false;
+        console.log("payload", payload);
 
-        while (attempt <= maxRetries) {
-            try {
-                const cbRes = await fetch(callbackUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'x-api-key': apiKey
-                    },
-                    body: JSON.stringify(payload),
-                    signal: AbortSignal.timeout(EXTERNAL_CONFIG.HTTP_TIMEOUT_MS)
-                });
+        // while (attempt <= maxRetries) {
+        //     try {
+        //         const cbRes = await fetch(callbackUrl, {
+        //             method: 'POST',
+        //             headers: {
+        //                 'Content-Type': 'application/json',
+        //                 'x-api-key': apiKey
+        //             },
+        //             body: JSON.stringify(payload),
+        //             signal: AbortSignal.timeout(EXTERNAL_CONFIG.HTTP_TIMEOUT_MS)
+        //         });
 
-                const cbText = await cbRes.text();
-                let cbData;
-                try { cbData = JSON.parse(cbText); } catch { cbData = cbText; }
+        //         const cbText = await cbRes.text();
+        //         let cbData;
+        //         try { cbData = JSON.parse(cbText); } catch { cbData = cbText; }
 
-                if (cbRes.ok) {
-                    logger.info('BatchLineCallback', `Chunk ${chunkIdx + 1}/${totalChunks} (${chunk.length} items) delivered successfully`);
-                    lastResult = {
-                        targetUrl: callbackUrl,
-                        status: cbRes.status,
-                        ok: true,
-                        data: cbData
-                    };
-                    chunkDelivered = true;
-                    break;
-                }
+        //         if (cbRes.ok) {
+        //             logger.info('BatchLineCallback', `Chunk ${chunkIdx + 1}/${totalChunks} (${chunk.length} items) delivered successfully`);
+        //             lastResult = {
+        //                 targetUrl: callbackUrl,
+        //                 status: cbRes.status,
+        //                 ok: true,
+        //                 data: cbData
+        //             };
+        //             chunkDelivered = true;
+        //             break;
+        //         }
 
-                if (cbRes.status >= 500 && attempt < maxRetries) {
-                    attempt++;
-                    logger.warn('BatchLineCallback', `Chunk ${chunkIdx + 1}/${totalChunks} server error ${cbRes.status}. Retrying attempt ${attempt}/${maxRetries}...`);
-                    await sleep(500 * Math.pow(2, attempt));
-                    continue;
-                }
+        //         if (cbRes.status >= 500 && attempt < maxRetries) {
+        //             attempt++;
+        //             logger.warn('BatchLineCallback', `Chunk ${chunkIdx + 1}/${totalChunks} server error ${cbRes.status}. Retrying attempt ${attempt}/${maxRetries}...`);
+        //             await sleep(500 * Math.pow(2, attempt));
+        //             continue;
+        //         }
 
-                logger.warn('BatchLineCallback', `Chunk ${chunkIdx + 1}/${totalChunks} rejected with status ${cbRes.status}:`, cbData);
-                await reportError(`[BatchLine Callback Error]: Chunk ${chunkIdx + 1}/${totalChunks} failed (HTTP ${cbRes.status})`, { batchId, callbackKey }, cbData);
-                return {
-                    targetUrl: callbackUrl,
-                    status: cbRes.status,
-                    ok: false,
-                    chunksCompleted: chunkIdx,
-                    totalChunks,
-                    data: cbData
-                };
-            } catch (cbErr) {
-                if (attempt < maxRetries) {
-                    attempt++;
-                    logger.warn('BatchLineCallback', `Chunk ${chunkIdx + 1}/${totalChunks} network error (${cbErr.message}). Retrying attempt ${attempt}/${maxRetries}...`);
-                    await sleep(500 * Math.pow(2, attempt));
-                    continue;
-                }
-                await reportError(`[BatchLine Callback Error]: Chunk ${chunkIdx + 1}/${totalChunks} network error: ${cbErr.message}`, { batchId, callbackKey });
-                return {
-                    targetUrl: callbackUrl,
-                    status: 500,
-                    ok: false,
-                    chunksCompleted: chunkIdx,
-                    totalChunks,
-                    error: cbErr.message
-                };
-            }
-        }
+        //         logger.warn('BatchLineCallback', `Chunk ${chunkIdx + 1}/${totalChunks} rejected with status ${cbRes.status}:`, cbData);
+        //         await reportError(`[BatchLine Callback Error]: Chunk ${chunkIdx + 1}/${totalChunks} failed (HTTP ${cbRes.status})`, { batchId, callbackKey }, cbData);
+        //         return {
+        //             targetUrl: callbackUrl,
+        //             status: cbRes.status,
+        //             ok: false,
+        //             chunksCompleted: chunkIdx,
+        //             totalChunks,
+        //             data: cbData
+        //         };
+        //     } catch (cbErr) {
+        //         if (attempt < maxRetries) {
+        //             attempt++;
+        //             logger.warn('BatchLineCallback', `Chunk ${chunkIdx + 1}/${totalChunks} network error (${cbErr.message}). Retrying attempt ${attempt}/${maxRetries}...`);
+        //             await sleep(500 * Math.pow(2, attempt));
+        //             continue;
+        //         }
+        //         await reportError(`[BatchLine Callback Error]: Chunk ${chunkIdx + 1}/${totalChunks} network error: ${cbErr.message}`, { batchId, callbackKey });
+        //         return {
+        //             targetUrl: callbackUrl,
+        //             status: 500,
+        //             ok: false,
+        //             chunksCompleted: chunkIdx,
+        //             totalChunks,
+        //             error: cbErr.message
+        //         };
+        //     }
+        // }
 
-        if (!chunkDelivered) {
-            return {
-                targetUrl: callbackUrl,
-                status: 500,
-                ok: false,
-                chunksCompleted: chunkIdx,
-                totalChunks,
-                error: `Failed to deliver chunk ${chunkIdx + 1}/${totalChunks}`
-            };
-        }
+        // if (!chunkDelivered) {
+        //     return {
+        //         targetUrl: callbackUrl,
+        //         status: 500,
+        //         ok: false,
+        //         chunksCompleted: chunkIdx,
+        //         totalChunks,
+        //         error: `Failed to deliver chunk ${chunkIdx + 1}/${totalChunks}`
+        //     };
+        // }
 
-        // Brief delay between chunk dispatches to prevent rate-limiting
-        if (chunkIdx < totalChunks - 1 && EXTERNAL_CONFIG.PUSH_DELAY_MS > 0) {
-            await sleep(EXTERNAL_CONFIG.PUSH_DELAY_MS);
-        }
+        // // Brief delay between chunk dispatches to prevent rate-limiting
+        // if (chunkIdx < totalChunks - 1 && EXTERNAL_CONFIG.PUSH_DELAY_MS > 0) {
+        //     await sleep(EXTERNAL_CONFIG.PUSH_DELAY_MS);
+        // }
     }
 
     logger.info('BatchLineCallback', `All ${totalChunks} chunk(s) (${normalizedActualResult.length} total items) successfully updated for instruction ${refInstruction}`);

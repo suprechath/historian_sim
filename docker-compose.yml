@@ -7,8 +7,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-    # ports:
-    #   - "${POSTGRES_PORT}:5432"
+    ports:
+      - "${POSTGRES_PORT}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db:/docker-entrypoint-initdb.d:ro
@@ -61,28 +61,28 @@ services:
       timescaledb:
         condition: service_healthy
 
-  integration-service:
-    build: ./integration-service
-    container_name: historian_integration
-    restart: unless-stopped
-    environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}
-      PORT: 4001
-      INTEGRATION_PORT: 4001
-      API_KEY_EXTERNAL: ${API_KEY_EXTERNAL}
-      API_KEY_TEST: ${API_KEY_TEST}
-      BATCHLINE_BASE_URL: ${BATCHLINE_BASE_URL}
-      BATCHLINE_API_KEY: ${BATCHLINE_API_KEY}
-      BATCHLINE_NOTIFICATION_URL: ${BATCHLINE_NOTIFICATION_URL}
-      MAKE_HIGH_EXCEPTION_WEBHOOK_URL: ${MAKE_HIGH_EXCEPTION_WEBHOOK_URL}
-      x_make_apikey: ${x_make_apikey}
-    # ports:
-    #   - "${INTEGRATION_PORT:-4001}:4001"
-    volumes:
-      - ./integration-service/src:/app/src
-    depends_on:
-      timescaledb:
-        condition: service_healthy
+  # integration-service:
+  #   build: ./integration-service
+  #   container_name: historian_integration
+  #   restart: unless-stopped
+  #   environment:
+  #     DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}
+  #     PORT: 4001
+  #     INTEGRATION_PORT: 4001
+  #     API_KEY_EXTERNAL: ${API_KEY_EXTERNAL}
+  #     API_KEY_TEST: ${API_KEY_TEST}
+  #     BATCHLINE_BASE_URL: ${BATCHLINE_BASE_URL}
+  #     BATCHLINE_API_KEY: ${BATCHLINE_API_KEY}
+  #     BATCHLINE_NOTIFICATION_URL: ${BATCHLINE_NOTIFICATION_URL}
+  #     MAKE_HIGH_EXCEPTION_WEBHOOK_URL: ${MAKE_HIGH_EXCEPTION_WEBHOOK_URL}
+  #     x_make_apikey: ${x_make_apikey}
+  #   # ports:
+  #   #   - "${INTEGRATION_PORT:-4001}:4001"
+  #   volumes:
+  #     - ./integration-service/src:/app/src
+  #   depends_on:
+  #     timescaledb:
+  #       condition: service_healthy
   frontend:
     build: ./frontend
     container_name: historian_frontend
@@ -110,20 +110,20 @@ services:
     restart: unless-stopped
     depends_on:
       - frontend
-
   # Tunnel 2: Dedicated strictly to BatchLine / External Webhooks
-  ngrok-integration:
-    image: ngrok/ngrok:latest
-    container_name: historian_ngrok_integration
-    restart: unless-stopped
-    command:
-      - "http"
-      - "--url=${NGROK_DOMAIN_INTEGRATION}"
-      - "integration-service:4001"
-    environment:
-      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN_INTEGRATION}
-    depends_on:
-      - integration-service
+  # ngrok-integration:
+  #   image: ngrok/ngrok:latest
+  #   container_name: historian_ngrok_integration
+  #   restart: unless-stopped
+  #   command:
+  #     - "http"
+  #     - "--url=${NGROK_DOMAIN_INTEGRATION}"
+  #     - "integration-service:4001"
+  #   environment:
+  #     - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN_INTEGRATION}
+  #   depends_on:
+  #     - integration-service
+
   # grafana:
   #   image: grafana/grafana:latest
   #   container_name: historian_grafana

@@ -44,6 +44,145 @@ export async function ensureForwardedExceptionsTable() {
     return ensureTablePromise;
 }
 
+let ensureScheduledTablePromise = null;
+
+/**
+ * Ensures the persistent scheduled instructions table exists in PostgreSQL.
+ */
+export async function ensureScheduledInstructionsTable() {
+    if (!ensureScheduledTablePromise) {
+        ensureScheduledTablePromise = (async () => {
+            try {
+                await query(`
+                    CREATE TABLE IF NOT EXISTS scheduled_instructions (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        case_type INT NOT NULL,
+                        batch_id TEXT,
+                        ref_instruction TEXT NOT NULL,
+                        tag_id INT,
+                        scheduled_time TIMESTAMPTZ NOT NULL,
+                        payload JSONB NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        attempts INT NOT NULL DEFAULT 0,
+                        max_attempts INT NOT NULL DEFAULT 3,
+                        last_error TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        executed_at TIMESTAMPTZ
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_scheduled_instructions_due 
+                    ON scheduled_instructions (scheduled_time, status) 
+                    WHERE status = 'pending';
+
+                    CREATE INDEX IF NOT EXISTS idx_scheduled_instructions_active_ref 
+                    ON scheduled_instructions (batch_id, ref_instruction) 
+                    WHERE status = 'pending';
+                `);
+                logger.info('DAL', 'Scheduled instructions persistent queue table verified.');
+            } catch (err) {
+                logger.warn('DAL', 'Could not ensure scheduled_instructions table:', err.message);
+            }
+        })();
+    }
+    return ensureScheduledTablePromise;
+}
+
+/**
+ * Enqueues a scheduled instruction to the persistent PostgreSQL queue.
+ * Automatically supersedes any previous pending task for the same (batch_id, ref_instruction).
+ */
+export async function enqueueScheduledInstruction({
+    caseType,
+    batchId,
+    refInstruction,
+    tagId,
+    scheduledTime,
+    payload,
+    maxAttempts = 3
+}) {
+    await ensureScheduledInstructionsTable();
+
+    // Cancel any previous pending task for the same instruction
+    await query(`
+        UPDATE scheduled_instructions
+        SET status = 'cancelled', last_error = 'Superseded by newer schedule'
+        WHERE batch_id IS NOT DISTINCT FROM $1
+          AND ref_instruction = $2
+          AND status = 'pending';
+    `, [batchId, refInstruction]);
+
+    const { rows } = await query(`
+        INSERT INTO scheduled_instructions (case_type, batch_id, ref_instruction, tag_id, scheduled_time, payload, max_attempts)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id, scheduled_time;
+    `, [caseType, batchId, refInstruction, tagId, scheduledTime, JSON.stringify(payload), maxAttempts]);
+
+    return rows[0];
+}
+
+/**
+ * Atomically claims up to `limit` due scheduled tasks using FOR UPDATE SKIP LOCKED.
+ */
+export async function claimDueScheduledInstructions(limit = 10) {
+    await ensureScheduledInstructionsTable();
+
+    const { rows } = await query(`
+        WITH due AS (
+            SELECT id
+            FROM scheduled_instructions
+            WHERE status = 'pending' AND scheduled_time <= NOW()
+            ORDER BY scheduled_time ASC
+            LIMIT $1
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE scheduled_instructions s
+        SET status = 'processing', attempts = attempts + 1
+        FROM due
+        WHERE s.id = due.id
+        RETURNING s.id, s.case_type, s.batch_id, s.ref_instruction, s.tag_id, s.scheduled_time, s.payload, s.attempts, s.max_attempts;
+    `, [limit]);
+
+    return rows;
+}
+
+/**
+ * Marks a scheduled instruction as completed.
+ */
+export async function markScheduledInstructionCompleted(id) {
+    await query(`
+        UPDATE scheduled_instructions
+        SET status = 'completed', executed_at = NOW(), last_error = NULL
+        WHERE id = $1;
+    `, [id]);
+}
+
+/**
+ * Marks a scheduled instruction as failed, retrying if under max_attempts.
+ */
+export async function markScheduledInstructionFailed(id, errorMessage, canRetry = true) {
+    await query(`
+        UPDATE scheduled_instructions
+        SET status = CASE WHEN attempts >= max_attempts OR NOT $2 THEN 'failed' ELSE 'pending' END,
+            last_error = $3,
+            executed_at = CASE WHEN attempts >= max_attempts OR NOT $2 THEN NOW() ELSE NULL END
+        WHERE id = $1;
+    `, [id, canRetry, errorMessage]);
+}
+
+/**
+ * Cancels pending scheduled instructions matching batchId and refInstruction.
+ */
+export async function cancelPendingScheduledInstruction(batchId, refInstruction) {
+    await ensureScheduledInstructionsTable();
+    await query(`
+        UPDATE scheduled_instructions
+        SET status = 'cancelled', last_error = 'Explicitly cancelled'
+        WHERE batch_id IS NOT DISTINCT FROM $1
+          AND ref_instruction = $2
+          AND status = 'pending';
+    `, [batchId, refInstruction]);
+}
+
 /**
  * Checks if an alert was already sent for this instruction key within the cooldown window.
  */

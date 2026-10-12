@@ -11,7 +11,14 @@ import {
     extractInterpretMapping
 } from '../utils/instructionParsers.js';
 import { reportError, sendBatchLineInstructionUpdate } from '../clients/batchLineClient.js';
-import { resolveTag, getNearestReading, findRecordTimeNearestToValue } from '../dal/externalDal.js';
+import {
+    resolveTag,
+    getNearestReading,
+    findRecordTimeNearestToValue,
+    enqueueScheduledInstruction
+} from '../dal/externalDal.js';
+
+const MAX_FUTURE_SCHEDULE_HOURS = 48;
 
 /**
  * Case 1: Point-in-time value lookup and [TIME: VALUE=...] trigger processing
@@ -46,6 +53,13 @@ export async function handleCase1PointInTime(ctx, res) {
         }
 
         const afterTime = parsedRefTime;
+
+        if (afterTime.getTime() > Date.now() + 1000) {
+            const errMsg = `RefTime (${afterTime.toISOString()}) cannot be in the future for [TIME: VALUE=...] milestone trigger`;
+            await reportError(`[BatchLine Case 1]: ${errMsg}`, ctx);
+            return res.status(400).json({ error: errMsg });
+        }
+
         const targetRef = ctx.refInstruction;
         logger.info('Case1', `Processing ${triggers.length} time trigger(s) for tag "${tag.name}" after RefTime (${afterTime.toISOString()}). Target instruction: ${targetRef}`);
 
@@ -135,6 +149,51 @@ export async function handleCase1PointInTime(ctx, res) {
 
     // 2. Default Point-in-Time Value Lookup
     const interpretConfig = extractInterpretMapping(fullDesc);
+    const nowMs = Date.now();
+    const hasFutureRefTime = parsedRefTime && !isNaN(parsedRefTime.getTime()) && (parsedRefTime.getTime() - nowMs > 1000);
+
+    // Option A: Persistent Database-Backed Scheduled Queue when RefTime is set in the future
+    if (hasFutureRefTime) {
+        const delayMs = parsedRefTime.getTime() - nowMs;
+        const maxDelayMs = MAX_FUTURE_SCHEDULE_HOURS * 3600 * 1000;
+
+        if (delayMs > maxDelayMs) {
+            const errMsg = `RefTime (${parsedRefTime.toISOString()}) exceeds maximum future scheduling limit of ${MAX_FUTURE_SCHEDULE_HOURS} hours`;
+            await reportError(`[BatchLine Case 1]: ${errMsg}`, ctx);
+            return res.status(400).json({ error: errMsg });
+        }
+
+        const queued = await enqueueScheduledInstruction({
+            caseType: 1,
+            batchId: ctx.batchId,
+            refInstruction: ctx.refInstruction,
+            tagId: tag.id,
+            scheduledTime: parsedRefTime,
+            payload: {
+                ctx,
+                tagName: tag.name,
+                displayDigits: tag.display_digits,
+                fullDesc
+            }
+        });
+
+        logger.info('Case1', `RefTime is in the future (${parsedRefTime.toISOString()}). Enqueued persistent database task ${queued.id} for tag "${tag.name}" (RefInstruction: ${ctx.refInstruction})...`);
+
+        return res.json({
+            status: 'scheduled',
+            case: 1,
+            job_id: queued.id,
+            batch_id: ctx.batchId,
+            tag: tag.name,
+            target_instruction: ctx.refInstruction,
+            scheduled_time: parsedRefTime.toISOString(),
+            delay_seconds: Math.round(delayMs / 1000),
+            interpret: interpretConfig ? { raw: interpretConfig.raw, mapping: interpretConfig.mapping } : null,
+            message: `Instruction scheduled in persistent queue. Value will be read and recorded to BatchLine when scheduled RefTime elapses in ${Math.round(delayMs / 1000)}s.`
+        });
+    }
+
+    // Synchronous execution (RefTime is in the past or current)
     const targetLookupTime = (parsedRefTime && !isNaN(parsedRefTime.getTime())) ? parsedRefTime : new Date();
     const reading = await getNearestReading(tag.id, targetLookupTime);
     if (!reading) {
@@ -187,4 +246,53 @@ export async function handleCase1PointInTime(ctx, res) {
         },
         callback: callbackResult
     });
+}
+
+/**
+ * Worker execution handler for persistent scheduled Case 1 instructions.
+ * Called by scheduledInstructionWorker when scheduled_time is reached.
+ */
+export async function executeScheduledCase1(task) {
+    const payload = typeof task.payload === 'string' ? JSON.parse(task.payload) : task.payload;
+    const { ctx, tagName, displayDigits, fullDesc } = payload;
+
+    const interpretConfig = extractInterpretMapping(fullDesc);
+    const reading = await getNearestReading(task.tag_id, task.scheduled_time);
+
+    if (!reading) {
+        const errMsg = `No reading or snapshot found for tag "${tagName || task.tag_id}" at scheduled time`;
+        await reportError(`[BatchLine Case 1 Worker]: ${errMsg}`, ctx);
+        throw new Error(errMsg);
+    }
+
+    const standardFormattedValue = formatReadingValue(reading.value, displayDigits);
+    const formattedValue = interpretConfig ? interpretConfig.interpret(reading.value, standardFormattedValue) : standardFormattedValue;
+    const executedTimestamp = formatExecutedTimestamp(reading.ts);
+
+    if (interpretConfig) {
+        logger.info('Case1Worker', `Applied [INTERPRET] mapping for tag "${tagName}": raw ${reading.value} (${standardFormattedValue}) -> "${formattedValue}"`);
+    }
+
+    const callbackResult = await sendBatchLineInstructionUpdate({
+        refInstruction: task.ref_instruction,
+        batchId: task.batch_id,
+        callbackKey: ctx?.callbackKey,
+        actualResult: [
+            {
+                repeat_no: 1,
+                value: formattedValue,
+                executed_timestamp: executedTimestamp,
+                executed_user_email: ctx?.triggeredByEmail
+            }
+        ]
+    });
+
+    if (!callbackResult?.ok) {
+        const errMsg = callbackResult?.data?.error?.detail || callbackResult?.error || 'Unknown BatchLine update failure';
+        await reportError(`[BatchLine Case 1 Worker]: Failed to update instruction for task ${task.id}`, ctx, errMsg);
+        throw new Error(`BatchLine update failed: ${errMsg}`);
+    }
+
+    logger.info('Case1Worker', `Successfully executed scheduled task ${task.id} for tag "${tagName}" with value "${formattedValue}"`);
+    return callbackResult;
 }

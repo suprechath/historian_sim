@@ -342,3 +342,30 @@ test('requireApiKey rejects requests missing X-API-Key with 401', async () => {
     assert.equal(statusCode, 401);
     assert.match(jsonBody.error, /Missing required X-API-Key/);
 });
+
+// ============================================================================
+// 9. SCHEDULED INSTRUCTION WORKER & EXTENSIBLE DISPATCHER TESTS
+// ============================================================================
+import {
+    registerCaseDispatcher,
+    startScheduledInstructionWorker,
+    stopScheduledInstructionWorker
+} from './src/services/scheduledInstructionWorker.js';
+import { executeScheduledCase1 } from './src/services/case1Service.js';
+
+test('registerCaseDispatcher allows registering handlers for different case types', () => {
+    let customCaseExecuted = false;
+    registerCaseDispatcher(99, async (task) => {
+        customCaseExecuted = true;
+        assert.equal(task.case_type, 99);
+    });
+
+    assert.equal(typeof executeScheduledCase1, 'function');
+    assert.equal(typeof startScheduledInstructionWorker, 'function');
+    assert.equal(typeof stopScheduledInstructionWorker, 'function');
+});
+
+test('scheduledInstructionWorker starts and stops cleanly without errors', () => {
+    startScheduledInstructionWorker(60000); // 60s test interval
+    stopScheduledInstructionWorker();
+});

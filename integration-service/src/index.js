@@ -9,9 +9,10 @@ import {
     handleStatusPost,
     handleStatusGet
 } from './controllers/externalController.js';
-import { ensureForwardedExceptionsTable } from './dal/externalDal.js';
+import { ensureForwardedExceptionsTable, ensureScheduledInstructionsTable } from './dal/externalDal.js';
 import { ensureSimulationControl } from './services/batchQueueService.js';
 import { jobRegistry } from './services/jobRegistry.js';
+import { startScheduledInstructionWorker, stopScheduledInstructionWorker } from './services/scheduledInstructionWorker.js';
 import { logger } from './utils/logger.js';
 
 const app = express();
@@ -70,6 +71,8 @@ app.use((err, req, res, next) => {
 await ensureDefaultApiKey();
 await ensureSimulationControl();
 await ensureForwardedExceptionsTable();
+await ensureScheduledInstructionsTable();
+startScheduledInstructionWorker();
 
 const server = app.listen(PORT, () => {
     console.log(`\n======================================================`);
@@ -83,6 +86,7 @@ const server = app.listen(PORT, () => {
 // 6. Graceful Termination Handling
 const shutdown = () => {
     logger.info('HistorianIntegrationService', 'Gracefully terminating HTTP server & DB pool...');
+    stopScheduledInstructionWorker();
     server.close(async () => {
         try {
             await jobRegistry.stopAllJobs();
