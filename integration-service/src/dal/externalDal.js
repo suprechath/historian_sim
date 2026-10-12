@@ -116,6 +116,23 @@ export async function claimHighExceptions(candidates = []) {
 }
 
 /**
+ * Releases claimed exception dedupe keys if external dispatch fails.
+ */
+export async function releaseClaimedHighExceptions(candidates = []) {
+    if (!candidates || candidates.length === 0) return;
+    try {
+        const keys = candidates.map(c => c.dedupeKey).filter(Boolean);
+        if (keys.length === 0) return;
+        await query(`
+            DELETE FROM forwarded_high_exceptions
+            WHERE dedupe_key = ANY($1::text[]);
+        `, [keys]);
+    } catch (err) {
+        logger.warn('DAL', 'Failed to release claimed exceptions:', err.message);
+    }
+}
+
+/**
  * Resolves a tag record from refElement (e.g. "R1.TEMP" or "Reactor 1.TEMP").
  */
 export async function resolveTag(refElement, ctx = null) {

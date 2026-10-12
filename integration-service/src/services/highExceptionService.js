@@ -5,7 +5,8 @@ import { sendHighExceptionToMake } from '../clients/makeClient.js';
 import {
     checkInstructionAlertCooldown,
     recordInstructionAlert,
-    claimHighExceptions
+    claimHighExceptions,
+    releaseClaimedHighExceptions
 } from '../dal/externalDal.js';
 
 /**
@@ -131,7 +132,23 @@ export async function checkAndForwardHighExceptions(body = {}) {
 
     logger.info('HighException', `Atomically claimed ${totalCount} new High Exception(s). Dispatching consolidated alert to Make.com...`);
 
-    // 6. Record alert dispatch timestamp in PostgreSQL for cooldown enforcement
+    // Dispatch exactly ONE consolidated message to Make.com
+    const res = await sendHighExceptionToMake(consolidatedPayload);
+
+    // If external dispatch fails, release claimed exceptions so retry mechanisms can re-attempt delivery
+    if (!res.ok) {
+        logger.error('HighException', `Failed to dispatch alert to Make.com for Batch ${basePayload.BatchId}, Instruction ${basePayload.InstructionId}: ${res.error || `HTTP ${res.status}`}. Releasing claims.`);
+        await releaseClaimedHighExceptions(claimed);
+        return {
+            matched: true,
+            suppressed: false,
+            dispatched: false,
+            error: res.error || `HTTP ${res.status}`,
+            results: [{ payload: consolidatedPayload, result: res }]
+        };
+    }
+
+    // Record alert dispatch timestamp in PostgreSQL for cooldown enforcement ONLY after confirmed dispatch
     await recordInstructionAlert(
         instructionKey,
         basePayload.BatchId,
@@ -140,8 +157,10 @@ export async function checkAndForwardHighExceptions(body = {}) {
         basePayload.InstructionId
     );
 
-    // 7. Send exactly ONE consolidated message to Make.com
-    const res = await sendHighExceptionToMake(consolidatedPayload);
-
-    return { matched: true, suppressed: false, results: [{ payload: consolidatedPayload, result: res }] };
+    return {
+        matched: true,
+        suppressed: false,
+        dispatched: true,
+        results: [{ payload: consolidatedPayload, result: res }]
+    };
 }

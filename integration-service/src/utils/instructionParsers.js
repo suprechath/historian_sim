@@ -194,9 +194,9 @@ export function extractInstructionPayload(body = {}) {
 
     return {
         topic: body.Topic || null,
-        batchId: batch.BatchId || body.batch_id || body.batchid || null,
-        rawEventType: instruction.EventType !== undefined ? instruction.EventType : body.EventType,
-        instructionDescription: instruction.InstructionDescription || instruction.Description || body.InstructionDescription || body.Description || '',
+        batchId: batch.BatchId || null,
+        rawEventType: instruction.EventType !== undefined ? instruction.EventType : null,
+        instructionDescription: instruction.InstructionDescription || body.InstructionDescription || '',
         refElement: cleanPayloadField(instruction.RefElement || body.RefElement),
         refTime: cleanPayloadField(instruction.RefTime || body.RefTime),
         refInstruction: cleanPayloadField(instruction.RefInstruction || body.RefInstruction),
@@ -205,10 +205,8 @@ export function extractInstructionPayload(body = {}) {
         refType: cleanPayloadField(instruction.RefType || body.RefType),
         refStartTime: cleanPayloadField(instruction.RefStartTime || body.RefStartTime),
         refEndTime: cleanPayloadField(instruction.RefEndTime || body.RefEndTime),
-        callbackKey: body.CallbackKey || instruction.CallbackKey || body.callbackkey || null,
-        triggeredByEmail: instruction.TriggeredByEmail || body.TriggeredByEmail || null,
-        rawBody: body,
-        instruction
+        callbackKey: body.CallbackKey || body.callbackkey || null,
+        triggeredByEmail: instruction.TriggeredByEmail || body.TriggeredByEmail || null
     };
 }
 
