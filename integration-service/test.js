@@ -100,13 +100,11 @@ test('cleanPayloadField filters empty/null strings', () => {
 // 2. INSTRUCTION PARSING & REGEX UTILITIES TESTS
 // ============================================================================
 test('extractTimeTriggers extracts targets and values', () => {
-    const text = 'Take reading when [TIME: VALUE=130, REF=INST_130] and [TIME: VALUE=140]';
-    const triggers = extractTimeTriggers(text, 'DEFAULT_REF');
+    const text = 'Take reading when [TIME: VALUE=130] and [TIME: VALUE=140]';
+    const triggers = extractTimeTriggers(text);
     assert.equal(triggers.length, 2);
     assert.equal(triggers[0].targetValue, 130);
-    assert.equal(triggers[0].targetRef, 'INST_130');
     assert.equal(triggers[1].targetValue, 140);
-    assert.equal(triggers[1].targetRef, 'DEFAULT_REF');
 });
 
 test('extractExceptionTriggers extracts exception directives', () => {

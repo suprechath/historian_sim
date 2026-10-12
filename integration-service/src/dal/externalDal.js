@@ -254,75 +254,58 @@ export async function getReadingNearTimestamp(tagId, targetDate, toleranceMs) {
 
 /**
  * Finds the record time in historian nearest to targetValue of a tag after afterTime.
+ * Detects crossing points or closest readings within a reasonable tolerance.
  */
-export async function findRecordTimeNearestToValue(tagId, afterTime, targetValue) {
+export async function findRecordTimeNearestToValue(tagId, afterTime, targetValue, maxTolerance = 2.0) {
     const CHUNK_SIZE = 5000;
     let prevRow = null;
+    let bestRow = null;
+    let minDiff = Infinity;
 
-    const { rows: firstChunk } = await query(`
-        SELECT ts, value
+    // Scan forward in time from afterTime (using index on tag_id, ts)
+    const { rows: chunk } = await query(`
+        SELECT ts, value, quality
         FROM readings
         WHERE tag_id = $1 AND ts >= $2::timestamptz
         ORDER BY ts ASC
         LIMIT $3;
     `, [tagId, afterTime, CHUNK_SIZE]);
 
-    if (!firstChunk || firstChunk.length === 0) {
+    if (!chunk || chunk.length === 0) {
         return null;
     }
 
-    const firstVal = Number(firstChunk[0].value);
-    if (!Number.isNaN(firstVal) && Math.abs(firstVal - targetValue) < 1e-4) {
-        return firstChunk[0];
-    }
+    for (const currRow of chunk) {
+        if (currRow.value === null || currRow.value === undefined) continue;
+        const currVal = Number(currRow.value);
+        if (Number.isNaN(currVal)) continue;
 
-    let rowsToCheck = firstChunk;
-    while (rowsToCheck.length > 0) {
-        for (let i = 0; i < rowsToCheck.length; i++) {
-            const currRow = rowsToCheck[i];
-            if (currRow.value === null || currRow.value === undefined) continue;
-            const currVal = Number(currRow.value);
-            if (Number.isNaN(currVal)) continue;
+        const diffCurr = Math.abs(currVal - targetValue);
+        if (diffCurr < minDiff) {
+            minDiff = diffCurr;
+            bestRow = currRow;
+        }
 
-            if (prevRow !== null) {
-                const prevVal = Number(prevRow.value);
-                const isCrossing = (prevVal <= targetValue && currVal >= targetValue) ||
-                    (prevVal >= targetValue && currVal <= targetValue);
-                if (isCrossing) {
-                    const diffPrev = Math.abs(prevVal - targetValue);
-                    const diffCurr = Math.abs(currVal - targetValue);
-                    return diffPrev <= diffCurr ? prevRow : currRow;
-                }
+        // First time signal crossed the target
+        if (prevRow !== null) {
+            const prevVal = Number(prevRow.value);
+            const isCrossing = (prevVal <= targetValue && currVal >= targetValue) ||
+                (prevVal >= targetValue && currVal <= targetValue);
+            if (isCrossing) {
+                const diffPrev = Math.abs(prevVal - targetValue);
+                return diffPrev <= diffCurr ? prevRow : currRow;
             }
-            prevRow = currRow;
         }
 
-        if (rowsToCheck.length < CHUNK_SIZE) {
-            break;
-        }
-
-        const lastTs = rowsToCheck[rowsToCheck.length - 1].ts;
-        const { rows: nextChunk } = await query(`
-            SELECT ts, value
-            FROM readings
-            WHERE tag_id = $1 AND ts > $2::timestamptz
-            ORDER BY ts ASC
-            LIMIT $3;
-        `, [tagId, lastTs, CHUNK_SIZE]);
-
-        rowsToCheck = nextChunk;
+        prevRow = currRow;
     }
 
-    // Fallback: If target was never reached or crossed, find reading nearest in value after afterTime
-    const { rows: nearestRows } = await query(`
-        SELECT ts, value
-        FROM readings
-        WHERE tag_id = $1 AND ts >= $2::timestamptz
-        ORDER BY ABS(value - $3) ASC, ts ASC
-        LIMIT 1;
-    `, [tagId, afterTime, targetValue]);
+    // Fallback: If it never crossed, return the peak reading only if close to target
+    if (bestRow && minDiff <= maxTolerance) {
+        return bestRow;
+    }
 
-    return nearestRows.length > 0 ? nearestRows[0] : (prevRow || null);
+    return null;
 }
 
 /**

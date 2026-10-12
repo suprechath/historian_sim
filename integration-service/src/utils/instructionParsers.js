@@ -5,9 +5,9 @@ import {
 } from './formatters.js';
 
 /**
- * Extracts [TIME: ...] triggers from text (e.g. [TIME: VALUE=130] or [TIME: VALUE=130, REF=130T]).
+ * Extracts [TIME: ...] target values from text (e.g. [TIME: VALUE=130]).
  */
-export function extractTimeTriggers(text, defaultRef = null) {
+export function extractTimeTriggers(text) {
     if (!text || typeof text !== 'string') return [];
     const regex = /\[TIME:\s*([^\]]+)\]/gi;
     const triggers = [];
@@ -17,17 +17,13 @@ export function extractTimeTriggers(text, defaultRef = null) {
         const content = m[1];
         const valMatch = content.match(/\bVALUE\s*=\s*([+-]?\d+(?:\.\d+)?)/i);
         if (!valMatch) continue;
-        const refMatch = content.match(/\bREF\s*=\s*([^,\s\]]+)/i);
+
         const targetValue = parseFloat(valMatch[1]);
-        const targetRef = refMatch ? cleanInstructionId(refMatch[1]) : (defaultRef ? cleanInstructionId(defaultRef) : null);
-        const dedupeKey = `${targetValue}_${targetRef || ''}`;
-        if (seen.has(dedupeKey)) continue;
-        seen.add(dedupeKey);
+        if (seen.has(targetValue)) continue;
+        seen.add(targetValue);
 
         triggers.push({
-            raw: m[0],
-            targetValue,
-            targetRef
+            targetValue
         });
     }
     return triggers;
@@ -120,22 +116,24 @@ export function extractInterpretMapping(text) {
     return {
         raw: match[0],
         mapping,
-        interpret: (val) => {
+        interpret: (val, fallbackDefault = null) => {
             if (val === null || val === undefined) {
-                return mapping['null'] !== undefined ? mapping['null'] : (mapping['0'] !== undefined ? mapping['0'] : 'No');
+                if (mapping['null'] !== undefined) return mapping['null'];
+                if (mapping['0'] !== undefined) return mapping['0'];
+                return fallbackDefault ?? '';
             }
+
             const numVal = Number(val);
             if (!isNaN(numVal)) {
                 const intStr = String(Math.round(numVal));
                 if (mapping[intStr] !== undefined) return mapping[intStr];
                 if (mapping[String(numVal)] !== undefined) return mapping[String(numVal)];
-                if (Math.round(numVal) === 1 && mapping['1'] !== undefined) return mapping['1'];
-                if (mapping['0'] !== undefined) return mapping['0'];
-                return Math.round(numVal) === 1 ? 'Yes' : 'No';
+                return fallbackDefault ?? String(val);
             }
+
             const strVal = String(val).trim();
             if (mapping[strVal] !== undefined) return mapping[strVal];
-            return strVal === '1' ? (mapping['1'] || 'Yes') : (mapping['0'] || 'No');
+            return fallbackDefault ?? strVal;
         }
     };
 }
