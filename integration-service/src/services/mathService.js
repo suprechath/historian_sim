@@ -167,3 +167,118 @@ export function buildIntervalConsolidatedValues(
 
     return values;
 }
+
+/**
+ * Detects waveform transition points (waveStartTs and waveStopTs) across a sequence of readings.
+ * Supports Rise, Fall, and Envelope thresholds or Duration timeouts.
+ *
+ * @param {Array<{ts: string|Date, value: number|string}>} rows - Ascending time series readings.
+ * @param {object} profileConfig - Profile configuration containing start, stop, durationMinutes, direction.
+ * @returns {object} { waveStartTs, waveStopTs, armed, isFall, isEnvelope, startDirection, stopDirection }
+ */
+export function detectWaveInReadings(rows, profileConfig) {
+    if (!rows || rows.length === 0 || !profileConfig) {
+        return {
+            waveStartTs: null,
+            waveStopTs: null,
+            armed: false,
+            isFall: false,
+            isEnvelope: false,
+            startDirection: 'rise',
+            stopDirection: 'fall'
+        };
+    }
+
+    const startThreshold = profileConfig.start;
+    const stopThreshold = profileConfig.stop;
+
+    const firstValidRow = rows.find(r => r.value !== null && r.value !== undefined && !Number.isNaN(Number(r.value)));
+    const firstVal = firstValidRow ? Number(firstValidRow.value) : null;
+
+    const { startDirection, stopDirection, isFall, isEnvelope } = resolveWaveDirections(
+        startThreshold,
+        stopThreshold,
+        profileConfig.direction,
+        firstVal
+    );
+
+    let armed = false;
+    let waveStartTs = null;
+    let waveStopTs = null;
+
+    if (firstVal !== null) {
+        if (isFall && firstVal >= startThreshold) armed = true;
+        if (!isFall && firstVal <= startThreshold) armed = true;
+    }
+
+    for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        if (r.value === null || r.value === undefined) continue;
+        const val = Number(r.value);
+        if (Number.isNaN(val)) continue;
+
+        if (!armed) {
+            if (isFall && val >= startThreshold) armed = true;
+            if (!isFall && val <= startThreshold) armed = true;
+        }
+
+        if (armed && !waveStartTs) {
+            let reachedStart = false;
+            if (i === 0) {
+                reachedStart = isFall ? (val <= startThreshold) : (val >= startThreshold);
+            } else {
+                const prevVal = Number(rows[i - 1].value);
+                reachedStart = isFall ? (val <= startThreshold && prevVal >= startThreshold)
+                    : (val >= startThreshold && prevVal <= startThreshold);
+            }
+
+            if (reachedStart) waveStartTs = r.ts;
+        } else if (waveStartTs && !waveStopTs) {
+            if (profileConfig.durationMinutes !== null && profileConfig.durationMinutes > 0) {
+                const durationMs = profileConfig.durationMinutes * 60 * 1000;
+                if (new Date(r.ts).getTime() - new Date(waveStartTs).getTime() >= durationMs) {
+                    waveStopTs = r.ts;
+                    break;
+                }
+            } else if (stopThreshold !== null) {
+                const isAfterStart = (new Date(r.ts).getTime() > new Date(waveStartTs).getTime());
+                const reachedStop = (stopDirection === 'rise') ? (val >= stopThreshold) : (val <= stopThreshold);
+                if (reachedStop && isAfterStart) {
+                    waveStopTs = r.ts;
+                    break;
+                }
+
+                if (!isEnvelope) {
+                    const aborted = isFall ? (val > startThreshold) : (val < startThreshold);
+                    if (aborted) {
+                        waveStartTs = null;
+                        armed = false;
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: If not armed by transitions, look for first threshold breach
+    if (!waveStartTs) {
+        for (const r of rows) {
+            if (r.value === null || r.value === undefined) continue;
+            const val = Number(r.value);
+            if (Number.isNaN(val)) continue;
+            if (isFall ? (val <= startThreshold) : (val >= startThreshold)) {
+                waveStartTs = r.ts;
+                break;
+            }
+        }
+    }
+
+    return {
+        waveStartTs,
+        waveStopTs,
+        armed,
+        isFall,
+        isEnvelope,
+        startDirection,
+        stopDirection
+    };
+}

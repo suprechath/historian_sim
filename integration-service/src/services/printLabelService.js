@@ -16,7 +16,7 @@ import {
     parseDurationString
 } from '../utils/instructionParsers.js';
 import { reportError, sendBatchLineInstructionUpdate } from '../clients/batchLineClient.js';
-import { resolveTag } from '../dal/externalDal.js';
+import { resolveTag, cancelPendingScheduledInstruction } from '../dal/externalDal.js';
 import {
     resolveMetric,
     resolveWaveDirections,
@@ -424,285 +424,10 @@ export async function handleFutureIntervalRecordMode(
 }
 
 /**
- * Mode: Continuous Interval Record Mode (RefEndTime is omitted)
+ * Mode: Continuous Interval Record Mode (RefEndTime is omitted or Sentinel collection)
+ * Re-exported from continuousIntervalService.js
  */
-export async function handleContinuousIntervalMode(
-    ctx,
-    res,
-    tag,
-    actualStart,
-    intervalConfig,
-    startThreshold = null,
-    startDirection = null,
-    interpretConfig = null
-) {
-    const metric = resolveMetric(ctx.refType);
-    const intervalMs = intervalConfig.intervalMs;
-    const startMs = actualStart.getTime();
-
-    const cleanRef = cleanInstructionId(ctx.refInstruction);
-    const jobKey = `${ctx.batchId}_${cleanRef}`;
-
-    // Cancel previous job for this instruction if running
-    if (jobRegistry.has(jobKey)) {
-        logger.info('ContinuousInterval', `Replacing existing job for ${jobKey}`);
-        await jobRegistry.stopJob(jobKey);
-    }
-
-    // Determine initial lastKnown reading
-    const { rows: initialRows } = await query(`
-        SELECT value FROM readings
-        WHERE tag_id = $1 AND ts <= $2::timestamptz
-        ORDER BY ts DESC LIMIT 1;
-    `, [tag.id, actualStart]);
-
-    let lastKnown = 0;
-    let initialVal = null;
-    if (initialRows.length > 0 && initialRows[0].value !== null) {
-        lastKnown = Number(initialRows[0].value);
-        initialVal = lastKnown;
-    } else {
-        const { rows: snapRows } = await query(`
-            SELECT value FROM snapshots WHERE tag_id = $1 LIMIT 1;
-        `, [tag.id]);
-        if (snapRows.length > 0 && snapRows[0].value !== null) {
-            lastKnown = Number(snapRows[0].value);
-            initialVal = lastKnown;
-        }
-    }
-
-    let effectiveDirection = startDirection;
-    if (startThreshold !== null && !effectiveDirection) {
-        if (initialVal !== null) {
-            effectiveDirection = (initialVal <= startThreshold) ? 'rise' : 'fall';
-        } else {
-            effectiveDirection = 'rise';
-        }
-    }
-    const isFall = (effectiveDirection === 'fall' || effectiveDirection === 'down');
-
-    let crossedStartMs = (startThreshold === null) ? startMs : null;
-    let armed = false;
-    if (startThreshold !== null) {
-        if (initialVal !== null) {
-            armed = isFall ? (initialVal > startThreshold) : (initialVal < startThreshold);
-        }
-    }
-
-    // Acknowledge BatchLine webhook immediately with HTTP 200
-    if (!res.headersSent) {
-        const responseData = {
-            status: 'scheduled',
-            case: 3,
-            mode: 'record_interval_continuous',
-            message: startThreshold !== null
-                ? `Continuous periodic collection scheduled for instruction ${ctx.refInstruction}. Will begin recording bucketed values (${intervalConfig.rawInterval}) once ${tag.name} crosses START threshold (${startThreshold}) [direction: ${isFall ? 'fall' : 'rise'}].`
-                : `Continuous periodic collection started for instruction ${ctx.refInstruction}. Bucketed values (${intervalConfig.rawInterval}) will be sent every 30s continuously until a stop request is received.`,
-            batch_id: ctx.batchId,
-            tag: tag.name,
-            ref_instruction: ctx.refInstruction,
-            ref_start_time: ctx.refStartTime,
-            start_threshold: startThreshold,
-            direction: startThreshold !== null ? (isFall ? 'fall' : 'rise') : null,
-            interval: intervalConfig.rawInterval,
-            interval_ms: intervalMs,
-            metric: metric.toUpperCase(),
-            transmission_cadence_sec: 30
-        };
-        if (ctx.refEndTime) {
-            responseData.ref_end_time = ctx.refEndTime;
-        }
-        res.json(responseData);
-    }
-
-    let nextBucketIndex = 0;
-    let isProcessing = false;
-
-    const processCompletedBuckets = async () => {
-        if (isProcessing) return;
-        isProcessing = true;
-
-        try {
-            const currentNowMs = Date.now();
-
-            if (crossedStartMs === null) {
-                const { rows: searchRows } = await query(`
-                    SELECT ts, value FROM readings
-                    WHERE tag_id = $1 AND ts >= $2::timestamptz AND ts <= $3::timestamptz
-                    ORDER BY ts ASC;
-                `, [tag.id, actualStart, new Date(currentNowMs)]);
-
-                for (let i = 0; i < searchRows.length; i++) {
-                    const r = searchRows[i];
-                    if (r.value === null || r.value === undefined) continue;
-                    const val = Number(r.value);
-                    if (isNaN(val)) continue;
-
-                    if (!armed) {
-                        if (isFall && val > startThreshold) armed = true;
-                        if (!isFall && val < startThreshold) armed = true;
-                    } else {
-                        const crossed = isFall ? (val <= startThreshold) : (val >= startThreshold);
-                        if (crossed) {
-                            crossedStartMs = new Date(r.ts).getTime();
-                            logger.info('ContinuousInterval', `Tag "${tag.name}" crossed START threshold (${startThreshold}) at ${r.ts} (direction: ${isFall ? 'fall' : 'rise'}). Starting interval collection.`);
-                            break;
-                        }
-                    }
-                }
-
-                if (crossedStartMs === null) {
-                    logger.debug('ContinuousInterval', `Tag "${tag.name}" has not yet crossed START threshold (${startThreshold}) [direction: ${isFall ? 'fall' : 'rise'}, armed: ${armed}]. Waiting for threshold crossing...`);
-                    return;
-                }
-            }
-
-            const effectiveStartMs = crossedStartMs;
-            const bucketsToProcess = [];
-
-            while (true) {
-                const bStartMs = effectiveStartMs + nextBucketIndex * intervalMs;
-                const bEndMs = bStartMs + intervalMs;
-
-                if (currentNowMs >= bEndMs) {
-                    bucketsToProcess.push({
-                        index: nextBucketIndex,
-                        bStartMs,
-                        bEndMs
-                    });
-                    nextBucketIndex++;
-
-                    if (bucketsToProcess.length >= (EXTERNAL_CONFIG.MAX_PERIODIC_REPEATS || 50)) {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            if (bucketsToProcess.length === 0) return;
-
-            const rangeStart = new Date(bucketsToProcess[0].bStartMs);
-            const rangeEnd = new Date(bucketsToProcess[bucketsToProcess.length - 1].bEndMs);
-
-            const { rows: readings } = await query(`
-                SELECT ts, value
-                FROM readings
-                WHERE tag_id = $1
-                  AND ts >= $2::timestamptz
-                  AND ts <= $3::timestamptz
-                ORDER BY ts ASC;
-            `, [tag.id, rangeStart, rangeEnd]);
-
-            const setOfValues = [];
-            for (const b of bucketsToProcess) {
-                const bucketReadings = readings.filter(r => {
-                    const rMs = new Date(r.ts).getTime();
-                    return rMs >= b.bStartMs && rMs < b.bEndMs;
-                });
-
-                let resolvedVal;
-                if (bucketReadings.length > 0) {
-                    resolvedVal = computeMetricValue(bucketReadings.map(r => Number(r.value)), metric);
-                    lastKnown = resolvedVal;
-                } else {
-                    resolvedVal = lastKnown;
-                }
-
-                const standardFormattedValue = formatReadingValue(resolvedVal, tag.display_digits);
-                const formattedValue = interpretConfig ? interpretConfig.interpret(resolvedVal) : standardFormattedValue;
-
-                setOfValues.push({
-                    repeat_no: b.index + 1,
-                    value: formattedValue,
-                    standard_formatted_value: standardFormattedValue,
-                    raw_value: resolvedVal,
-                    executed_timestamp: formatExecutedTimestamp(new Date(b.bStartMs)),
-                    executed_user_email: ctx.triggeredByEmail || null
-                });
-            }
-
-            logger.info('ContinuousInterval', `Dispatching set of ${setOfValues.length} bucketed values (repeats ${setOfValues[0].repeat_no}..${setOfValues[setOfValues.length - 1].repeat_no}) for tag "${tag.name}" (batch: ${ctx.batchId}, instruction: ${ctx.refInstruction})...`);
-
-            const cbResult = await sendBatchLineInstructionUpdate({
-                refInstruction: ctx.refInstruction,
-                batchId: ctx.batchId,
-                callbackKey: ctx.callbackKey,
-                actualResult: setOfValues
-            });
-
-            if (!cbResult?.ok) {
-                const detail = cbResult?.data?.error?.detail || cbResult?.error || '';
-                if (String(detail).toLowerCase().includes('cannot exceed the target repeat')) {
-                    logger.info('ContinuousInterval', `Instruction ${ctx.refInstruction} reached Target Repeat limit in BatchLine. Stopping continuous collection.`);
-                    cleanup();
-                    jobRegistry.delete(jobKey);
-                    return;
-                }
-                await reportError(`[BatchLine Continuous 30s]: Failed to push set of ${setOfValues.length} bucketed values`, ctx, detail);
-            }
-
-            const nextBucketEndMs = effectiveStartMs + (nextBucketIndex + 1) * intervalMs;
-            if (Date.now() >= nextBucketEndMs) {
-                setImmediate(processCompletedBuckets);
-            }
-        } catch (err) {
-            logger.error('ContinuousInterval', 'Processing error:', err.message);
-            await reportError(`[BatchLine Continuous 30s Error]: ${err.message}`, ctx, err.stack);
-        } finally {
-            isProcessing = false;
-        }
-    };
-
-    let intervalId = null;
-    let startTimeoutId = null;
-
-    const cleanup = () => {
-        if (startTimeoutId) clearTimeout(startTimeoutId);
-        if (intervalId) clearInterval(intervalId);
-    };
-
-    const stop = async () => {
-        cleanup();
-        logger.info('ContinuousInterval', `Stopping continuous job for instruction ${ctx.refInstruction} (${tag.name}). Flushing final buckets...`);
-        await processCompletedBuckets();
-        logger.info('ContinuousInterval', `Final buckets flushed. Total repeats sent: ${nextBucketIndex}.`);
-    };
-
-    const CADENCE_MS = 30000;
-    const nowMs = Date.now();
-
-    if (startMs <= nowMs) {
-        logger.info('ContinuousInterval', `RefStartTime (${actualStart.toISOString()}) is past/now. Starting dispatcher...`);
-        setImmediate(processCompletedBuckets);
-        intervalId = setInterval(processCompletedBuckets, CADENCE_MS);
-    } else {
-        const msUntilStart = startMs - nowMs;
-        logger.info('ContinuousInterval', `RefStartTime (${actualStart.toISOString()}) is in future. Waiting ${Math.round(msUntilStart / 1000)}s to begin 30s cadence...`);
-        startTimeoutId = setTimeout(() => {
-            logger.info('ContinuousInterval', `RefStartTime reached (${actualStart.toISOString()}). Starting 30s cadence dispatcher.`);
-            setImmediate(processCompletedBuckets);
-            intervalId = setInterval(processCompletedBuckets, CADENCE_MS);
-        }, msUntilStart);
-    }
-
-    const jobRecord = {
-        jobKey,
-        batchId: ctx.batchId,
-        refInstruction: ctx.refInstruction,
-        cleanRefInstruction: cleanRef,
-        tagId: tag.id,
-        tagName: tag.name,
-        cleanup,
-        stop,
-        getNextBucketIndex: () => nextBucketIndex,
-        get startTimeoutId() { return startTimeoutId; },
-        get intervalId() { return intervalId; },
-        startedAt: new Date()
-    };
-
-    jobRegistry.set(jobKey, jobRecord);
-}
+export { handleContinuousIntervalMode } from './continuousIntervalService.js';
 
 /**
  * Main coordinator for Print Label Instruction (EBR User Record trigger)
@@ -733,6 +458,11 @@ export async function handlePrintLabelInstruction(req, res) {
                 const cleanInst = cleanInstructionId(instId);
                 const jobKey = `${parsed.batchId}_${cleanInst}`;
 
+                // 1. Cancel in persistent PostgreSQL queue directly (cluster & restart safe)
+                const dbCancelledCount = await cancelPendingScheduledInstruction(parsed.batchId, instId);
+                logger.info('PrintLabel', `Received STOP signal for instruction ${instId} on batch ${parsed.batchId}. Stopping job.`);
+
+                // 2. Also stop legacy in-memory timer if active
                 let targetJobKey = null;
                 if (jobRegistry.has(jobKey)) {
                     targetJobKey = jobKey;
@@ -744,13 +474,18 @@ export async function handlePrintLabelInstruction(req, res) {
                     if (match) targetJobKey = match.key;
                 }
 
+                let totalRepeatsSent = null;
                 if (targetJobKey) {
                     const job = jobRegistry.get(targetJobKey);
                     logger.info('PrintLabel', `Received STOP signal for instruction ${job.refInstruction} on batch ${parsed.batchId}. Stopping job.`);
+                    totalRepeatsSent = typeof job.getNextBucketIndex === 'function' ? job.getNextBucketIndex() : null;
                     await jobRegistry.stopJob(targetJobKey);
+                }
+
+                if (targetJobKey || (dbCancelledCount && dbCancelledCount > 0)) {
                     stoppedJobs.push({
-                        refInstruction: job.refInstruction,
-                        totalRepeatsSent: typeof job.getNextBucketIndex === 'function' ? job.getNextBucketIndex() : null
+                        refInstruction: instId,
+                        totalRepeatsSent
                     });
                 }
             }

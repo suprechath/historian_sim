@@ -1,4 +1,5 @@
 import { logger } from '../utils/logger.js';
+import { cancelScheduledInstructionsForBatch } from '../dal/externalDal.js';
 
 /**
  * Registry to manage active background future/continuous interval jobs.
@@ -69,6 +70,32 @@ class JobRegistry {
             await this.stopJob(key);
         }
         logger.info('JobRegistry', 'All background interval jobs stopped.');
+    }
+
+    async stopAllForBatch(batchId) {
+        if (!batchId) return 0;
+        const clean = String(batchId).trim();
+        let stoppedCount = 0;
+        for (const [key, job] of Array.from(this.jobs.entries())) {
+            if (job.batchId === clean || key.startsWith(`${clean}_`)) {
+                await this.stopJob(key);
+                stoppedCount++;
+            }
+        }
+
+        try {
+            const dbCancelled = await cancelScheduledInstructionsForBatch(clean);
+            if (dbCancelled > 0) {
+                logger.info('JobRegistry', `Cancelled ${dbCancelled} persistent scheduled instruction(s) in PostgreSQL for batch ${clean}`);
+            }
+        } catch (dbErr) {
+            logger.warn('JobRegistry', `Error cancelling scheduled instructions for batch ${clean}:`, dbErr.message);
+        }
+
+        if (stoppedCount > 0) {
+            logger.info('JobRegistry', `Stopped ${stoppedCount} active background interval job(s) for batch ${clean}`);
+        }
+        return stoppedCount;
     }
 }
 

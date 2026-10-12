@@ -6,6 +6,7 @@ import {
 } from '../dal/externalDal.js';
 import { executeScheduledCase1 } from './case1Service.js';
 import { executeScheduledCase2 } from './case2Service.js';
+import { executeScheduledCase3 } from './continuousIntervalService.js';
 
 let workerInterval = null;
 let isProcessing = false;
@@ -16,8 +17,8 @@ let isProcessing = false;
  */
 const CASE_DISPATCHERS = {
     1: executeScheduledCase1,
-    2: executeScheduledCase2
-    // 3: executeScheduledCase3,
+    2: executeScheduledCase2,
+    3: executeScheduledCase3
 };
 
 /**

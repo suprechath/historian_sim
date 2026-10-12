@@ -97,6 +97,35 @@ export function extractRecordDurationMs(text) {
 }
 
 /**
+ * Creates an interpreter function from a key-value mapping object.
+ *
+ * @param {object} mapping - Mapping dictionary (e.g. { '0': 'No', '1': 'Yes' }).
+ * @returns {((val: any, fallbackDefault?: string|null) => string)|null}
+ */
+export function createInterpreter(mapping) {
+    if (!mapping || typeof mapping !== 'object') return null;
+    return (val, fallbackDefault = null) => {
+        if (val === null || val === undefined) {
+            if (mapping['null'] !== undefined) return mapping['null'];
+            if (mapping['0'] !== undefined) return mapping['0'];
+            return fallbackDefault ?? '';
+        }
+
+        const numVal = Number(val);
+        if (!isNaN(numVal)) {
+            const intStr = String(Math.round(numVal));
+            if (mapping[intStr] !== undefined) return mapping[intStr];
+            if (mapping[String(numVal)] !== undefined) return mapping[String(numVal)];
+            return fallbackDefault ?? String(val);
+        }
+
+        const strVal = String(val).trim();
+        if (mapping[strVal] !== undefined) return mapping[strVal];
+        return fallbackDefault ?? strVal;
+    };
+}
+
+/**
  * Extracts [INTERPRET: ...] mappings from text (e.g. [INTERPRET: 1="Yes", 0="No"]).
  */
 export function extractInterpretMapping(text) {
@@ -124,25 +153,7 @@ export function extractInterpretMapping(text) {
     return {
         raw: match[0],
         mapping,
-        interpret: (val, fallbackDefault = null) => {
-            if (val === null || val === undefined) {
-                if (mapping['null'] !== undefined) return mapping['null'];
-                if (mapping['0'] !== undefined) return mapping['0'];
-                return fallbackDefault ?? '';
-            }
-
-            const numVal = Number(val);
-            if (!isNaN(numVal)) {
-                const intStr = String(Math.round(numVal));
-                if (mapping[intStr] !== undefined) return mapping[intStr];
-                if (mapping[String(numVal)] !== undefined) return mapping[String(numVal)];
-                return fallbackDefault ?? String(val);
-            }
-
-            const strVal = String(val).trim();
-            if (mapping[strVal] !== undefined) return mapping[strVal];
-            return fallbackDefault ?? strVal;
-        }
+        interpret: createInterpreter(mapping)
     };
 }
 
@@ -349,3 +360,96 @@ export function parseDurationString(durationStr) {
     if (unit === 'h') return val * 60;
     return val;
 }
+
+/**
+ * Parses [RECORD: ...] tag from instruction descriptions into a structured, validated config.
+ * Supports mode discrimination:
+ *  - 'SENTINEL': continuous live periodic collection (when SENTINEL / OPEN-END is specified)
+ *  - 'PROFILE': threshold-based wave detection (when START threshold is specified)
+ *  - 'RECORD': uniform time-range downsampling (when [RECORD] without START or SENTINEL)
+ *  - 'AGGREGATE': default statistical aggregate calculation
+ * 
+ * @param {string} desc - The combined instruction description text.
+ * @param {string} [metric='avg'] - The resolved aggregation metric.
+ * @returns {object} The parsed record configuration with discriminated mode: 'SENTINEL', 'PROFILE', 'RECORD', or 'AGGREGATE'.
+ */
+export function parseRecordInstructionConfig(desc, metric = 'avg') {
+    if (!desc || typeof desc !== 'string') {
+        return { isRecord: false, mode: 'AGGREGATE', isSentinel: false, profileConfig: null, intervalConfig: null };
+    }
+
+    const sentinelRegex = /\b(SENTINEL|OPEN[-_\s]?END(?:ED)?)\b/i;
+    const isSentinel = sentinelRegex.test(desc);
+
+    const recordBlockMatch = desc.match(/\[RECORD(?::\s*([^\]]*))?\]/i);
+    if (!recordBlockMatch && !isSentinel) {
+        return { isRecord: false, mode: 'AGGREGATE', isSentinel: false, profileConfig: null, intervalConfig: null };
+    }
+
+    const content = (recordBlockMatch ? (recordBlockMatch[1] || '') : '').trim();
+
+    // Parse INTERVAL (supports s/m/h units via parseIntervalString)
+    let intervalConfig = null;
+    const intervalMatch = content.match(/\bINTERVAL\s*=\s*([^,\s\]]+)/i);
+    if (intervalMatch) {
+        intervalConfig = parseIntervalString(intervalMatch[1]);
+        if (intervalConfig) {
+            intervalConfig.rawInterval = intervalMatch[0];
+        }
+    }
+
+    // Parse DURATION (supports s/m/h units via parseDurationString)
+    let durationMinutes = null;
+    const durationMatch = content.match(/\bDURATION\s*=\s*([^,\s\]]+)/i);
+    if (durationMatch) {
+        durationMinutes = parseDurationString(durationMatch[1]);
+    }
+
+    // Parse START, STOP, and DIRECTION
+    const startMatch = content.match(/\bSTART\s*=\s*([+-]?\d+(?:\.\d+)?)/i);
+    const stopMatch = content.match(/\bSTOP\s*=\s*([+-]?\d+(?:\.\d+)?)/i);
+    const directionMatch = content.match(/\bDIRECTION\s*=\s*(Rise|Fall)/i);
+
+    if (isSentinel) {
+        return {
+            isRecord: true,
+            mode: 'SENTINEL',
+            isSentinel: true,
+            intervalConfig,
+            profileConfig: startMatch ? {
+                start: parseFloat(startMatch[1]),
+                stop: stopMatch ? parseFloat(stopMatch[1]) : null,
+                durationMinutes,
+                direction: directionMatch ? directionMatch[1].toLowerCase() : null,
+                metric,
+                isSentinel: true
+            } : null
+        };
+    }
+
+    if (startMatch) {
+        return {
+            isRecord: true,
+            mode: 'PROFILE',
+            isSentinel: false,
+            intervalConfig,
+            profileConfig: {
+                start: parseFloat(startMatch[1]),
+                stop: stopMatch ? parseFloat(stopMatch[1]) : null,
+                durationMinutes,
+                direction: directionMatch ? directionMatch[1].toLowerCase() : null,
+                metric,
+                isSentinel: false
+            }
+        };
+    }
+
+    return {
+        isRecord: true,
+        mode: 'RECORD',
+        isSentinel: false,
+        intervalConfig,
+        profileConfig: null
+    };
+}
+

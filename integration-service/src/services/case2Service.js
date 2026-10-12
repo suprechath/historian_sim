@@ -9,7 +9,7 @@ import {
 } from '../dal/externalDal.js';
 
 // Poll every 5 seconds; allow up to 48 hours of polling attempts (48 * 3600 / 5 = 34560 attempts)
-const CASE2_POLL_INTERVAL_SECONDS = 30;
+const CASE2_POLL_INTERVAL_SECONDS = 10;
 const CASE2_MAX_SCHEDULE_HOURS = 48;
 const CASE2_MAX_ATTEMPTS = Math.floor((CASE2_MAX_SCHEDULE_HOURS * 3600) / CASE2_POLL_INTERVAL_SECONDS);
 

@@ -12,6 +12,7 @@ import { handleCase2PhaseTimestamp } from '../services/case2Service.js';
 import { handleCase3TimeRange } from '../services/case3Service.js';
 import { handlePrintLabelInstruction } from '../services/printLabelService.js';
 import { assignBatchToQueue, extractBatchStatusPayload } from '../services/batchQueueService.js';
+import { jobRegistry } from '../services/jobRegistry.js';
 
 /**
  * Handles incoming BatchLine Instruction Webhook (/instruction)
@@ -128,7 +129,13 @@ export async function handleInstructionWebhook(req, res) {
 export async function handleStatusPost(req, res) {
     try {
         // logger.info('StatusWebhook', 'Received status payload:', req.body);
-        const { isStarted, batchId, topic } = extractBatchStatusPayload(req.body);
+        const { isStarted, batchId, topic, batchStatus } = extractBatchStatusPayload(req.body);
+
+        const isFinished = batchStatus ? ['completed', 'aborted', 'stopped', 'failed', 'cancelled'].includes(batchStatus.toLowerCase()) : false;
+        if (isFinished && batchId) {
+            logger.info('StatusWebhook', `BatchStatus '${batchStatus}' detected for BatchId '${batchId}'. Stopping active background interval jobs...`);
+            await jobRegistry.stopAllForBatch(batchId);
+        }
 
         let batchAssignment = null;
         if (isStarted && batchId) {

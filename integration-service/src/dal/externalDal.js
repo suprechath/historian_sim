@@ -171,16 +171,31 @@ export async function markScheduledInstructionFailed(id, errorMessage, canRetry 
 
 /**
  * Reschedules an instruction to run again after delaySeconds without marking it as failed.
+ * Optionally updates task payload and resets attempts counter for long-running continuous streams.
  */
-export async function rescheduleInstruction(id, delaySeconds = 60, reason = 'Awaiting phase event') {
-    await query(`
-        UPDATE scheduled_instructions
-        SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'pending' END,
-            scheduled_time = NOW() + ($2 || ' seconds')::interval,
-            last_error = $3,
-            executed_at = CASE WHEN attempts >= max_attempts THEN NOW() ELSE NULL END
-        WHERE id = $1;
-    `, [id, delaySeconds, reason]);
+export async function rescheduleInstruction(id, delaySeconds = 60, reason = 'Awaiting next tick', newPayload = null, resetAttempts = false) {
+    if (newPayload) {
+        await query(`
+            UPDATE scheduled_instructions
+            SET status = CASE WHEN attempts >= max_attempts AND NOT $5 THEN 'failed' ELSE 'pending' END,
+                scheduled_time = NOW() + ($2 || ' seconds')::interval,
+                last_error = $3,
+                payload = $4::jsonb,
+                attempts = CASE WHEN $5 THEN 0 ELSE attempts END,
+                executed_at = CASE WHEN attempts >= max_attempts AND NOT $5 THEN NOW() ELSE NULL END
+            WHERE id = $1;
+        `, [id, delaySeconds, reason, JSON.stringify(newPayload), resetAttempts]);
+    } else {
+        await query(`
+            UPDATE scheduled_instructions
+            SET status = CASE WHEN attempts >= max_attempts AND NOT $4 THEN 'failed' ELSE 'pending' END,
+                scheduled_time = NOW() + ($2 || ' seconds')::interval,
+                last_error = $3,
+                attempts = CASE WHEN $4 THEN 0 ELSE attempts END,
+                executed_at = CASE WHEN attempts >= max_attempts AND NOT $4 THEN NOW() ELSE NULL END
+            WHERE id = $1;
+        `, [id, delaySeconds, reason, resetAttempts]);
+    }
 }
 
 /**
@@ -188,13 +203,32 @@ export async function rescheduleInstruction(id, delaySeconds = 60, reason = 'Awa
  */
 export async function cancelPendingScheduledInstruction(batchId, refInstruction) {
     await ensureScheduledInstructionsTable();
-    await query(`
+    const cleanRef = (typeof refInstruction === 'string') ? refInstruction.replace(/[\[\]]/g, '').trim().toUpperCase() : refInstruction;
+    const { rowCount } = await query(`
         UPDATE scheduled_instructions
-        SET status = 'cancelled', last_error = 'Explicitly cancelled'
+        SET status = 'cancelled', last_error = 'Explicitly cancelled', executed_at = NOW()
         WHERE batch_id IS NOT DISTINCT FROM $1
-          AND ref_instruction = $2
+          AND (
+            ref_instruction = $2
+            OR UPPER(REGEXP_REPLACE(ref_instruction, '[\\[\\]]', '', 'g')) = $3
+          )
           AND status = 'pending';
-    `, [batchId, refInstruction]);
+    `, [batchId, refInstruction, cleanRef]);
+    return rowCount;
+}
+
+/**
+ * Cancels all pending scheduled instructions for a batch.
+ */
+export async function cancelScheduledInstructionsForBatch(batchId) {
+    if (!batchId) return 0;
+    await ensureScheduledInstructionsTable();
+    const { rowCount } = await query(`
+        UPDATE scheduled_instructions
+        SET status = 'cancelled', last_error = 'Batch completed or cancelled', executed_at = NOW()
+        WHERE batch_id IS NOT DISTINCT FROM $1 AND status = 'pending';
+    `, [batchId]);
+    return rowCount;
 }
 
 /**

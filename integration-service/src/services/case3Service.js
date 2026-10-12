@@ -8,15 +8,18 @@ import {
 } from '../utils/formatters.js';
 import {
     getCombinedDescription,
-    extractInterpretMapping
+    extractInterpretMapping,
+    parseRecordInstructionConfig
 } from '../utils/instructionParsers.js';
 import { reportError, sendBatchLineInstructionUpdate } from '../clients/batchLineClient.js';
 import { resolveTag } from '../dal/externalDal.js';
 import {
     resolveMetric,
     resolveWaveDirections,
+    detectWaveInReadings,
     buildIntervalConsolidatedValues
 } from './mathService.js';
+import { handleContinuousIntervalMode } from './continuousIntervalService.js';
 
 /**
  * Case 3 - Submode: Profile Wave Detection & Downsampling
@@ -40,84 +43,9 @@ export async function handleProfileMode(ctx, res, tag, actualStart, actualEnd, p
         return res.status(404).json({ error: errMsg });
     }
 
-    const firstValidRow = rows.find(r => r.value !== null && r.value !== undefined && !Number.isNaN(Number(r.value)));
-    const firstVal = firstValidRow ? Number(firstValidRow.value) : null;
-
-    const { startDirection, stopDirection, isFall, isEnvelope } = resolveWaveDirections(
-        startThreshold,
-        stopThreshold,
-        profileConfig.direction,
-        firstVal
-    );
-
-    let armed = false;
-    let waveStartTs = null;
-    let waveStopTs = null;
-
-    if (firstVal !== null) {
-        if (isFall && firstVal >= startThreshold) armed = true;
-        if (!isFall && firstVal <= startThreshold) armed = true;
-    }
-
-    for (let i = 0; i < rows.length; i++) {
-        const r = rows[i];
-        if (r.value === null || r.value === undefined) continue;
-        const val = Number(r.value);
-        if (Number.isNaN(val)) continue;
-
-        if (!armed) {
-            if (isFall && val >= startThreshold) armed = true;
-            if (!isFall && val <= startThreshold) armed = true;
-        }
-
-        if (armed && !waveStartTs) {
-            let reachedStart = false;
-            if (i === 0) {
-                reachedStart = isFall ? (val <= startThreshold) : (val >= startThreshold);
-            } else {
-                const prevVal = Number(rows[i - 1].value);
-                reachedStart = isFall ? (val <= startThreshold && prevVal >= startThreshold)
-                    : (val >= startThreshold && prevVal <= startThreshold);
-            }
-
-            if (reachedStart) waveStartTs = r.ts;
-        } else if (waveStartTs && !waveStopTs) {
-            if (profileConfig.durationMinutes !== null && profileConfig.durationMinutes > 0) {
-                const durationMs = profileConfig.durationMinutes * 60 * 1000;
-                if (new Date(r.ts).getTime() - new Date(waveStartTs).getTime() >= durationMs) {
-                    waveStopTs = r.ts;
-                    break;
-                }
-            } else if (stopThreshold !== null) {
-                const isAfterStart = (new Date(r.ts).getTime() > new Date(waveStartTs).getTime());
-                const reachedStop = (stopDirection === 'rise') ? (val >= stopThreshold) : (val <= stopThreshold);
-                if (reachedStop && isAfterStart) {
-                    waveStopTs = r.ts;
-                    break;
-                }
-
-                if (!isEnvelope) {
-                    const aborted = isFall ? (val > startThreshold) : (val < startThreshold);
-                    if (aborted) {
-                        waveStartTs = null;
-                        armed = false;
-                    }
-                }
-            }
-        }
-    }
-
-    if (!waveStartTs) {
-        for (const r of rows) {
-            if (r.value === null || r.value === undefined) continue;
-            const val = Number(r.value);
-            if (Number.isNaN(val)) continue;
-            if (isFall ? (val <= startThreshold) : (val >= startThreshold)) {
-                waveStartTs = r.ts;
-                break;
-            }
-        }
-    }
+    const { waveStartTs: detectedStartTs, waveStopTs: detectedStopTs, startDirection } = detectWaveInReadings(rows, profileConfig);
+    let waveStartTs = detectedStartTs;
+    let waveStopTs = detectedStopTs;
 
     if (!waveStartTs) {
         const errMsg = `Reading value for tag "${tag.name}" never ${startDirection === 'rise' ? 'rose to or above' : 'fell to or below'} START threshold (${startThreshold}) between ${actualStart.toISOString()} and ${actualEnd.toISOString()}`;
@@ -603,72 +531,11 @@ export async function handleCase3TimeRange(ctx, res) {
         logger.info('Case3', 'Found [INTERPRET] mapping for instruction:', interpretConfig.raw);
     }
 
-    const recordBlockMatch = desc.match(/\[RECORD(?::\s*([^\]]*))?\]/i);
-    const isRecordTrigger = Boolean(recordBlockMatch);
+    const metric = resolveMetric(ctx.refType);
+    const recordConfig = parseRecordInstructionConfig(desc, metric);
 
-    let isProfileMode = false;
-    let isSentinelMode = false;
-    let profileConfig = null;
-    let intervalConfig = null;
     let statField = null;
-
-    if (isRecordTrigger) {
-        const content = (recordBlockMatch[1] || '').trim();
-        const metric = resolveMetric(ctx.refType);
-
-        const startMatch = content.match(/\bSTART\s*=\s*([+-]?\d+(?:\.\d+)?)/i);
-        const stopMatch = content.match(/\bSTOP\s*=\s*([+-]?\d+(?:\.\d+)?)/i);
-        const durationMatch = content.match(/\bDURATION\s*=\s*(\d+(?:\.\d+)?)\s*(s|m|h)?/i);
-        const directionMatch = content.match(/\bDIRECTION\s*=\s*(Rise|Fall)/i);
-        const intervalMatch = content.match(/\bINTERVAL\s*=\s*(\d+(?:\.\d+)?)\s*(s|m|h)?/i);
-
-        if (intervalMatch) {
-            const val = parseFloat(intervalMatch[1]);
-            const unit = (intervalMatch[2] || 'm').toLowerCase();
-            let intervalMs;
-            let intervalMinutes;
-            if (unit === 's') {
-                intervalMs = Math.round(val * 1000);
-                intervalMinutes = val / 60;
-            } else if (unit === 'h') {
-                intervalMs = Math.round(val * 3600 * 1000);
-                intervalMinutes = val * 60;
-            } else {
-                intervalMs = Math.round(val * 60 * 1000);
-                intervalMinutes = val;
-            }
-            intervalConfig = {
-                rawInterval: intervalMatch[0],
-                intervalMinutes,
-                intervalMs: Math.max(intervalMs, 1000)
-            };
-        }
-
-        let durationMinutes = null;
-        if (durationMatch) {
-            const val = parseFloat(durationMatch[1]);
-            const unit = (durationMatch[2] || 'm').toLowerCase();
-            if (unit === 's') durationMinutes = val / 60;
-            else if (unit === 'h') durationMinutes = val * 60;
-            else durationMinutes = val;
-        }
-
-        const sentinelRegex = /\b(SENTINEL|OPEN[-_\s]?END(?:ED)?)\b/i;
-        const sentinelMatch = content.match(sentinelRegex) || desc.match(sentinelRegex);
-        isSentinelMode = Boolean(sentinelMatch);
-
-        if (startMatch) {
-            isProfileMode = true;
-            profileConfig = {
-                start: parseFloat(startMatch[1]),
-                stop: stopMatch ? parseFloat(stopMatch[1]) : null,
-                durationMinutes,
-                direction: directionMatch ? directionMatch[1].toLowerCase() : null,
-                metric,
-                isSentinel: isSentinelMode
-            };
-        }
-    } else {
+    if (!recordConfig.isRecord) {
         const statKey = String(ctx.refType).trim().toUpperCase();
         statField = STAT_OPERATIONS[statKey];
 
@@ -687,7 +554,7 @@ export async function handleCase3TimeRange(ctx, res) {
     }
 
     let endDate = null;
-    if (ctx.refEndTime && !isSentinelMode) {
+    if (ctx.refEndTime && !recordConfig.isSentinel) {
         endDate = parseBatchLineDate(ctx.refEndTime) || new Date(ctx.refEndTime);
         if (isNaN(endDate.getTime())) {
             const errMsg = `Invalid date format for RefEndTime ("${ctx.refEndTime}")`;
@@ -706,13 +573,88 @@ export async function handleCase3TimeRange(ctx, res) {
         actualEnd = new Date();
     }
 
-    if (isProfileMode) {
-        return await handleProfileMode(ctx, res, tag, actualStart, actualEnd, profileConfig, intervalConfig, interpretConfig);
-    }
+    switch (recordConfig.mode) {
+        case 'SENTINEL': {
+            const effInterval = recordConfig.intervalConfig || { rawInterval: '1m', intervalMinutes: 1, intervalMs: 60000 };
+            const profileConfig = recordConfig.profileConfig;
+            const startThreshold = profileConfig ? profileConfig.start : null;
+            const startDirection = profileConfig ? profileConfig.direction : null;
 
-    if (isRecordTrigger) {
-        return await handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig, interpretConfig);
-    }
+            const now = new Date();
+            const isPast = actualStart.getTime() < now.getTime();
 
-    return await handleAggregateMode(ctx, res, tag, actualStart, actualEnd, statField, interpretConfig);
+            // Scenario 3: START threshold specified (e.g. START=140, DIRECTION=Rise, INTERVAL=5m)
+            if (startThreshold !== null && startThreshold !== undefined) {
+                let crossedStartMs = null;
+                let effectiveStartDir = startDirection;
+
+                if (isPast) {
+                    // Check historical readings between actualStart and now for crossing
+                    const { rows } = await query(`
+                        SELECT ts, value
+                        FROM readings
+                        WHERE tag_id = $1
+                          AND ts >= $2::timestamptz
+                          AND ts <= $3::timestamptz
+                        ORDER BY ts ASC;
+                    `, [tag.id, actualStart, now]);
+
+                    const wave = detectWaveInReadings(rows, profileConfig);
+                    if (wave.waveStartTs) {
+                        crossedStartMs = new Date(wave.waveStartTs).getTime();
+                        effectiveStartDir = wave.startDirection || startDirection;
+                        logger.info('Case3', `Sentinel mode for tag "${tag.name}": Crossed START threshold (${startThreshold}) at ${wave.waveStartTs} in past readings. Streaming from wave start with interval ${effInterval.rawInterval} until stopped by user.`);
+                    } else {
+                        logger.info('Case3', `Sentinel mode for tag "${tag.name}": START threshold (${startThreshold}) not yet crossed in past readings. Enqueuing continuous mode to await threshold crossing.`);
+                    }
+                } else {
+                    logger.info('Case3', `Sentinel mode for tag "${tag.name}": Scheduled from ${actualStart.toISOString()} to monitor START threshold (${startThreshold}) with interval ${effInterval.rawInterval}.`);
+                }
+
+                return await handleContinuousIntervalMode(
+                    ctx,
+                    res,
+                    tag,
+                    actualStart,
+                    effInterval,
+                    startThreshold,
+                    effectiveStartDir,
+                    interpretConfig,
+                    {
+                        crossedStartMs
+                    }
+                );
+            }
+
+            // Scenarios 1 & 2: Pure interval RECORD mode (no START threshold)
+            // (1: default 1m interval, 2: custom INTERVAL e.g. 10s or 5m)
+            let crossedStartMs = null;
+            if (isPast) {
+                crossedStartMs = actualStart.getTime();
+                logger.info('Case3', `Sentinel mode for tag "${tag.name}": Past RefStartTime (${actualStart.toISOString()}). Backfilling intervals (${effInterval.rawInterval}) to now, then continuing live streaming until stopped by user.`);
+            } else {
+                logger.info('Case3', `Sentinel mode for tag "${tag.name}": Starting from ${actualStart.toISOString()} with interval (${effInterval.rawInterval}) until stopped by user.`);
+            }
+
+            return await handleContinuousIntervalMode(
+                ctx,
+                res,
+                tag,
+                actualStart,
+                effInterval,
+                null,
+                null,
+                interpretConfig,
+                {
+                    crossedStartMs
+                }
+            );
+        }
+        case 'PROFILE':
+            return await handleProfileMode(ctx, res, tag, actualStart, actualEnd, recordConfig.profileConfig, recordConfig.intervalConfig, interpretConfig);
+        case 'RECORD':
+            return await handleRecordMode(ctx, res, tag, actualStart, actualEnd, recordConfig.intervalConfig, interpretConfig);
+        default:
+            return await handleAggregateMode(ctx, res, tag, actualStart, actualEnd, statField, interpretConfig);
+    }
 }

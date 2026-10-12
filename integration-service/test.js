@@ -19,6 +19,7 @@ import {
     mapInstructionKey,
     parseIntervalString,
     parseDurationString,
+    parseRecordInstructionConfig,
     parsePrintLabelPayload,
     extractInstructionPayload
 } from './src/utils/instructionParsers.js';
@@ -163,6 +164,51 @@ test('parseIntervalString and parseDurationString handle time units', () => {
     assert.equal(parseDurationString('skip instruction'), null);
 });
 
+test('parseRecordInstructionConfig discriminates SENTINEL, PROFILE, RECORD, and AGGREGATE modes', () => {
+    // 1. Sentinel mode (continuous open-ended collection)
+    const sentinelText = 'Log values continuously [RECORD: INTERVAL=1m SENTINEL]';
+    const sentinelConf = parseRecordInstructionConfig(sentinelText, 'avg');
+    assert.equal(sentinelConf.isRecord, true);
+    assert.equal(sentinelConf.mode, 'SENTINEL');
+    assert.equal(sentinelConf.isSentinel, true);
+    assert.equal(sentinelConf.intervalConfig.intervalMs, 60000);
+
+    // 2. Sentinel mode with START threshold
+    const sentinelWithStart = 'Log values on trigger [RECORD: START=50 DIRECTION=Rise INTERVAL=30s SENTINEL]';
+    const sentinelStartConf = parseRecordInstructionConfig(sentinelWithStart, 'avg');
+    assert.equal(sentinelStartConf.mode, 'SENTINEL');
+    assert.equal(sentinelStartConf.profileConfig.start, 50);
+    assert.equal(sentinelStartConf.profileConfig.direction, 'rise');
+
+    // 3. Profile mode with START, STOP, DURATION, DIRECTION, INTERVAL (non-sentinel)
+    const profileText = 'Capture cycle [RECORD: START=40 STOP=80 DURATION=15m DIRECTION=Rise INTERVAL=30s]';
+    const profileConf = parseRecordInstructionConfig(profileText, 'max');
+    assert.equal(profileConf.isRecord, true);
+    assert.equal(profileConf.mode, 'PROFILE');
+    assert.equal(profileConf.profileConfig.start, 40);
+    assert.equal(profileConf.profileConfig.stop, 80);
+    assert.equal(profileConf.profileConfig.durationMinutes, 15);
+    assert.equal(profileConf.profileConfig.direction, 'rise');
+    assert.equal(profileConf.profileConfig.metric, 'max');
+    assert.equal(profileConf.intervalConfig.intervalMs, 30000);
+    assert.equal(profileConf.isSentinel, false);
+
+    // 4. Uniform Record mode without START and without SENTINEL
+    const uniformText = 'Log values [RECORD: INTERVAL=2m]';
+    const uniformConf = parseRecordInstructionConfig(uniformText, 'avg');
+    assert.equal(uniformConf.isRecord, true);
+    assert.equal(uniformConf.mode, 'RECORD');
+    assert.equal(uniformConf.isSentinel, false);
+    assert.equal(uniformConf.intervalConfig.intervalMs, 120000);
+
+    // 5. Aggregate mode without [RECORD] block
+    const aggText = 'Standard temperature observation step';
+    const aggConf = parseRecordInstructionConfig(aggText, 'avg');
+    assert.equal(aggConf.isRecord, false);
+    assert.equal(aggConf.mode, 'AGGREGATE');
+    assert.equal(aggConf.profileConfig, null);
+});
+
 // ============================================================================
 // 3. MATHEMATICAL & STATISTICAL AGGREGATION TESTS
 // ============================================================================
@@ -248,6 +294,36 @@ test('jobRegistry registers, stops, and cleans up jobs safely', async () => {
     await jobRegistry.stopJob('test_key');
     assert.equal(stopped, true);
     assert.equal(jobRegistry.has('test_key'), false);
+});
+
+test('jobRegistry.stopAllForBatch stops all jobs matching batchId', async () => {
+    let stopped1 = false;
+    let stopped2 = false;
+    jobRegistry.set('B-99_INST-1', {
+        batchId: 'B-99',
+        refInstruction: 'INST-1',
+        stop: async () => { stopped1 = true; }
+    });
+    jobRegistry.set('B-99_INST-2', {
+        batchId: 'B-99',
+        refInstruction: 'INST-2',
+        stop: async () => { stopped2 = true; }
+    });
+    jobRegistry.set('B-OTHER_INST-1', {
+        batchId: 'B-OTHER',
+        refInstruction: 'INST-1',
+        stop: async () => {}
+    });
+
+    const count = await jobRegistry.stopAllForBatch('B-99');
+    assert.equal(count, 2);
+    assert.equal(stopped1, true);
+    assert.equal(stopped2, true);
+    assert.equal(jobRegistry.has('B-99_INST-1'), false);
+    assert.equal(jobRegistry.has('B-99_INST-2'), false);
+    assert.equal(jobRegistry.has('B-OTHER_INST-1'), true);
+
+    await jobRegistry.stopJob('B-OTHER_INST-1');
 });
 
 // ============================================================================
@@ -352,6 +428,8 @@ import {
     stopScheduledInstructionWorker
 } from './src/services/scheduledInstructionWorker.js';
 import { executeScheduledCase1 } from './src/services/case1Service.js';
+import { executeScheduledCase2 } from './src/services/case2Service.js';
+import { executeScheduledCase3 } from './src/services/continuousIntervalService.js';
 
 test('registerCaseDispatcher allows registering handlers for different case types', () => {
     let customCaseExecuted = false;
@@ -361,6 +439,8 @@ test('registerCaseDispatcher allows registering handlers for different case type
     });
 
     assert.equal(typeof executeScheduledCase1, 'function');
+    assert.equal(typeof executeScheduledCase2, 'function');
+    assert.equal(typeof executeScheduledCase3, 'function');
     assert.equal(typeof startScheduledInstructionWorker, 'function');
     assert.equal(typeof stopScheduledInstructionWorker, 'function');
 });
@@ -369,3 +449,74 @@ test('scheduledInstructionWorker starts and stops cleanly without errors', () =>
     startScheduledInstructionWorker(60000); // 60s test interval
     stopScheduledInstructionWorker();
 });
+
+// ============================================================================
+// 10. WAVE DETECTION & SENTINEL SCENARIOS TESTS
+// ============================================================================
+import { detectWaveInReadings } from './src/services/mathService.js';
+import { pool } from './src/db.js';
+
+test('detectWaveInReadings detects rise start and stop threshold crossing', () => {
+    const rows = [
+        { ts: '2026-10-12T10:00:00Z', value: 10 },
+        { ts: '2026-10-12T10:01:00Z', value: 20 },
+        { ts: '2026-10-12T10:02:00Z', value: 55 }, // crosses start threshold (50)
+        { ts: '2026-10-12T10:03:00Z', value: 70 },
+        { ts: '2026-10-12T10:04:00Z', value: 15 }  // crosses stop threshold (20)
+    ];
+
+    const profileConfig = {
+        start: 50,
+        stop: 20,
+        durationMinutes: null,
+        direction: 'rise'
+    };
+
+    const res = detectWaveInReadings(rows, profileConfig);
+    assert.equal(res.waveStartTs, '2026-10-12T10:02:00Z');
+    assert.equal(res.waveStopTs, '2026-10-12T10:04:00Z');
+    assert.equal(res.startDirection, 'rise');
+});
+
+test('detectWaveInReadings detects durationMinutes timeout correctly', () => {
+    const rows = [
+        { ts: '2026-10-12T10:00:00Z', value: 10 },
+        { ts: '2026-10-12T10:01:00Z', value: 60 }, // crosses start threshold (50)
+        { ts: '2026-10-12T10:02:00Z', value: 65 },
+        { ts: '2026-10-12T10:03:00Z', value: 62 }  // +2 minutes after 10:01
+    ];
+
+    const profileConfig = {
+        start: 50,
+        stop: null,
+        durationMinutes: 2,
+        direction: 'rise'
+    };
+
+    const res = detectWaveInReadings(rows, profileConfig);
+    assert.equal(res.waveStartTs, '2026-10-12T10:01:00Z');
+    assert.equal(res.waveStopTs, '2026-10-12T10:03:00Z');
+});
+
+test('detectWaveInReadings returns null when threshold is never breached', () => {
+    const rows = [
+        { ts: '2026-10-12T10:00:00Z', value: 10 },
+        { ts: '2026-10-12T10:01:00Z', value: 20 }
+    ];
+
+    const profileConfig = {
+        start: 100,
+        stop: 50,
+        durationMinutes: null,
+        direction: 'rise'
+    };
+
+    const res = detectWaveInReadings(rows, profileConfig);
+    assert.equal(res.waveStartTs, null);
+    assert.equal(res.waveStopTs, null);
+});
+
+test('test suite teardown closes database pool', async () => {
+    await pool.end();
+});
+
