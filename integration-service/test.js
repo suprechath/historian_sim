@@ -180,6 +180,17 @@ test('parseRecordInstructionConfig discriminates SENTINEL, PROFILE, RECORD, and 
     assert.equal(sentinelStartConf.profileConfig.start, 50);
     assert.equal(sentinelStartConf.profileConfig.direction, 'rise');
 
+    // 2b. Sentinel mode with full START, STOP, DIRECTION, INTERVAL, and DURATION
+    const sentinelFull = '[RECORD: START=140, STOP=140, DIRECTION=Rise, INTERVAL=4m, DURATION=200m] SENTINEL';
+    const sentinelFullConf = parseRecordInstructionConfig(sentinelFull, 'avg');
+    assert.equal(sentinelFullConf.mode, 'SENTINEL');
+    assert.equal(sentinelFullConf.isSentinel, true);
+    assert.equal(sentinelFullConf.profileConfig.start, 140);
+    assert.equal(sentinelFullConf.profileConfig.stop, 140);
+    assert.equal(sentinelFullConf.profileConfig.direction, 'rise');
+    assert.equal(sentinelFullConf.profileConfig.durationMinutes, 200);
+    assert.equal(sentinelFullConf.intervalConfig.intervalMs, 240000);
+
     // 3. Profile mode with START, STOP, DURATION, DIRECTION, INTERVAL (non-sentinel)
     const profileText = 'Capture cycle [RECORD: START=40 STOP=80 DURATION=15m DIRECTION=Rise INTERVAL=30s]';
     const profileConf = parseRecordInstructionConfig(profileText, 'max');

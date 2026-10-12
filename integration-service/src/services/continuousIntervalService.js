@@ -4,7 +4,6 @@ import { query } from '../db.js';
 import {
     formatReadingValue,
     formatExecutedTimestamp,
-    cleanInstructionId
 } from '../utils/formatters.js';
 import { reportError, sendBatchLineInstructionUpdate } from '../clients/batchLineClient.js';
 import { resolveMetric, computeMetricValue, detectWaveInReadings } from './mathService.js';
@@ -86,9 +85,9 @@ export async function handleContinuousIntervalMode(
             interpretConfig: interpretConfig ? { raw: interpretConfig.raw, mapping: interpretConfig.mapping } : null,
             nextBucketIndex: 0,
             crossedStartMs,
-            lastThresholdCheckTs: (crossedStartMs !== null)
+            lastThresholdCheckTs: options.lastThresholdCheckTs || ((crossedStartMs !== null)
                 ? new Date(crossedStartMs).toISOString()
-                : actualStart.toISOString(),
+                : actualStart.toISOString()),
             lastKnown: 0
         },
         maxAttempts: CASE3_MAX_ATTEMPTS
@@ -104,9 +103,9 @@ export async function handleContinuousIntervalMode(
             case: 3,
             mode: 'record_interval_continuous',
             job_id: queuedTask.id,
-            message: startThreshold !== null
+            message: (crossedStartMs === null && startThreshold !== null)
                 ? `Continuous periodic collection scheduled for instruction ${ctx.refInstruction}. Will begin recording bucketed values (${intervalConfig.rawInterval}) once ${tag.name} crosses START threshold (${startThreshold}) [direction: ${isFall ? 'fall' : 'rise'}].`
-                : `Continuous periodic collection started for instruction ${ctx.refInstruction}. Bucketed values (${intervalConfig.rawInterval}) will be sent every 30s continuously until a stop request is received.`,
+                : `Continuous periodic collection started for instruction ${ctx.refInstruction}. Bucketed values (${intervalConfig.rawInterval}) will be sent continuously until a stop request is received.`,
             batch_id: ctx.batchId,
             tag: tag.name,
             ref_instruction: ctx.refInstruction,

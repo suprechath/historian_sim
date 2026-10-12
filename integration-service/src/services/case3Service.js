@@ -579,17 +579,30 @@ export async function handleCase3TimeRange(ctx, res) {
             const profileConfig = recordConfig.profileConfig;
             const startThreshold = profileConfig ? profileConfig.start : null;
             const startDirection = profileConfig ? profileConfig.direction : null;
+            const stopThreshold = profileConfig ? profileConfig.stop : null;
+            const durationMinutes = profileConfig ? profileConfig.durationMinutes : null;
 
             const now = new Date();
             const isPast = actualStart.getTime() < now.getTime();
 
-            // Scenario 3: START threshold specified (e.g. START=140, DIRECTION=Rise, INTERVAL=5m)
-            if (startThreshold !== null && startThreshold !== undefined) {
-                let crossedStartMs = null;
-                let effectiveStartDir = startDirection;
+            let crossedStartMs = null;
+            let effStartDirection = startDirection;
+            let effStopDirection = null;
+            let lastThresholdCheckTs = null;
+
+            // Scenario 1: Profile-guided Sentinel (START / STOP / DURATION / DIRECTION thresholds)
+            if (startThreshold !== null) {
+                const { startDirection: resolvedStartDir, stopDirection: resolvedStopDir } = resolveWaveDirections(
+                    startThreshold,
+                    stopThreshold,
+                    startDirection,
+                    null
+                );
+                effStartDirection = resolvedStartDir;
+                effStopDirection = resolvedStopDir;
 
                 if (isPast) {
-                    // Check historical readings between actualStart and now for crossing
+                    // Check historical readings between actualStart and now to detect threshold crossing
                     const { rows } = await query(`
                         SELECT ts, value
                         FROM readings
@@ -600,40 +613,27 @@ export async function handleCase3TimeRange(ctx, res) {
                     `, [tag.id, actualStart, now]);
 
                     const wave = detectWaveInReadings(rows, profileConfig);
+                    effStartDirection = wave.startDirection || resolvedStartDir;
+                    effStopDirection = wave.stopDirection || resolvedStopDir;
+                    lastThresholdCheckTs = now.toISOString();
+
                     if (wave.waveStartTs) {
                         crossedStartMs = new Date(wave.waveStartTs).getTime();
-                        effectiveStartDir = wave.startDirection || startDirection;
-                        logger.info('Case3', `Sentinel mode for tag "${tag.name}": Crossed START threshold (${startThreshold}) at ${wave.waveStartTs} in past readings. Streaming from wave start with interval ${effInterval.rawInterval} until stopped by user.`);
+                        logger.info('Case3', `Sentinel profile for tag "${tag.name}" crossed START threshold in past at ${wave.waveStartTs}. Streaming from wave start into continuous mode.`);
                     } else {
-                        logger.info('Case3', `Sentinel mode for tag "${tag.name}": START threshold (${startThreshold}) not yet crossed in past readings. Enqueuing continuous mode to await threshold crossing.`);
+                        logger.info('Case3', `Sentinel profile for tag "${tag.name}" has not yet crossed START threshold (${startThreshold}) in past readings. Enqueuing continuous mode to monitor live.`);
                     }
                 } else {
-                    logger.info('Case3', `Sentinel mode for tag "${tag.name}": Scheduled from ${actualStart.toISOString()} to monitor START threshold (${startThreshold}) with interval ${effInterval.rawInterval}.`);
+                    logger.info('Case3', `Sentinel profile for tag "${tag.name}" scheduled for future/current time (${actualStart.toISOString()}). Awaiting START threshold (${startThreshold}) crossing.`);
                 }
-
-                return await handleContinuousIntervalMode(
-                    ctx,
-                    res,
-                    tag,
-                    actualStart,
-                    effInterval,
-                    startThreshold,
-                    effectiveStartDir,
-                    interpretConfig,
-                    {
-                        crossedStartMs
-                    }
-                );
-            }
-
-            // Scenarios 1 & 2: Pure interval RECORD mode (no START threshold)
-            // (1: default 1m interval, 2: custom INTERVAL e.g. 10s or 5m)
-            let crossedStartMs = null;
-            if (isPast) {
-                crossedStartMs = actualStart.getTime();
-                logger.info('Case3', `Sentinel mode for tag "${tag.name}": Past RefStartTime (${actualStart.toISOString()}). Backfilling intervals (${effInterval.rawInterval}) to now, then continuing live streaming until stopped by user.`);
             } else {
-                logger.info('Case3', `Sentinel mode for tag "${tag.name}": Starting from ${actualStart.toISOString()} with interval (${effInterval.rawInterval}) until stopped by user.`);
+                // Scenario 2: Pure Interval Record Sentinel (no threshold condition)
+                crossedStartMs = actualStart.getTime();
+                if (isPast) {
+                    logger.info('Case3', `Sentinel record mode for tag "${tag.name}" with past RefStartTime (${actualStart.toISOString()}). Backfilling buckets to now, then continuing live streaming.`);
+                } else {
+                    logger.info('Case3', `Sentinel record mode for tag "${tag.name}" starting at ${actualStart.toISOString()}.`);
+                }
             }
 
             return await handleContinuousIntervalMode(
@@ -642,11 +642,15 @@ export async function handleCase3TimeRange(ctx, res) {
                 tag,
                 actualStart,
                 effInterval,
-                null,
-                null,
+                startThreshold,
+                effStartDirection,
                 interpretConfig,
                 {
-                    crossedStartMs
+                    crossedStartMs,
+                    stopThreshold,
+                    stopDirection: effStopDirection,
+                    durationMinutes,
+                    lastThresholdCheckTs
                 }
             );
         }
