@@ -30,6 +30,14 @@ export function extractTimeTriggers(text) {
 }
 
 /**
+ * Checks if [SCHEDULE] tag is present in text.
+ */
+export function hasScheduleTrigger(text) {
+    if (!text || typeof text !== 'string') return false;
+    return /\[SCHEDULE\]/i.test(text);
+}
+
+/**
  * Extracts [EXCEPTION: REF=...] triggers from text (e.g. [EXCEPTION: REF=REFINST] or [EXCEPTION]).
  */
 export function extractExceptionTriggers(text, defaultRef = null) {

@@ -5,6 +5,7 @@ import {
     markScheduledInstructionFailed
 } from '../dal/externalDal.js';
 import { executeScheduledCase1 } from './case1Service.js';
+import { executeScheduledCase2 } from './case2Service.js';
 
 let workerInterval = null;
 let isProcessing = false;
@@ -14,8 +15,8 @@ let isProcessing = false;
  * Easily extensible for Case 2, Case 3, etc.
  */
 const CASE_DISPATCHERS = {
-    1: executeScheduledCase1
-    // 2: executeScheduledCase2,
+    1: executeScheduledCase1,
+    2: executeScheduledCase2
     // 3: executeScheduledCase3,
 };
 
@@ -53,7 +54,13 @@ export async function processDueInstructions() {
             try {
                 const schedTimeStr = task.scheduled_time instanceof Date ? task.scheduled_time.toISOString() : String(task.scheduled_time);
                 logger.info('ScheduledWorker', `Executing task ${task.id} (Case ${task.case_type}, RefInstruction: ${task.ref_instruction}, Scheduled: ${schedTimeStr})...`);
-                await handler(task);
+                const result = await handler(task);
+
+                // If handler rescheduled itself (e.g. still waiting for an event to occur), skip markScheduledInstructionCompleted
+                if (result?.scheduled) {
+                    continue;
+                }
+
                 await markScheduledInstructionCompleted(task.id);
                 logger.info('ScheduledWorker', `Successfully executed and marked completed: task ${task.id}`);
             } catch (err) {

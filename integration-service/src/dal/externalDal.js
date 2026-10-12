@@ -170,6 +170,20 @@ export async function markScheduledInstructionFailed(id, errorMessage, canRetry 
 }
 
 /**
+ * Reschedules an instruction to run again after delaySeconds without marking it as failed.
+ */
+export async function rescheduleInstruction(id, delaySeconds = 60, reason = 'Awaiting phase event') {
+    await query(`
+        UPDATE scheduled_instructions
+        SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'pending' END,
+            scheduled_time = NOW() + ($2 || ' seconds')::interval,
+            last_error = $3,
+            executed_at = CASE WHEN attempts >= max_attempts THEN NOW() ELSE NULL END
+        WHERE id = $1;
+    `, [id, delaySeconds, reason]);
+}
+
+/**
  * Cancels pending scheduled instructions matching batchId and refInstruction.
  */
 export async function cancelPendingScheduledInstruction(batchId, refInstruction) {
