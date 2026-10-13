@@ -1,9 +1,5 @@
-import { EXTERNAL_CONFIG } from '../config/externalConfig.js';
 import { logger } from '../utils/logger.js';
-import { query } from '../db.js';
 import {
-    formatReadingValue,
-    formatExecutedTimestamp,
     parseBatchLineDate,
     cleanInstructionId
 } from '../utils/formatters.js';
@@ -15,419 +11,15 @@ import {
     parseIntervalString,
     parseDurationString
 } from '../utils/instructionParsers.js';
-import { reportError, sendBatchLineInstructionUpdate } from '../clients/batchLineClient.js';
+import { reportError } from '../clients/batchLineClient.js';
 import { resolveTag, cancelPendingScheduledInstruction } from '../dal/externalDal.js';
-import {
-    resolveMetric,
-    resolveWaveDirections,
-    computeMetricValue
-} from './mathService.js';
+import { resolveMetric } from './mathService.js';
 import { jobRegistry } from './jobRegistry.js';
 import { handleBatchExceptionTrigger } from './exceptionTriggerService.js';
+import { handleContinuousIntervalMode } from './continuousIntervalService.js';
 import { handleProfileMode, handleRecordMode } from './case3Service.js';
 
-/**
- * Handles PrintLabel Instruction when INTERVAL is specified and RefEndTime is set in the future.
- */
-export async function handleFutureIntervalRecordMode(
-    ctx,
-    res,
-    tag,
-    actualStart,
-    actualEnd,
-    intervalConfig,
-    startThreshold = null,
-    startDirection = null,
-    stopThreshold = null,
-    durationMinutes = null,
-    interpretConfig = null
-) {
-    const metric = resolveMetric(ctx.refType);
-    const intervalMs = intervalConfig.intervalMs;
-    const startMs = actualStart.getTime();
-
-    const durationSpecifiedMs = (durationMinutes !== null && durationMinutes > 0)
-        ? durationMinutes * 60 * 1000
-        : null;
-
-    let endMs = actualEnd ? actualEnd.getTime() : (startMs + (durationSpecifiedMs || intervalMs));
-    if (durationSpecifiedMs && endMs < startMs + durationSpecifiedMs) {
-        endMs = startMs + durationSpecifiedMs;
-    }
-
-    const durationMs = endMs - startMs;
-
-    if (durationMs <= 0) {
-        const errMsg = `RefEndTime (${actualEnd ? actualEnd.toISOString() : 'none'}) must be after RefStartTime (${actualStart.toISOString()})`;
-        await reportError(`[BatchLine Future Record]: ${errMsg}`, ctx);
-        return res.status(400).json({ error: errMsg });
-    }
-
-    const cleanRef = cleanInstructionId(ctx.refInstruction);
-    const jobKey = `${ctx.batchId}_${cleanRef}`;
-
-    // Cancel previous job for this instruction if running
-    if (jobRegistry.has(jobKey)) {
-        logger.info('FutureInterval', `Cancelling previous future interval job for ${jobKey}`);
-        await jobRegistry.stopJob(jobKey);
-    }
-
-    // Determine initial lastKnown reading
-    const { rows: initialRows } = await query(`
-        SELECT value FROM readings
-        WHERE tag_id = $1 AND ts <= $2::timestamptz
-        ORDER BY ts DESC LIMIT 1;
-    `, [tag.id, actualStart]);
-
-    let lastKnown = 0;
-    let initialVal = null;
-    if (initialRows.length > 0 && initialRows[0].value !== null) {
-        lastKnown = Number(initialRows[0].value);
-        initialVal = lastKnown;
-    } else {
-        const { rows: snapRows } = await query(`
-            SELECT value FROM snapshots WHERE tag_id = $1 LIMIT 1;
-        `, [tag.id]);
-        if (snapRows.length > 0 && snapRows[0].value !== null) {
-            lastKnown = Number(snapRows[0].value);
-            initialVal = lastKnown;
-        }
-    }
-
-    const { startDirection: resolvedStartDir, stopDirection, isFall, isEnvelope } = resolveWaveDirections(
-        startThreshold,
-        stopThreshold,
-        startDirection,
-        initialVal
-    );
-
-    let crossedStartMs = (startThreshold === null) ? startMs : null;
-    let armed = false;
-
-    if (startThreshold !== null) {
-        if (initialVal !== null) {
-            armed = isFall ? (initialVal > startThreshold) : (initialVal < startThreshold);
-        }
-
-        const { rows: searchRows } = await query(`
-            SELECT ts, value FROM readings
-            WHERE tag_id = $1 AND ts >= $2::timestamptz AND ts <= $3::timestamptz
-            ORDER BY ts ASC;
-        `, [tag.id, actualStart, new Date()]);
-
-        for (let i = 0; i < searchRows.length; i++) {
-            const r = searchRows[i];
-            if (r.value === null || r.value === undefined) continue;
-            const val = Number(r.value);
-            if (isNaN(val)) continue;
-
-            if (!armed) {
-                if (isFall && val > startThreshold) armed = true;
-                if (!isFall && val < startThreshold) armed = true;
-            }
-            const crossed = isFall ? (val <= startThreshold) : (val >= startThreshold);
-            if (armed && crossed) {
-                crossedStartMs = new Date(r.ts).getTime();
-                logger.info('FutureInterval', `Tag "${tag.name}" already crossed START threshold (${startThreshold}) at ${r.ts} (direction: ${isFall ? 'fall' : 'rise'}). Intervals will start from this point.`);
-                break;
-            }
-            if (i === 0 && crossed) {
-                crossedStartMs = new Date(r.ts).getTime();
-                logger.info('FutureInterval', `Tag "${tag.name}" was already at/past START threshold (${startThreshold}) at ${r.ts}. Intervals will start from this point.`);
-                break;
-            }
-        }
-    }
-
-    if (crossedStartMs && durationSpecifiedMs) {
-        endMs = crossedStartMs + durationSpecifiedMs;
-    }
-
-    const effectiveBaseStartMs = crossedStartMs || startMs;
-    let totalExpectedBuckets = durationSpecifiedMs
-        ? Math.min(Math.max(1, Math.ceil(durationSpecifiedMs / intervalMs)), EXTERNAL_CONFIG.MAX_PERIODIC_REPEATS || 50)
-        : Math.max(1, Math.ceil((endMs - effectiveBaseStartMs) / intervalMs));
-
-    if (totalExpectedBuckets > (EXTERNAL_CONFIG.MAX_PERIODIC_REPEATS || 50)) {
-        logger.warn('FutureInterval', `Capping expected buckets from ${totalExpectedBuckets} to max ${EXTERNAL_CONFIG.MAX_PERIODIC_REPEATS || 50}`);
-        totalExpectedBuckets = EXTERNAL_CONFIG.MAX_PERIODIC_REPEATS || 50;
-    }
-
-    const nowMs = Date.now();
-    const isScenario2 = (startMs < nowMs && nowMs < endMs);
-    const scenarioNum = isScenario2 ? 2 : 3;
-
-    // Acknowledge BatchLine webhook immediately with HTTP 200
-    if (!res.headersSent) {
-        const scheduledResponse = {
-            status: 'scheduled',
-            case: 3,
-            scenario: scenarioNum,
-            mode: 'record_interval_future',
-            message: isScenario2
-                ? `Scenario 2: RefStartTime is in past, RefEndTime in future. Initial past data pushed immediately; subsequent intervals pushed every 30s until ${new Date(endMs).toISOString()}.`
-                : `Scenario 3: RefStartTime and RefEndTime are in future. Scheduled to begin at ${actualStart.toISOString()} and push intervals every 30s until ${new Date(endMs).toISOString()}.`,
-            batch_id: ctx.batchId,
-            tag: tag.name,
-            ref_instruction: ctx.refInstruction,
-            ref_start_time: ctx.refStartTime,
-            start_threshold: startThreshold,
-            direction: startThreshold !== null ? (isFall ? 'fall' : 'rise') : null,
-            stop_threshold: stopThreshold,
-            stop_direction: stopDirection,
-            is_envelope: isEnvelope,
-            duration_minutes: durationMinutes ?? null,
-            interval: intervalConfig.rawInterval,
-            interval_ms: intervalMs,
-            metric: metric.toUpperCase(),
-            total_expected_buckets: totalExpectedBuckets,
-            transmission_cadence_sec: 30
-        };
-        if (ctx.refEndTime) {
-            scheduledResponse.ref_end_time = actualEnd ? actualEnd.toISOString() : (new Date(endMs).toISOString());
-        }
-        res.json(scheduledResponse);
-    }
-
-    let nextBucketIndex = 0;
-    let isProcessing = false;
-
-    const processCompletedBuckets = async () => {
-        if (isProcessing) return;
-        isProcessing = true;
-
-        try {
-            const currentNowMs = Date.now();
-
-            if (crossedStartMs === null) {
-                const { rows: searchRows } = await query(`
-                    SELECT ts, value FROM readings
-                    WHERE tag_id = $1 AND ts >= $2::timestamptz AND ts <= $3::timestamptz
-                    ORDER BY ts ASC;
-                `, [tag.id, actualStart, new Date(currentNowMs)]);
-
-                for (let i = 0; i < searchRows.length; i++) {
-                    const r = searchRows[i];
-                    if (r.value === null || r.value === undefined) continue;
-                    const val = Number(r.value);
-                    if (isNaN(val)) continue;
-
-                    if (!armed) {
-                        if (isFall && val > startThreshold) armed = true;
-                        if (!isFall && val < startThreshold) armed = true;
-                    }
-                    const crossed = isFall ? (val <= startThreshold) : (val >= startThreshold);
-                    if (armed && crossed) {
-                        crossedStartMs = new Date(r.ts).getTime();
-                        if (durationSpecifiedMs) {
-                            endMs = crossedStartMs + durationSpecifiedMs;
-                            totalExpectedBuckets = Math.min(Math.max(1, Math.ceil(durationSpecifiedMs / intervalMs)), EXTERNAL_CONFIG.MAX_PERIODIC_REPEATS || 50);
-                            if (endTimeoutId) clearTimeout(endTimeoutId);
-                            const msUntilEnd = Math.max(0, endMs - Date.now() + 1500);
-                            endTimeoutId = setTimeout(processCompletedBuckets, msUntilEnd);
-                        }
-                        logger.info('FutureInterval', `Tag "${tag.name}" crossed START threshold (${startThreshold}) at ${r.ts} (direction: ${isFall ? 'fall' : 'rise'}). Intervals will start from this point until ${new Date(endMs).toISOString()}.`);
-                        break;
-                    }
-                }
-
-                if (crossedStartMs === null) {
-                    if (currentNowMs >= endMs) {
-                        logger.info('FutureInterval', `Tag "${tag.name}" never crossed START threshold (${startThreshold}) before end time (${new Date(endMs).toISOString()}). Finishing.`);
-                        cleanupJob();
-                    } else {
-                        logger.debug('FutureInterval', `Tag "${tag.name}" has not yet crossed START threshold (${startThreshold}) [direction: ${isFall ? 'fall' : 'rise'}, armed: ${armed}]. Waiting for threshold crossing...`);
-                    }
-                    return;
-                }
-            }
-
-            const effectiveStartMs = crossedStartMs;
-            if (!durationSpecifiedMs) {
-                const remainingDurationMs = endMs - effectiveStartMs;
-                if (remainingDurationMs > 0) {
-                    totalExpectedBuckets = Math.min(
-                        Math.max(1, Math.ceil(remainingDurationMs / intervalMs)),
-                        EXTERNAL_CONFIG.MAX_PERIODIC_REPEATS || 50
-                    );
-                }
-            }
-
-            const bucketsToProcess = [];
-            while (nextBucketIndex < totalExpectedBuckets) {
-                const bStartMs = effectiveStartMs + nextBucketIndex * intervalMs;
-                const bEndMs = Math.min(effectiveStartMs + (nextBucketIndex + 1) * intervalMs, endMs);
-
-                if (currentNowMs >= bEndMs || currentNowMs >= endMs) {
-                    bucketsToProcess.push({
-                        index: nextBucketIndex,
-                        bStartMs,
-                        bEndMs
-                    });
-                    nextBucketIndex++;
-
-                    if (bucketsToProcess.length >= (EXTERNAL_CONFIG.MAX_PERIODIC_REPEATS || 50)) {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            if (bucketsToProcess.length === 0) {
-                if (nextBucketIndex >= totalExpectedBuckets || currentNowMs >= endMs) {
-                    cleanupJob();
-                }
-                return;
-            }
-
-            const rangeStart = new Date(bucketsToProcess[0].bStartMs);
-            const rangeEnd = new Date(bucketsToProcess[bucketsToProcess.length - 1].bEndMs);
-
-            const { rows: readings } = await query(`
-                SELECT ts, value
-                FROM readings
-                WHERE tag_id = $1
-                  AND ts >= $2::timestamptz
-                  AND ts <= $3::timestamptz
-                ORDER BY ts ASC;
-            `, [tag.id, rangeStart, rangeEnd]);
-
-            const setOfValues = [];
-            let hitStop = false;
-
-            for (const b of bucketsToProcess) {
-                const isLast = (b.index === totalExpectedBuckets - 1);
-                const bucketReadings = readings.filter(r => {
-                    const rMs = new Date(r.ts).getTime();
-                    return rMs >= b.bStartMs && (isLast ? (rMs <= b.bEndMs) : (rMs < b.bEndMs));
-                });
-
-                let resolvedVal;
-                if (bucketReadings.length > 0) {
-                    resolvedVal = computeMetricValue(bucketReadings.map(r => Number(r.value)), metric);
-                    lastKnown = resolvedVal;
-                } else {
-                    resolvedVal = lastKnown;
-                }
-
-                const standardFormattedValue = formatReadingValue(resolvedVal, tag.display_digits);
-                const formattedValue = interpretConfig ? interpretConfig.interpret(resolvedVal) : standardFormattedValue;
-
-                setOfValues.push({
-                    repeat_no: b.index + 1,
-                    value: formattedValue,
-                    standard_formatted_value: standardFormattedValue,
-                    raw_value: resolvedVal,
-                    executed_timestamp: formatExecutedTimestamp(new Date(b.bStartMs)),
-                    executed_user_email: ctx.triggeredByEmail || null
-                });
-
-                if (stopThreshold !== null && resolvedVal !== null) {
-                    const reachedStop = (stopDirection === 'rise') ? (resolvedVal >= stopThreshold) : (resolvedVal <= stopThreshold);
-                    const hasStarted = (b.bStartMs > effectiveStartMs || setOfValues.length > 0 || nextBucketIndex > 0);
-                    if (reachedStop && hasStarted) {
-                        logger.info('FutureInterval', `Tag "${tag.name}" reached STOP threshold (${stopThreshold}) [stopDirection: ${stopDirection}, isEnvelope: ${isEnvelope}] at bucket repeat ${b.index + 1}.`);
-                        hitStop = true;
-                        break;
-                    }
-                }
-            }
-
-            logger.info('FutureInterval', `Dispatching set of ${setOfValues.length} bucketed values (repeats ${setOfValues[0].repeat_no}..${setOfValues[setOfValues.length - 1].repeat_no}) for tag "${tag.name}" (batch: ${ctx.batchId})...`);
-
-            const cbResult = await sendBatchLineInstructionUpdate({
-                refInstruction: ctx.refInstruction,
-                batchId: ctx.batchId,
-                callbackKey: ctx.callbackKey,
-                actualResult: setOfValues
-            });
-
-            if (!cbResult?.ok) {
-                const detail = cbResult?.data?.error?.detail || cbResult?.error || '';
-                if (String(detail).toLowerCase().includes('cannot exceed the target repeat')) {
-                    logger.info('FutureInterval', `Instruction ${ctx.refInstruction} reached Target Repeat limit in BatchLine. Stopping job.`);
-                    cleanupJob();
-                    return;
-                }
-                await reportError(`[BatchLine PrintLabel 30s]: Failed to push set of ${setOfValues.length} bucketed values`, ctx, detail);
-            }
-
-            const nextBucketEndMs = effectiveStartMs + (nextBucketIndex + 1) * intervalMs;
-            if (currentNowMs >= nextBucketEndMs && nextBucketIndex < totalExpectedBuckets && !hitStop) {
-                setImmediate(processCompletedBuckets);
-            }
-
-            if (hitStop || nextBucketIndex >= totalExpectedBuckets || currentNowMs >= endMs) {
-                cleanupJob();
-            }
-        } catch (err) {
-            logger.error('FutureInterval', 'Cadence processing error:', err.message);
-            await reportError(`[BatchLine PrintLabel 30s Error]: ${err.message}`, ctx, err.stack);
-        } finally {
-            isProcessing = false;
-        }
-    };
-
-    let intervalId = null;
-    let startTimeoutId = null;
-    let endTimeoutId = null;
-
-    const cleanupJob = () => {
-        logger.info('FutureInterval', `Completed future interval recording for instruction ${ctx.refInstruction} (${tag.name}). Total repeats sent: ${nextBucketIndex}.`);
-        if (startTimeoutId) clearTimeout(startTimeoutId);
-        if (intervalId) clearInterval(intervalId);
-        if (endTimeoutId) clearTimeout(endTimeoutId);
-        jobRegistry.delete(jobKey);
-    };
-
-    const stop = async () => {
-        cleanupJob();
-        await processCompletedBuckets();
-    };
-
-    const CADENCE_MS = 30000;
-
-    if (isScenario2) {
-        logger.info('FutureInterval', `Pushing initial past readings between ${actualStart.toISOString()} and now (${new Date(nowMs).toISOString()})...`);
-        setImmediate(processCompletedBuckets);
-        intervalId = setInterval(processCompletedBuckets, CADENCE_MS);
-    } else {
-        const msUntilStart = Math.max(0, startMs - Date.now());
-        logger.info('FutureInterval', `Waiting ${Math.round(msUntilStart / 1000)}s until RefStartTime (${actualStart.toISOString()}) to start 30s cadence...`);
-        startTimeoutId = setTimeout(() => {
-            logger.info('FutureInterval', `RefStartTime reached (${actualStart.toISOString()}). Starting 30s cadence dispatcher.`);
-            intervalId = setInterval(processCompletedBuckets, CADENCE_MS);
-        }, msUntilStart);
-    }
-
-    const msUntilEnd = Math.max(0, endMs - Date.now() + 1500);
-    endTimeoutId = setTimeout(processCompletedBuckets, msUntilEnd);
-
-    const jobRecord = {
-        jobKey,
-        refInstruction: ctx.refInstruction,
-        cleanRefInstruction: cleanRef,
-        batchId: ctx.batchId,
-        tagId: tag.id,
-        tagName: tag.name,
-        cleanup: cleanupJob,
-        stop,
-        getNextBucketIndex: () => nextBucketIndex,
-        get startTimeoutId() { return startTimeoutId; },
-        get intervalId() { return intervalId; },
-        get endTimeoutId() { return endTimeoutId; },
-        startedAt: new Date()
-    };
-
-    jobRegistry.set(jobKey, jobRecord);
-}
-
-/**
- * Mode: Continuous Interval Record Mode (RefEndTime is omitted or Sentinel collection)
- * Re-exported from continuousIntervalService.js
- */
-export { handleContinuousIntervalMode } from './continuousIntervalService.js';
+export { handleContinuousIntervalMode };
 
 /**
  * Main coordinator for Print Label Instruction (EBR User Record trigger)
@@ -600,9 +192,13 @@ export async function handlePrintLabelInstruction(req, res) {
                 return res.status(400).json({ error: errMsg });
             }
             const startThreshold = hasStart ? parseFloat(rawStart) : null;
+            const stopThreshold = hasStop ? parseFloat(rawStop) : null;
             const startDirection = parsed.parameters.DIRECTION ? String(parsed.parameters.DIRECTION).trim().toLowerCase() : null;
             logger.info('PrintLabel', `Identified Continuous Interval Mode for tag "${tag.name}" (batch: ${ctx.batchId})`);
-            return await handleContinuousIntervalMode(ctx, res, tag, actualStart, intervalConfig, startThreshold, startDirection, interpretConfig);
+            return await handleContinuousIntervalMode(ctx, res, tag, actualStart, intervalConfig, startThreshold, startDirection, interpretConfig, {
+                stopThreshold,
+                durationMinutes
+            });
         }
 
         // Mode 2: Future Interval Record Mode
@@ -611,7 +207,10 @@ export async function handlePrintLabelInstruction(req, res) {
             const stopThreshold = hasStop ? parseFloat(rawStop) : null;
             const startDirection = parsed.parameters.DIRECTION ? String(parsed.parameters.DIRECTION).trim().toLowerCase() : null;
             logger.info('PrintLabel', `Identified Future Interval Record Mode for tag "${tag.name}" (batch: ${ctx.batchId})`);
-            return await handleFutureIntervalRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig, startThreshold, startDirection, stopThreshold, durationMinutes, interpretConfig);
+            return await handleContinuousIntervalMode(ctx, res, tag, actualStart, intervalConfig, startThreshold, startDirection, interpretConfig, {
+                stopThreshold,
+                durationMinutes
+            });
         }
 
         // Mode 2b: Future/Live Profile Mode
@@ -622,7 +221,7 @@ export async function handlePrintLabelInstruction(req, res) {
 
             let effectiveIntervalConfig = intervalConfig;
             if (!effectiveIntervalConfig) {
-                const sampleCount = EXTERNAL_CONFIG.MAX_PROFILE_SAMPLES || 30;
+                const sampleCount = 30;
                 const durMs = (durationMinutes && durationMinutes > 0)
                     ? (durationMinutes * 60 * 1000)
                     : Math.max(1000, actualEnd.getTime() - actualStart.getTime());
@@ -644,7 +243,10 @@ export async function handlePrintLabelInstruction(req, res) {
 
             if (effectiveEnd.getTime() > Date.now()) {
                 logger.info('PrintLabel', `Identified Future/Live Profile Mode for tag "${tag.name}" (batch: ${ctx.batchId})`);
-                return await handleFutureIntervalRecordMode(ctx, res, tag, actualStart, effectiveEnd, effectiveIntervalConfig, startThreshold, startDirection, stopThreshold, durationMinutes, interpretConfig);
+                return await handleContinuousIntervalMode(ctx, res, tag, actualStart, effectiveIntervalConfig, startThreshold, startDirection, interpretConfig, {
+                    stopThreshold,
+                    durationMinutes
+                });
             }
         }
 
