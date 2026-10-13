@@ -151,11 +151,11 @@ export async function executeScheduledCase3(task) {
 
     let crossedStartMs = payload.crossedStartMs ?? null;
     let lastThresholdCheckTs = new Date(payload.lastThresholdCheckTs || actualStartStr);
-    let lastKnown = payload.lastKnown ?? 0;
+    let lastKnown = payload.lastKnown ?? (startThreshold !== null ? Number(startThreshold) : 0);
 
     const actualStart = new Date(actualStartStr);
     const startMs = actualStart.getTime();
-    const intervalMs = intervalConfig.intervalMs;
+    const intervalMs = intervalConfig?.intervalMs || 60000;
     const metric = resolveMetric(ctx?.refType);
     const interpret = createInterpreter(rawInterpretConfig?.mapping);
     const currentNowMs = Date.now();

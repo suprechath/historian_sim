@@ -721,8 +721,135 @@ export async function handleCase3TimeRange(ctx, res) {
                 }
             );
         }
-        case 'PROFILE':
-            return await handleProfileMode(ctx, res, tag, actualStart, actualEnd, recordConfig.profileConfig, recordConfig.intervalConfig, interpretConfig);
+        case 'PROFILE': {
+            const profileConfig = recordConfig.profileConfig;
+            const startThreshold = profileConfig ? profileConfig.start : null;
+            const stopThreshold = profileConfig ? profileConfig.stop : null;
+            const durationMinutes = profileConfig ? profileConfig.durationMinutes : null;
+            const startDirection = profileConfig ? profileConfig.direction : null;
+
+            // 1. DURATION Overwrite: Extend actualEnd so the full duration window is captured
+            if (durationMinutes !== null && durationMinutes > 0) {
+                const durationEnd = new Date(actualStart.getTime() + durationMinutes * 60 * 1000);
+                if (!actualEnd || actualEnd.getTime() < durationEnd.getTime()) {
+                    logger.info('Case3Profile', `DURATION=${durationMinutes}m overrides RefEndTime. Extending window to ${durationEnd.toISOString()}`);
+                    actualEnd = durationEnd;
+                }
+            }
+
+            const now = new Date();
+            const isFuture = actualStart.getTime() > now.getTime();
+            const isOpenEndedOrActive = !actualEnd || actualEnd.getTime() > now.getTime();
+
+            // Default Cases 1 & 2 to 1m interval if streaming is required
+            const effInterval = recordConfig.intervalConfig || {
+                rawInterval: '1m',
+                intervalMinutes: 1,
+                intervalMs: 60000
+            };
+
+            // Resolve wave threshold directions (Rise / Fall)
+            const { startDirection: resolvedStartDir, stopDirection: resolvedStopDir } = resolveWaveDirections(
+                startThreshold,
+                stopThreshold,
+                startDirection,
+                null
+            );
+
+            // 2. Scenario: Pure Future -> Enqueue into persistent Sentinel worker
+            if (isFuture) {
+                logger.info('Case3Profile', `Scheduled future wave profile for tag "${tag.name}" starting at ${actualStart.toISOString()}. Enqueuing into persistent scheduler.`);
+                return await handleContinuousIntervalMode(
+                    ctx,
+                    res,
+                    tag,
+                    actualStart,
+                    effInterval,
+                    startThreshold,
+                    resolvedStartDir,
+                    interpretConfig,
+                    {
+                        crossedStartMs: null,
+                        stopThreshold,
+                        stopDirection: resolvedStopDir,
+                        durationMinutes,
+                        lastThresholdCheckTs: null
+                    }
+                );
+            }
+
+            // 3. Scenario: Past or Active -> Pre-scan historical readings up to 'now'
+            const queryEnd = (actualEnd && actualEnd.getTime() < now.getTime()) ? actualEnd : now;
+            const { rows } = await query(`
+                SELECT ts, value
+                FROM readings
+                WHERE tag_id = $1
+                  AND ts >= $2::timestamptz
+                  AND ts <= $3::timestamptz
+                ORDER BY ts ASC;
+            `, [tag.id, actualStart, queryEnd]);
+
+            const wave = detectWaveInReadings(rows, profileConfig);
+
+            // Check if duration has already fully elapsed in historical data
+            let durationAlreadyElapsed = false;
+            if (wave.waveStartTs && durationMinutes !== null && durationMinutes > 0) {
+                const targetStopMs = new Date(wave.waveStartTs).getTime() + durationMinutes * 60 * 1000;
+                if (targetStopMs <= queryEnd.getTime()) {
+                    durationAlreadyElapsed = true;
+                }
+            }
+
+            // 4. Scenario: Wave is already complete in history -> Synchronous fast path
+            if (wave.waveStartTs && (wave.waveStopTs || durationAlreadyElapsed)) {
+                return await handleProfileMode(
+                    ctx,
+                    res,
+                    tag,
+                    actualStart,
+                    actualEnd,
+                    profileConfig,
+                    recordConfig.intervalConfig,
+                    interpretConfig
+                );
+            }
+
+            // 5. Scenario: Incomplete wave & window still open -> Seamless handoff to Continuous Stream
+            if (isOpenEndedOrActive) {
+                const crossedStartMs = wave.waveStartTs ? new Date(wave.waveStartTs).getTime() : null;
+                logger.info('Case3Profile', `Wave profile for tag "${tag.name}" is ${crossedStartMs ? 'ongoing' : 'pending START crossing'}. Handoff to continuous streaming (interval: ${effInterval.rawInterval}).`);
+
+                return await handleContinuousIntervalMode(
+                    ctx,
+                    res,
+                    tag,
+                    actualStart,
+                    effInterval,
+                    startThreshold,
+                    wave.startDirection || resolvedStartDir,
+                    interpretConfig,
+                    {
+                        crossedStartMs,
+                        stopThreshold,
+                        stopDirection: wave.stopDirection || resolvedStopDir,
+                        durationMinutes,
+                        lastThresholdCheckTs: queryEnd.toISOString()
+                    }
+                );
+            }
+
+            // 6. Scenario: Window closed in past and wave never finished -> Standard 404 exit via handleProfileMode
+            return await handleProfileMode(
+                ctx,
+                res,
+                tag,
+                actualStart,
+                actualEnd,
+                profileConfig,
+                recordConfig.intervalConfig,
+                interpretConfig
+            );
+        }
         case 'RECORD':
             return await handleRecordMode(ctx, res, tag, actualStart, actualEnd, recordConfig.intervalConfig, interpretConfig);
         default:
