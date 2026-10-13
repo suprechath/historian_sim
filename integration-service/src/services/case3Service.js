@@ -228,28 +228,58 @@ export async function handleProfileMode(ctx, res, tag, actualStart, actualEnd, p
  * Case 3 - Submode: Uniform Range Recording (Record Mode)
  */
 export async function handleRecordMode(ctx, res, tag, actualStart, actualEnd, intervalConfig = null, interpretConfig = null) {
-    let metric = resolveMetric(ctx.refType);
+    const now = new Date();
+    // Allow up to 5 seconds tolerance for clock skew/network latency
+    const maxAllowedTime = new Date(now.getTime() + 5000);
 
-    const { rows: allRows } = await query(`
-        SELECT ts, value
-        FROM readings
-        WHERE tag_id = $1
-          AND ts >= $2::timestamptz
-          AND ts <= $3::timestamptz
-        ORDER BY ts ASC;
-    `, [tag.id, actualStart, actualEnd]);
-
-    if (allRows.length === 0) {
-        const errMsg = `No readings found for tag "${tag.name}" between ${actualStart.toISOString()} and ${actualEnd.toISOString()}`;
+    // 1. Defensive Validation: Ensure timestamps are strictly in the past
+    if (actualStart > maxAllowedTime) {
+        const errMsg = `RefStartTime (${actualStart.toISOString()}) must be in the past for Record Mode`;
         await reportError(`[BatchLine Record]: ${errMsg}`, ctx);
-        return res.status(404).json({ error: errMsg });
+        return res.status(400).json({ error: errMsg });
     }
 
-    const totalCount = allRows.length;
-    let valuesToSend = [];
+    if (actualEnd > maxAllowedTime) {
+        const errMsg = `RefEndTime (${actualEnd.toISOString()}) must be in the past for Record Mode`;
+        await reportError(`[BatchLine Record]: ${errMsg}`, ctx);
+        return res.status(400).json({ error: errMsg });
+    }
+
+    // Clamp actualEnd to current time if within the 5s grace window
+    if (actualEnd > now) {
+        actualEnd = now;
+    }
+
+    // Ensure chronological ordering
+    if (actualStart > actualEnd) {
+        [actualStart, actualEnd] = [actualEnd, actualStart];
+    }
+
+    let metric = resolveMetric(ctx.refType);
+    const maxSamples = EXTERNAL_CONFIG.MAX_PROFILE_SAMPLES || 30;
     const durationMs = actualEnd.getTime() - actualStart.getTime();
 
+    let valuesToSend = [];
+    let totalCount = 0;
+
+    // Subcase 2: Fixed Interval Mode [RECORD INTERVAL = xx]
     if (intervalConfig && intervalConfig.intervalMs) {
+        const { rows: allRows } = await query(`
+            SELECT ts, value
+            FROM readings
+            WHERE tag_id = $1
+              AND ts >= $2::timestamptz
+              AND ts <= $3::timestamptz
+            ORDER BY ts ASC;
+        `, [tag.id, actualStart, actualEnd]);
+
+        totalCount = allRows.length;
+        if (totalCount === 0) {
+            const errMsg = `No readings found for tag "${tag.name}" between ${actualStart.toISOString()} and ${actualEnd.toISOString()}`;
+            await reportError(`[BatchLine Record]: ${errMsg}`, ctx);
+            return res.status(404).json({ error: errMsg });
+        }
+
         valuesToSend = buildIntervalConsolidatedValues(
             allRows,
             actualStart,
@@ -260,86 +290,123 @@ export async function handleRecordMode(ctx, res, tag, actualStart, actualEnd, in
             allRows[0]?.value ?? 0,
             interpretConfig
         );
-    } else if (totalCount <= EXTERNAL_CONFIG.MAX_PROFILE_SAMPLES || durationMs <= 1000) {
-        valuesToSend = allRows.slice(0, EXTERNAL_CONFIG.MAX_PROFILE_SAMPLES).map((r, idx) => {
-            const standardFormattedValue = formatReadingValue(r.value, tag.display_digits);
-            const formattedValue = interpretConfig ? interpretConfig.interpret(r.value) : standardFormattedValue;
-            return {
-                repeat_no: idx + 1,
-                value: formattedValue,
-                standard_formatted_value: standardFormattedValue,
-                raw_value: r.value,
-                ts: r.ts,
-                executed_timestamp: formatExecutedTimestamp(r.ts)
-            };
-        });
     } else {
-        const sampleCount = EXTERNAL_CONFIG.MAX_PROFILE_SAMPLES || 30;
-        const lastBucketIndex = sampleCount - 1;
+        // Subcase 1: Uniform Profile Downsampling [RECORD]
+        // Fast index-only count query to avoid loading massive datasets into Node.js heap
+        const { rows: countRows } = await query(`
+            SELECT COUNT(*)::int AS count
+            FROM readings
+            WHERE tag_id = $1
+              AND ts >= $2::timestamptz
+              AND ts <= $3::timestamptz;
+        `, [tag.id, actualStart, actualEnd]);
 
-        const { rows: bucketRows } = await query(`
-            WITH bounds AS (
-                SELECT $2::timestamptz AS t_start, $3::timestamptz AS t_end
-            ),
-            buckets AS (
+        totalCount = countRows[0]?.count || 0;
+        if (totalCount === 0) {
+            const errMsg = `No readings found for tag "${tag.name}" between ${actualStart.toISOString()} and ${actualEnd.toISOString()}`;
+            await reportError(`[BatchLine Record]: ${errMsg}`, ctx);
+            return res.status(404).json({ error: errMsg });
+        }
+
+        if (totalCount <= maxSamples || durationMs <= 1000) {
+            // Small dataset or micro-duration: fetch only up to maxSamples
+            const { rows: rawRows } = await query(`
+                SELECT ts, value
+                FROM readings
+                WHERE tag_id = $1
+                  AND ts >= $2::timestamptz
+                  AND ts <= $3::timestamptz
+                ORDER BY ts ASC
+                LIMIT $4;
+            `, [tag.id, actualStart, actualEnd, maxSamples]);
+
+            valuesToSend = rawRows.map((r, idx) => {
+                const standardFormattedValue = formatReadingValue(r.value, tag.display_digits);
+                const formattedValue = interpretConfig ? interpretConfig.interpret(r.value) : standardFormattedValue;
+                return {
+                    repeat_no: idx + 1,
+                    value: formattedValue,
+                    standard_formatted_value: standardFormattedValue,
+                    raw_value: r.value,
+                    ts: r.ts,
+                    executed_timestamp: formatExecutedTimestamp(r.ts)
+                };
+            });
+        } else {
+            // Large dataset: Execute optimized CTE downsampling directly on PostgreSQL
+            const sampleCount = maxSamples;
+            const lastBucketIndex = sampleCount - 1;
+
+            const { rows: bucketRows } = await query(`
+                WITH bounds AS (
+                    SELECT $2::timestamptz AS t_start, $3::timestamptz AS t_end
+                ),
+                buckets AS (
+                    SELECT 
+                        i AS bucket_no,
+                        t_start + (i * (t_end - t_start) / $4) AS b_start,
+                        t_start + ((i + 1) * (t_end - t_start) / $4) AS b_end
+                    FROM bounds, generate_series(0, $5) AS i
+                )
                 SELECT 
-                    i AS bucket_no,
-                    t_start + (i * (t_end - t_start) / $4) AS b_start,
-                    t_start + ((i + 1) * (t_end - t_start) / $4) AS b_end
-                FROM bounds, generate_series(0, $5) AS i
-            )
-            SELECT 
-                b.bucket_no,
-                b.b_start,
-                b.b_end,
-                AVG(r.value) AS avg_val,
-                MIN(r.value) AS min_val,
-                MAX(r.value) AS max_val,
-                COUNT(r.value)::int AS samples
-            FROM buckets b
-            LEFT JOIN readings r 
-              ON r.tag_id = $1 
-             AND r.ts >= b.b_start 
-             AND (CASE WHEN b.bucket_no = $5 THEN r.ts <= b.b_end ELSE r.ts < b.b_end END)
-            GROUP BY b.bucket_no, b.b_start, b.b_end
-            ORDER BY b.bucket_no;
-        `, [tag.id, actualStart, actualEnd, sampleCount, lastBucketIndex]);
+                    b.bucket_no,
+                    b.b_start,
+                    b.b_end,
+                    AVG(r.value) AS avg_val,
+                    MIN(r.value) AS min_val,
+                    MAX(r.value) AS max_val,
+                    SUM(r.value) AS sum_val,
+                    first(r.value, r.ts) AS first_val,
+                    last(r.value, r.ts) AS last_val,
+                    COUNT(r.value)::int AS samples
+                FROM buckets b
+                LEFT JOIN readings r 
+                  ON r.tag_id = $1 
+                 AND r.ts >= b.b_start 
+                 AND (r.ts < b.b_end OR (b.bucket_no = $5 AND r.ts <= b.b_end))
+                GROUP BY b.bucket_no, b.b_start, b.b_end
+                ORDER BY b.bucket_no;
+            `, [tag.id, actualStart, actualEnd, sampleCount, lastBucketIndex]);
 
-        let lastKnown = null;
-        const bucketList = bucketRows.map(r => {
-            let metricVal = null;
-            if (metric === 'min') metricVal = r.min_val;
-            else if (metric === 'max') metricVal = r.max_val;
-            else metricVal = r.avg_val;
+            let lastKnown = null;
+            const bucketList = bucketRows.map(r => {
+                let metricVal = null;
+                if (metric === 'min') metricVal = r.min_val;
+                else if (metric === 'max') metricVal = r.max_val;
+                else if (metric === 'sum') metricVal = r.sum_val;
+                else if (metric === 'first') metricVal = r.first_val;
+                else if (metric === 'last') metricVal = r.last_val;
+                else metricVal = r.avg_val;
 
-            if (metricVal !== null && metricVal !== undefined) {
-                lastKnown = Number(metricVal);
-            }
-            return {
-                bucket_no: r.bucket_no,
-                b_start: r.b_start,
-                b_end: r.b_end,
-                value: (metricVal !== null && metricVal !== undefined) ? Number(metricVal) : lastKnown,
-                samples: r.samples
-            };
-        });
+                if (metricVal !== null && metricVal !== undefined) {
+                    lastKnown = Number(metricVal);
+                }
+                return {
+                    bucket_no: r.bucket_no,
+                    b_start: r.b_start,
+                    b_end: r.b_end,
+                    value: (metricVal !== null && metricVal !== undefined) ? Number(metricVal) : lastKnown,
+                    samples: r.samples
+                };
+            });
 
-        const firstKnown = bucketList.find(b => b.value !== null)?.value ?? 0;
-        valuesToSend = bucketList.map((b, idx) => {
-            const resolvedVal = b.value !== null ? b.value : firstKnown;
-            const standardFormattedValue = formatReadingValue(resolvedVal, tag.display_digits);
-            const formattedValue = interpretConfig ? interpretConfig.interpret(resolvedVal) : standardFormattedValue;
-            return {
-                repeat_no: idx + 1,
-                value: formattedValue,
-                standard_formatted_value: standardFormattedValue,
-                raw_value: resolvedVal,
-                bucket_start: b.b_start,
-                bucket_end: b.b_end,
-                samples: b.samples,
-                executed_timestamp: formatExecutedTimestamp(b.b_start)
-            };
-        });
+            const firstKnown = bucketList.find(b => b.value !== null)?.value ?? 0;
+            valuesToSend = bucketList.map((b, idx) => {
+                const resolvedVal = b.value !== null ? b.value : firstKnown;
+                const standardFormattedValue = formatReadingValue(resolvedVal, tag.display_digits);
+                const formattedValue = interpretConfig ? interpretConfig.interpret(resolvedVal) : standardFormattedValue;
+                return {
+                    repeat_no: idx + 1,
+                    value: formattedValue,
+                    standard_formatted_value: standardFormattedValue,
+                    raw_value: resolvedVal,
+                    bucket_start: b.b_start,
+                    bucket_end: b.b_end,
+                    samples: b.samples,
+                    executed_timestamp: formatExecutedTimestamp(b.b_start)
+                };
+            });
+        }
     }
 
     if (interpretConfig) {

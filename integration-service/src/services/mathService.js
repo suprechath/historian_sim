@@ -122,6 +122,8 @@ export function buildIntervalConsolidatedValues(
         : ((fallbackVal !== null && fallbackVal !== undefined) ? Number(fallbackVal) : 0);
 
     const values = [];
+    const numRows = rows ? rows.length : 0;
+    let rowIdx = 0;
 
     for (let i = 0; i < intervalCount; i++) {
         const bStartMs = startMs + i * intervalMs;
@@ -132,15 +134,30 @@ export function buildIntervalConsolidatedValues(
         const isLast = (i === intervalCount - 1);
         const bucketVals = [];
 
-        if (rows && rows.length > 0) {
-            for (let j = 0; j < rows.length; j++) {
-                const rTs = new Date(rows[j].ts).getTime();
-                if (rTs >= bStartMs && (isLast ? (rTs <= bEndMs) : (rTs < bEndMs))) {
-                    const val = Number(rows[j].value);
-                    if (!Number.isNaN(val)) bucketVals.push(val);
-                }
+        // Fast-forward rowIdx to bucket start
+        while (rowIdx < numRows) {
+            const rTs = (rows[rowIdx].ts instanceof Date) ? rows[rowIdx].ts.getTime() : new Date(rows[rowIdx].ts).getTime();
+            if (rTs < bStartMs) {
+                rowIdx++;
+            } else {
+                break;
             }
         }
+
+        // Collect all readings falling inside [bStartMs, bEndMs) (or <= bEndMs for the last interval)
+        let scanIdx = rowIdx;
+        while (scanIdx < numRows) {
+            const rTs = (rows[scanIdx].ts instanceof Date) ? rows[scanIdx].ts.getTime() : new Date(rows[scanIdx].ts).getTime();
+            const inBucket = isLast ? (rTs <= bEndMs) : (rTs < bEndMs);
+            if (inBucket) {
+                const val = Number(rows[scanIdx].value);
+                if (!Number.isNaN(val)) bucketVals.push(val);
+                scanIdx++;
+            } else {
+                break;
+            }
+        }
+        rowIdx = scanIdx;
 
         let resolvedVal;
         if (bucketVals.length > 0) {

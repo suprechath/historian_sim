@@ -30,6 +30,7 @@ import {
     resolveWaveDirections,
     buildIntervalConsolidatedValues
 } from './src/services/mathService.js';
+import { handleRecordMode } from './src/services/case3Service.js';
 
 import { getHighExceptionDedupeKey } from './src/services/highExceptionService.js';
 import { jobRegistry } from './src/services/jobRegistry.js';
@@ -525,6 +526,63 @@ test('detectWaveInReadings returns null when threshold is never breached', () =>
     const res = detectWaveInReadings(rows, profileConfig);
     assert.equal(res.waveStartTs, null);
     assert.equal(res.waveStopTs, null);
+});
+
+test('buildIntervalConsolidatedValues forward-fills gaps with last known reading', () => {
+    const start = new Date('2026-03-27T10:00:00Z');
+    const end = new Date('2026-03-27T10:04:00Z');
+    // Only readings in minute 0 and minute 3 (minutes 1 and 2 are empty gaps)
+    const rows = [
+        { ts: '2026-03-27T10:00:20Z', value: 100 },
+        { ts: '2026-03-27T10:03:40Z', value: 200 }
+    ];
+
+    const buckets = buildIntervalConsolidatedValues(rows, start, end, 60000, 'avg', 1, 0);
+    assert.equal(buckets.length, 4);
+    assert.equal(buckets[0].value, '100'); // minute 0: actual
+    assert.equal(buckets[1].value, '100'); // minute 1: gap, forward-filled
+    assert.equal(buckets[2].value, '100'); // minute 2: gap, forward-filled
+    assert.equal(buckets[3].value, '200'); // minute 3: actual
+});
+
+test('handleRecordMode rejects future RefStartTime with 400', async () => {
+    let statusCode = null;
+    let jsonBody = null;
+    const mockRes = {
+        status(code) {
+            statusCode = code;
+            return this;
+        },
+        json(payload) {
+            jsonBody = payload;
+            return this;
+        }
+    };
+    const futureDate = new Date(Date.now() + 3600 * 1000);
+    const pastDate = new Date(Date.now() - 3600 * 1000);
+    await handleRecordMode({}, mockRes, { id: 1, name: 'TAG_1' }, futureDate, pastDate);
+    assert.equal(statusCode, 400);
+    assert.match(jsonBody.error, /must be in the past/);
+});
+
+test('handleRecordMode rejects future RefEndTime with 400', async () => {
+    let statusCode = null;
+    let jsonBody = null;
+    const mockRes = {
+        status(code) {
+            statusCode = code;
+            return this;
+        },
+        json(payload) {
+            jsonBody = payload;
+            return this;
+        }
+    };
+    const pastDate = new Date(Date.now() - 3600 * 1000);
+    const futureDate = new Date(Date.now() + 3600 * 1000);
+    await handleRecordMode({}, mockRes, { id: 1, name: 'TAG_1' }, pastDate, futureDate);
+    assert.equal(statusCode, 400);
+    assert.match(jsonBody.error, /must be in the past/);
 });
 
 test('test suite teardown closes database pool', async () => {
