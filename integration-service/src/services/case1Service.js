@@ -8,6 +8,7 @@ import {
 import {
     getCombinedDescription,
     extractTimeTriggers,
+    extractRecordDurationMs,
     extractInterpretMapping
 } from '../utils/instructionParsers.js';
 import { reportError, sendBatchLineInstructionUpdate } from '../clients/batchLineClient.js';
@@ -147,18 +148,34 @@ export async function handleCase1PointInTime(ctx, res) {
         });
     }
 
-    // 2. Default Point-in-Time Value Lookup
+    // 2. Point-in-Time Value Lookup (Direct or Offset with [RECORD: DURATION=...])
     const interpretConfig = extractInterpretMapping(fullDesc);
-    const nowMs = Date.now();
-    const hasFutureRefTime = parsedRefTime && !isNaN(parsedRefTime.getTime()) && (parsedRefTime.getTime() - nowMs > 1000);
+    const durationMs = extractRecordDurationMs(fullDesc);
 
-    // Option A: Persistent Database-Backed Scheduled Queue when RefTime is set in the future
-    if (hasFutureRefTime) {
-        const delayMs = parsedRefTime.getTime() - nowMs;
+    // If [RECORD: DURATION=...] is specified, validate RefTime
+    if (durationMs > 0 && (!ctx.refTime || !parsedRefTime || isNaN(parsedRefTime.getTime()))) {
+        const errMsg = 'Missing or invalid required RefTime in instruction payload for [RECORD: DURATION=...] calculation';
+        await reportError(`[BatchLine Case 1]: ${errMsg}`, ctx);
+        return res.status(400).json({ error: errMsg });
+    }
+
+    const baseTime = (parsedRefTime && !isNaN(parsedRefTime.getTime())) ? parsedRefTime : new Date();
+    const targetLookupTime = durationMs > 0 ? new Date(baseTime.getTime() + durationMs) : baseTime;
+
+    if (durationMs > 0) {
+        logger.info('Case1', `Trigger [RECORD: DURATION=${durationMs}ms] detected for tag "${tag.name}". RefTime (${baseTime.toISOString()}) + DURATION = target time (${targetLookupTime.toISOString()})`);
+    }
+
+    const nowMs = Date.now();
+    const hasFutureTarget = (targetLookupTime.getTime() - nowMs > 1000);
+
+    // Option A: Persistent Database-Backed Scheduled Queue when Target Time is set in the future
+    if (hasFutureTarget) {
+        const delayMs = targetLookupTime.getTime() - nowMs;
         const maxDelayMs = MAX_FUTURE_SCHEDULE_HOURS * 3600 * 1000;
 
         if (delayMs > maxDelayMs) {
-            const errMsg = `RefTime (${parsedRefTime.toISOString()}) exceeds maximum future scheduling limit of ${MAX_FUTURE_SCHEDULE_HOURS} hours`;
+            const errMsg = `Target lookup time (${targetLookupTime.toISOString()}) exceeds maximum future scheduling limit of ${MAX_FUTURE_SCHEDULE_HOURS} hours`;
             await reportError(`[BatchLine Case 1]: ${errMsg}`, ctx);
             return res.status(400).json({ error: errMsg });
         }
@@ -168,7 +185,7 @@ export async function handleCase1PointInTime(ctx, res) {
             batchId: ctx.batchId,
             refInstruction: ctx.refInstruction,
             tagId: tag.id,
-            scheduledTime: parsedRefTime,
+            scheduledTime: targetLookupTime,
             payload: {
                 ctx,
                 tagName: tag.name,
@@ -177,28 +194,30 @@ export async function handleCase1PointInTime(ctx, res) {
             }
         });
 
-        logger.info('Case1', `RefTime is in the future (${parsedRefTime.toISOString()}). Enqueued persistent database task ${queued.id} for tag "${tag.name}" (RefInstruction: ${ctx.refInstruction})...`);
+        logger.info('Case1', `Target time is in the future (${targetLookupTime.toISOString()}). Enqueued persistent database task ${queued.id} for tag "${tag.name}" (RefInstruction: ${ctx.refInstruction})...`);
 
         return res.json({
             status: 'scheduled',
             case: 1,
+            subcase: durationMs > 0 ? 'record_duration_point_in_time' : 'point_in_time',
             job_id: queued.id,
             batch_id: ctx.batchId,
             tag: tag.name,
             target_instruction: ctx.refInstruction,
-            scheduled_time: parsedRefTime.toISOString(),
+            ref_time: ctx.refTime,
+            duration_ms: durationMs > 0 ? durationMs : undefined,
+            scheduled_time: targetLookupTime.toISOString(),
             delay_seconds: Math.round(delayMs / 1000),
             interpret: interpretConfig ? { raw: interpretConfig.raw, mapping: interpretConfig.mapping } : null,
-            message: `Instruction scheduled in persistent queue. Value will be read and recorded to BatchLine when scheduled RefTime elapses in ${Math.round(delayMs / 1000)}s.`
+            message: `Instruction scheduled in persistent queue. Value will be read and recorded to BatchLine when scheduled target time (${targetLookupTime.toISOString()}) elapses in ${Math.round(delayMs / 1000)}s.`
         });
     }
 
-    // Synchronous execution (RefTime is in the past or current)
-    const targetLookupTime = (parsedRefTime && !isNaN(parsedRefTime.getTime())) ? parsedRefTime : new Date();
+    // Synchronous execution (targetLookupTime is in the past or current)
     const reading = await getNearestReading(tag.id, targetLookupTime);
     if (!reading) {
-        await reportError(`[BatchLine Case 1]: No reading or snapshot found for tag "${tag.name}"`, ctx);
-        return res.status(404).json({ error: `No reading or snapshot found for tag "${tag.name}"` });
+        await reportError(`[BatchLine Case 1]: No reading or snapshot found for tag "${tag.name}" at target time ${targetLookupTime.toISOString()}`, ctx);
+        return res.status(404).json({ error: `No reading or snapshot found for tag "${tag.name}" at target time ${targetLookupTime.toISOString()}` });
     }
 
     const standardFormattedValue = formatReadingValue(reading.value, tag.display_digits);
@@ -232,9 +251,12 @@ export async function handleCase1PointInTime(ctx, res) {
     return res.json({
         status: 'success',
         case: 1,
+        subcase: durationMs > 0 ? 'record_duration_point_in_time' : 'point_in_time',
         batch_id: ctx.batchId,
         tag: tag.name,
         ref_time: ctx.refTime,
+        duration_ms: durationMs > 0 ? durationMs : undefined,
+        target_lookup_time: targetLookupTime.toISOString(),
         interpret: interpretConfig ? { raw: interpretConfig.raw, mapping: interpretConfig.mapping } : null,
         reading: {
             ts: reading.ts,

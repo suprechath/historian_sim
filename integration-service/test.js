@@ -122,6 +122,7 @@ test('extractRecordDurationMs parses duration units', () => {
     assert.equal(extractRecordDurationMs('Wait [RECORD: DURATION=5m]'), 300000);
     assert.equal(extractRecordDurationMs('Wait [DURATION=30s]'), 30000);
     assert.equal(extractRecordDurationMs('Wait [RECORD: DURATION=1h]'), 3600000);
+    assert.equal(extractRecordDurationMs('Wait [RECORD: DURATION=200m]'), 200 * 60 * 1000);
     assert.equal(extractRecordDurationMs('No duration specified'), 0);
 });
 
