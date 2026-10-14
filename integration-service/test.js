@@ -21,8 +21,10 @@ import {
     parseDurationString,
     parseRecordInstructionConfig,
     parsePrintLabelPayload,
-    extractInstructionPayload
+    extractInstructionPayload,
+    hasHealthCheckTrigger
 } from './src/utils/instructionParsers.js';
+import { handleOnDemandHealthCheck } from './src/services/healthCheckService.js';
 
 import {
     resolveMetric,
@@ -584,6 +586,59 @@ test('handleRecordMode rejects future RefEndTime with 400', async () => {
     await handleRecordMode({}, mockRes, { id: 1, name: 'TAG_1' }, pastDate, futureDate);
     assert.equal(statusCode, 400);
     assert.match(jsonBody.error, /must be in the past/);
+});
+
+test('hasHealthCheckTrigger recognizes all health check aliases', () => {
+    assert.equal(hasHealthCheckTrigger('[HEALTH_CHECK]'), true);
+    assert.equal(hasHealthCheckTrigger('[health_check]'), true);
+    assert.equal(hasHealthCheckTrigger('Check system [HEALTHCHECK] now'), true);
+    assert.equal(hasHealthCheckTrigger('[PING]'), true);
+    assert.equal(hasHealthCheckTrigger('[HEALTH]'), true);
+    assert.equal(hasHealthCheckTrigger('[EXCEPTION: REF=INST-1]'), false);
+    assert.equal(hasHealthCheckTrigger(''), false);
+    assert.equal(hasHealthCheckTrigger(null), false);
+});
+
+test('handleOnDemandHealthCheck always returns 200 with diagnostics', async () => {
+    let statusCode = null;
+    let jsonBody = null;
+    const mockRes = {
+        status(code) {
+            statusCode = code;
+            return this;
+        },
+        json(payload) {
+            jsonBody = payload;
+            return this;
+        }
+    };
+
+    const mockReq = {
+        body: {
+            Topic: 'batch_active_instruction.update',
+            Data: {
+                Batch: {
+                    BatchId: 'B-HEALTH-001',
+                    Phase: {
+                        Step: {
+                            Instruction: {
+                                InstructionId: 'INST-HEALTH',
+                                InstructionDescription: 'Run connectivity test [HEALTH_CHECK]'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    await handleOnDemandHealthCheck(mockReq, mockRes);
+    assert.equal(statusCode, 200);
+    assert.equal(jsonBody.status, 'received');
+    assert.ok(jsonBody.healthCheck);
+    assert.equal(jsonBody.healthCheck.type, 'on_demand');
+    assert.ok(['passed', 'failed'].includes(jsonBody.healthCheck.result));
+    assert.ok(typeof jsonBody.healthCheck.latencyMs === 'number');
 });
 
 test('test suite teardown closes database pool', async () => {

@@ -54,6 +54,9 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}
       PORT: 4000
       INTERNAL_UI_SECRET: ${INTERNAL_UI_SECRET}
+      INTEGRATION_SERVICE_URL: http://integration-service:4001
+      HEARTBEAT_INTERVAL_MIN: ${HEARTBEAT_INTERVAL_MIN:-10}
+      HEARTBEAT_ENABLED: ${HEARTBEAT_ENABLED:-true}
     # ports:
     #   - "${PORT:-4000}:4000"
     volumes:

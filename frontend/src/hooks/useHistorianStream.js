@@ -10,7 +10,8 @@ export function useHistorianStream() {
         singleBatchStatus: 'idle',
         batchQueue: [],
         reactors: { R1: { phase: 'Idle' }, R2: { phase: 'Idle' }, R3: { phase: 'Idle' } },
-        tags: []
+        tags: [],
+        integrationHealth: null
     });
     const [connected, setConnected] = useState(false);
 

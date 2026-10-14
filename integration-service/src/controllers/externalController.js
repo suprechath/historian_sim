@@ -2,7 +2,8 @@ import { logger } from '../utils/logger.js';
 import {
     extractInstructionPayload,
     getCombinedDescription,
-    extractExceptionTriggers
+    extractExceptionTriggers,
+    hasHealthCheckTrigger
 } from '../utils/instructionParsers.js';
 import { reportError } from '../clients/batchLineClient.js';
 import { checkAndForwardHighExceptions } from '../services/highExceptionService.js';
@@ -13,6 +14,7 @@ import { handleCase3TimeRange } from '../services/case3Service.js';
 import { handlePrintLabelInstruction } from '../services/printLabelService.js';
 import { assignBatchToQueue, extractBatchStatusPayload } from '../services/batchQueueService.js';
 import { jobRegistry } from '../services/jobRegistry.js';
+import { handleOnDemandHealthCheck } from '../services/healthCheckService.js';
 
 /**
  * Handles incoming BatchLine Instruction Webhook (/instruction)
@@ -22,6 +24,13 @@ export async function handleInstructionWebhook(req, res) {
     try {
         const body = req.body || {};
         const topic = body.Topic || '';
+
+        // 0. Check for On-Demand Health Check trigger ([HEALTH_CHECK], [PING])
+        const fullDesc = getCombinedDescription({ rawBody: body });
+        if (hasHealthCheckTrigger(fullDesc)) {
+            logger.info('InstructionWebhook', 'On-Demand Health Check trigger detected in instruction description.');
+            return await handleOnDemandHealthCheck(req, res);
+        }
 
         // 1. Topic: print_label_instruction.update
         if (topic === 'print_label_instruction.update') {
@@ -57,7 +66,6 @@ export async function handleInstructionWebhook(req, res) {
             }
 
             // 2.2 Check for [EXCEPTION: REF=...] trigger across all description fields
-            const fullDesc = getCombinedDescription({ rawBody: body });
             const exceptionTriggers = extractExceptionTriggers(fullDesc);
 
             if (exceptionTriggers.length > 0) {

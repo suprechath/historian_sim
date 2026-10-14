@@ -224,6 +224,661 @@ header {
     font-weight: 600;
 }
 
+/* Header Integration Status Chip */
+.integration-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 7px;
+    border-radius: 3px;
+    font-size: 11.5px;
+    font-weight: 500;
+    border: 1px solid var(--edge-dark);
+    background: var(--field);
+    color: var(--ink);
+    transition: all 0.2s ease;
+}
+
+.integration-chip.passed {
+    border-color: #2d7a3e;
+    background: rgba(45, 122, 62, 0.12);
+}
+
+.integration-chip.failed,
+.integration-chip.degraded {
+    border-color: var(--alarm);
+    background: rgba(181, 50, 28, 0.15);
+}
+
+.integration-chip .integration-chip-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ok);
+    flex-shrink: 0;
+}
+
+.integration-chip.failed .integration-chip-dot,
+.integration-chip.degraded .integration-chip-dot {
+    background: var(--alarm);
+    box-shadow: 0 0 6px var(--alarm);
+}
+
+.integration-chip.passed .integration-chip-dot {
+    background: var(--ok);
+    box-shadow: 0 0 6px var(--ok);
+}
+
+.integration-chip.pulse-alert {
+    animation: integrationPulse 2s infinite;
+}
+
+@keyframes integrationPulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.04); box-shadow: 0 0 8px rgba(45, 122, 62, 0.4); }
+    100% { transform: scale(1); }
+}
+
+.integration-chip .integration-chip-text {
+    font-size: 11.5px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+/* Health Check On-Demand Alert Modal Card (Console.alert style) */
+.healthcheck-popup-backdrop {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(15, 23, 28, 0.45);
+    backdrop-filter: blur(2px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    animation: popupFadeIn 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes popupFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes cardPop {
+    from {
+        opacity: 0;
+        transform: scale(0.92) translateY(-6px);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+    }
+}
+
+.healthcheck-popup-card {
+    width: 420px;
+    max-width: 92vw;
+    background: #edf0f2;
+    border-radius: 10px;
+    border: 1px solid var(--edge-dark);
+    box-shadow: 0 20px 48px -8px rgba(10, 15, 20, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    animation: cardPop 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+    font-family: inherit;
+    color: var(--ink);
+}
+
+.healthcheck-popup-card.passed {
+    border-top: 4px solid var(--ok);
+}
+
+.healthcheck-popup-card.failed {
+    border-top: 4px solid var(--alarm);
+}
+
+.healthcheck-popup-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 18px;
+    background: #e2e6e9;
+    border-bottom: 1px solid var(--edge);
+}
+
+.healthcheck-popup-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--ink);
+    letter-spacing: -0.2px;
+}
+
+.healthcheck-popup-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    font-size: 12px;
+    font-weight: 800;
+    color: #ffffff;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.healthcheck-popup-card.passed .healthcheck-popup-icon {
+    background: var(--ok);
+    box-shadow: 0 0 8px rgba(45, 122, 62, 0.5);
+}
+
+.healthcheck-popup-card.failed .healthcheck-popup-icon {
+    background: var(--alarm);
+    box-shadow: 0 0 8px rgba(181, 50, 28, 0.5);
+}
+
+.healthcheck-popup-close {
+    background: transparent;
+    border: none;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    color: var(--ink-3);
+    padding: 3px 7px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.12s ease;
+}
+
+.healthcheck-popup-close:hover {
+    color: var(--ink);
+    background: rgba(0, 0, 0, 0.08);
+}
+
+.healthcheck-popup-body {
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 13px;
+}
+
+/* Modern Status Pill & Time Row */
+.healthcheck-popup-badge-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.healthcheck-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 11px;
+    border-radius: 9999px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-family: 'IBM Plex Mono', monospace;
+    transition: all 0.15s ease;
+}
+
+.healthcheck-status-pill.passed {
+    background: rgba(45, 122, 62, 0.12);
+    color: #1b5328;
+    border: 1px solid rgba(45, 122, 62, 0.32);
+}
+
+.healthcheck-status-pill.failed {
+    background: rgba(181, 50, 28, 0.12);
+    color: #8c2311;
+    border: 1px solid rgba(181, 50, 28, 0.32);
+}
+
+.status-beacon {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.healthcheck-status-pill.passed .status-beacon {
+    background: var(--ok);
+    box-shadow: 0 0 0 3px rgba(45, 122, 62, 0.25);
+}
+
+.healthcheck-status-pill.failed .status-beacon {
+    background: var(--alarm);
+    box-shadow: 0 0 0 3px rgba(181, 50, 28, 0.25);
+}
+
+.healthcheck-time-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 9px;
+    border-radius: 9999px;
+    background: rgba(0, 0, 0, 0.04);
+    border: 1px solid var(--edge);
+    font-size: 11px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 500;
+    color: var(--ink-2);
+}
+
+.time-pill-icon {
+    width: 12px;
+    height: 12px;
+    color: var(--ink-3);
+    flex-shrink: 0;
+}
+
+/* Modern Message Box */
+.healthcheck-popup-message-box {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 14px;
+    border-radius: 8px;
+    background: #ffffff;
+    border: 1px solid var(--edge);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.healthcheck-popup-message-box.passed {
+    border-color: rgba(45, 122, 62, 0.28);
+    border-left: 4px solid var(--ok);
+    background: linear-gradient(135deg, rgba(45, 122, 62, 0.05) 0%, #ffffff 100%);
+}
+
+.healthcheck-popup-message-box.failed {
+    border-color: rgba(181, 50, 28, 0.28);
+    border-left: 4px solid var(--alarm);
+    background: linear-gradient(135deg, rgba(181, 50, 28, 0.05) 0%, #ffffff 100%);
+}
+
+.message-icon-col {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+
+.healthcheck-popup-message-box.passed .message-icon-col {
+    background: rgba(45, 122, 62, 0.12);
+    color: var(--ok);
+}
+
+.healthcheck-popup-message-box.failed .message-icon-col {
+    background: rgba(181, 50, 28, 0.12);
+    color: var(--alarm);
+}
+
+.msg-svg {
+    width: 16px;
+    height: 16px;
+}
+
+.message-content {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+}
+
+.message-title {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+}
+
+.healthcheck-popup-message-box.passed .message-title {
+    color: var(--ok);
+}
+
+.healthcheck-popup-message-box.failed .message-title {
+    color: var(--alarm);
+}
+
+.message-text {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: var(--ink);
+    font-weight: 500;
+    word-break: break-word;
+}
+
+/* Enhanced Message Box Content */
+.healthcheck-msg-content {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 3px;
+}
+
+.healthcheck-msg-headline {
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--ink);
+    font-weight: 500;
+}
+
+.healthcheck-msg-chips {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.msg-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2.5px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 600;
+}
+
+.msg-chip-db.ok {
+    background: rgba(45, 122, 62, 0.1);
+    color: #1e5a2c;
+    border: 1px solid rgba(45, 122, 62, 0.25);
+}
+
+.msg-chip-db.err {
+    background: rgba(181, 50, 28, 0.1);
+    color: #8c2311;
+    border: 1px solid rgba(181, 50, 28, 0.25);
+}
+
+.msg-chip-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+}
+
+.msg-chip-db.ok .msg-chip-dot {
+    background: var(--ok);
+    box-shadow: 0 0 4px var(--ok);
+}
+
+.msg-chip-db.err .msg-chip-dot {
+    background: var(--alarm);
+    box-shadow: 0 0 4px var(--alarm);
+}
+
+.msg-chip-time {
+    background: rgba(0, 0, 0, 0.04);
+    color: var(--ink-2);
+    border: 1px solid var(--edge);
+}
+
+.chip-svg {
+    width: 11px;
+    height: 11px;
+    color: var(--ink-3);
+}
+
+.healthcheck-raw-details {
+    margin-top: 2px;
+}
+
+.healthcheck-raw-summary {
+    font-size: 10px;
+    color: var(--ink-3);
+    cursor: pointer;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    user-select: none;
+    transition: color 0.12s ease;
+}
+
+.healthcheck-raw-summary:hover {
+    color: var(--ink);
+}
+
+.healthcheck-raw-code {
+    display: block;
+    margin-top: 4px;
+    padding: 6px 8px;
+    background: rgba(0, 0, 0, 0.04);
+    border-radius: 4px;
+    border: 1px solid var(--edge);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10.5px;
+    color: var(--ink-2);
+    word-break: break-all;
+    line-height: 1.4;
+}
+
+/* Modern Metric Cards Grid */
+.healthcheck-metric-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.metric-card {
+    background: rgba(255, 255, 255, 0.72);
+    border: 1px solid var(--edge);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.metric-card:hover {
+    background: #ffffff;
+    border-color: var(--edge-dark);
+}
+
+.metric-card-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.metric-card-icon {
+    width: 13px;
+    height: 13px;
+    color: var(--ink-3);
+    flex-shrink: 0;
+}
+
+.metric-card-label {
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--ink-3);
+}
+
+.latency-indicator {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-left: auto;
+    flex-shrink: 0;
+}
+
+.latency-indicator.optimal {
+    background: var(--ok);
+    box-shadow: 0 0 5px var(--ok);
+}
+
+.latency-indicator.normal {
+    background: var(--caution);
+    box-shadow: 0 0 5px var(--caution);
+}
+
+.latency-indicator.high {
+    background: var(--alarm);
+    box-shadow: 0 0 5px var(--alarm);
+}
+
+.metric-card-body {
+    display: flex;
+    align-items: baseline;
+    min-height: 22px;
+}
+
+.metric-code-badge {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 4px;
+}
+
+.metric-code-badge.active {
+    background: rgba(0, 0, 0, 0.05);
+    border: 1px solid var(--edge);
+    color: var(--ink);
+}
+
+.metric-code-badge.empty {
+    background: transparent;
+    color: var(--ink-3);
+    font-style: italic;
+}
+
+.metric-num-val {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--ink);
+}
+
+.metric-unit-text {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ink-3);
+    margin-left: 3px;
+}
+
+/* Legacy support styles */
+.healthcheck-popup-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-family: 'IBM Plex Mono', monospace;
+}
+
+.healthcheck-popup-time {
+    font-size: 11px;
+    color: var(--ink-3);
+    font-family: 'IBM Plex Mono', monospace;
+}
+
+.healthcheck-popup-message {
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: var(--ink);
+    font-weight: 500;
+    background: rgba(255, 255, 255, 0.7);
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--edge);
+}
+
+.healthcheck-popup-details {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    background: rgba(0, 0, 0, 0.04);
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--edge);
+}
+
+.healthcheck-popup-details .detail-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.healthcheck-popup-details .detail-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--ink-3);
+    font-weight: 600;
+}
+
+.healthcheck-popup-details .detail-val {
+    font-size: 12px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 600;
+    color: var(--ink);
+}
+
+.healthcheck-popup-footer {
+    display: flex;
+    justify-content: flex-end;
+    padding: 12px 20px;
+    background: #e2e6e9;
+    border-top: 1px solid var(--edge);
+}
+
+.healthcheck-popup-btn {
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 7px 24px;
+    border-radius: 6px;
+    cursor: pointer;
+    background: var(--ink);
+    color: #ffffff;
+    border: 1px solid var(--ink);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+    transition: all 0.12s ease;
+}
+
+.healthcheck-popup-btn:hover {
+    background: #343f45;
+    border-color: #343f45;
+    transform: translateY(-1px);
+    box-shadow: 0 3px 6px rgba(0, 0, 0, 0.2);
+}
+
+.healthcheck-popup-btn:active {
+    transform: translateY(0);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+}
+
+.healthcheck-popup-btn:focus-visible {
+    outline: 2px solid var(--ok);
+    outline-offset: 1px;
+}
+
 /* Main Layout */
 main {
     padding: 10px 16px 28px;

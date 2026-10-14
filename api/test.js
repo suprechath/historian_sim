@@ -8,6 +8,7 @@ import {
 } from './src/services/batchQueueService.js';
 import { pool } from './src/db.js';
 import { logger } from './src/utils/logger.js';
+import { startInternalHeartbeatWorker, stopInternalHeartbeatWorker } from './src/services/heartbeatService.js';
 
 after(async () => {
     await pool.end();
@@ -143,5 +144,17 @@ test('logger provides debug, info, warn, error methods', () => {
         logger.debug('TestRunner', 'Debug level message');
         logger.warn('TestRunner', 'Warn level message');
         logger.error('TestRunner', 'Error level message', { code: 500 });
+    });
+});
+
+// ============================================================================
+// 5. INTERNAL 24/7 HEARTBEAT WORKER LIFECYCLE
+// ============================================================================
+test('startInternalHeartbeatWorker and stopInternalHeartbeatWorker manage worker lifecycle cleanly', () => {
+    assert.doesNotThrow(() => {
+        startInternalHeartbeatWorker();
+        startInternalHeartbeatWorker();
+        stopInternalHeartbeatWorker();
+        stopInternalHeartbeatWorker();
     });
 });

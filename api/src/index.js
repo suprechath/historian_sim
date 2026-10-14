@@ -6,6 +6,11 @@ import dotenv from 'dotenv';
 import { query, pool } from './db.js';
 import uiRoutes, { ensureSimulationControl } from './routes/ui.js';
 import { startJobsWorker, stopJobsWorker } from './jobsWorker.js';
+import {
+    ensureHealthCheckTables,
+    startInternalHeartbeatWorker,
+    stopInternalHeartbeatWorker
+} from './services/heartbeatService.js';
 import { logger } from './utils/logger.js';
 
 // Resolve and load root .env (two levels up from api/src)
@@ -88,7 +93,9 @@ app.use((err, req, res, next) => {
 
 // 6. Initialize Database state and Background Workers
 await ensureSimulationControl();
+await ensureHealthCheckTables();
 startJobsWorker();
+startInternalHeartbeatWorker();
 
 const server = app.listen(PORT, () => {
     logger.info('HistorianAPI', `Core Historian API running on port ${PORT}`);
@@ -100,6 +107,7 @@ const server = app.listen(PORT, () => {
 const shutdown = () => {
     logger.info('HistorianAPI', 'Gracefully terminating HTTP server, worker, and DB pool...');
     stopJobsWorker();
+    stopInternalHeartbeatWorker();
     server.close(async () => {
         try {
             await pool.end();

@@ -94,6 +94,28 @@ router.get('/stream', (req, res) => {
                 }
             }
 
+            // 4. Latest BatchLine Integration Health & Heartbeat Status
+            let integrationHealth = null;
+            try {
+                const { rows } = await query(`
+                    SELECT id, check_type, batch_id, instruction_id, status, message, latency_ms, created_at
+                    FROM integration_health_checks
+                    ORDER BY created_at DESC
+                    LIMIT 1;
+                `);
+                if (rows.length > 0) {
+                    const row = rows[0];
+                    const ageSeconds = Math.round((Date.now() - new Date(row.created_at).getTime()) / 1000);
+                    integrationHealth = {
+                        ...row,
+                        ageSeconds,
+                        isRecentOnDemand: row.check_type === 'on_demand' && ageSeconds <= 60
+                    };
+                }
+            } catch (hErr) {
+                // Ignore if table does not exist yet
+            }
+
             res.write(`data: ${JSON.stringify({
                 clock: new Date(),
                 running: currentSimState.running,
@@ -103,7 +125,8 @@ router.get('/stream', (req, res) => {
                 singleBatchStatus: currentSimState.singleBatchStatus,
                 batchQueue,
                 reactors: reactorMap,
-                tags
+                tags,
+                integrationHealth
             })}\n\n`);
         } catch (err) {
             console.error('SSE snapshot fetch error:', err.message);
@@ -480,6 +503,26 @@ router.get('/readings', async (req, res) => {
 
         res.json({ resolution: targetRes, autoDownsampled: downsampled, count: rows.length, data: rows });
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// 6. Integration Health Checks History
+// ---------------------------------------------------------------------------
+router.get('/integration/health', async (req, res) => {
+    try {
+        const { rows } = await query(`
+            SELECT id, check_type, batch_id, instruction_id, status, message, latency_ms, created_at
+            FROM integration_health_checks
+            ORDER BY created_at DESC
+            LIMIT 20;
+        `);
+        res.json(rows);
+    } catch (err) {
+        if (err.message?.includes('does not exist')) {
+            return res.json([]);
+        }
         res.status(500).json({ error: err.message });
     }
 });

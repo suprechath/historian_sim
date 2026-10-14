@@ -8,7 +8,7 @@ function formatDate(isoStr) {
         `${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())}`;
 }
 
-export default function Header({ clock, running, speed, connected, mode, assignedBatchId, singleBatchStatus }) {
+export default function Header({ clock, running, speed, connected, mode, assignedBatchId, singleBatchStatus, integrationHealth }) {
     const handleSpeed = async (newSpeed, newRunning) => {
         try {
             await fetch('/ui/simulation/state', {
@@ -30,6 +30,25 @@ export default function Header({ clock, running, speed, connected, mode, assigne
                 {formatDate(clock)} <small>UTC+0</small>
             </div>
             <div className="hdr-r">
+                {integrationHealth && (
+                    <div
+                        className={`integration-chip ${integrationHealth.status} ${integrationHealth.isRecentOnDemand ? 'pulse-alert' : ''}`}
+                        title={`Integration Status: ${integrationHealth.message} (${integrationHealth.ageSeconds}s ago)`}
+                    >
+                        <span className="integration-chip-dot" />
+                        <span className="integration-chip-text">
+                            {integrationHealth.isRecentOnDemand ? (
+                                <>
+                                    <b>BatchLine Check:</b> {integrationHealth.status.toUpperCase()} <small>[{integrationHealth.latency_ms}ms]</small>
+                                </>
+                            ) : (
+                                <>
+                                    <b>System:</b> {integrationHealth.status === 'passed' ? 'Heartbeat OK' : 'DEGRADED'} <small>[{Math.max(0, Math.round(integrationHealth.ageSeconds / 60))}m ago]</small>
+                                </>
+                            )}
+                        </span>
+                    </div>
+                )}
                 <div className={`batch-mode-chip ${mode === 'single' ? 'single' : 'continuous'}`} title={mode === 'single' ? `Single Assigned Batch Mode: ${assignedBatchId || 'Pending'}` : 'Continuous Train Mode: Auto-sequencing'}>
                     <span className="mode-chip-dot" />
                     <span className="mode-chip-text">

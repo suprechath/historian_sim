@@ -38,6 +38,15 @@ export function hasScheduleTrigger(text) {
 }
 
 /**
+ * Checks if a Health Check trigger is present in text.
+ * Matches: [HEALTH_CHECK], [HEALTHCHECK], [PING], or [HEALTH]
+ */
+export function hasHealthCheckTrigger(text) {
+    if (!text || typeof text !== 'string') return false;
+    return /\[(HEALTH_CHECK|HEALTHCHECK|PING|HEALTH)\]/i.test(text);
+}
+
+/**
  * Extracts [EXCEPTION: REF=...] triggers from text (e.g. [EXCEPTION: REF=REFINST] or [EXCEPTION]).
  */
 export function extractExceptionTriggers(text, defaultRef = null) {
@@ -211,7 +220,7 @@ export function extractInstructionPayload(body = {}) {
 
     return {
         topic: body.Topic || null,
-        batchId: batch.BatchId || null,
+        batchId: batch.BatchId || batch.BatchID || body.batch_id || body.BatchId || body.BatchID || null,
         rawEventType: instruction.EventType !== undefined ? instruction.EventType : null,
         instructionDescription: instruction.InstructionDescription || body.InstructionDescription || '',
         refElement: cleanPayloadField(instruction.RefElement || body.RefElement),
