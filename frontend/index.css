@@ -42,6 +42,8 @@
     --ph-ph-adjust: #8c5a3c;
     --ph-settle-separate: #6b5b77;
     --ph-solvent-swap: #a8552b;
+    --ph-wait-for-r2: #b3810b;
+    --ph-wait-for-r3: #b3810b;
 }
 
 @keyframes pipeFlow {

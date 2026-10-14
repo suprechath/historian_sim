@@ -5,8 +5,8 @@
  */
 
 export const REACTOR_PHASES = {
-  R1: ['Idle', 'Charging', 'Heating', 'Distillation', 'Reaction hold', 'Cooling', 'Transfer', 'Clean'],
-  R2: ['Idle', 'Receive', 'pH adjust', 'Settle & separate', 'Solvent swap', 'Filter & transfer', 'Clean'],
+  R1: ['Idle', 'Charging', 'Heating', 'Distillation', 'Reaction hold', 'Cooling', 'Wait for R2', 'Transfer', 'Clean'],
+  R2: ['Idle', 'Receive', 'pH adjust', 'Settle & separate', 'Solvent swap', 'Wait for R3', 'Filter & transfer', 'Clean'],
   R3: ['Idle', 'Receive', 'Heat to dissolve', 'Cooling ramp', 'Age', 'Transfer', 'Clean'],
 };
 
@@ -18,6 +18,7 @@ export const PHASE_DURATIONS = {
     'Distillation': { min: 2100, max: 2700 },     // 35m – 45m (Azeotropic water/solvent distillation)
     'Reaction hold': { min: 9600, max: 12000 },   // 160m – 200m (Condensation hold)
     'Cooling': { min: 2400, max: 3600 },          // 40m – 60m (Controlled cooling to ~80 °C safe transfer)
+    'Wait for R2': { min: 3600, max: 86400 },     // Interlock hold until R2 becomes Idle
     'Transfer': { min: 600, max: 1800 },          // 10m – 30m (Cooled transfer to R2)
     'Clean': { min: 600, max: 1800 },             // 10m – 30m
   },
@@ -27,6 +28,7 @@ export const PHASE_DURATIONS = {
     'pH adjust': { min: 2700, max: 5400 },
     'Settle & separate': { min: 1800, max: 3600 },
     'Solvent swap': { min: 3600, max: 7200 },
+    'Wait for R3': { min: 3600, max: 86400 },     // Interlock hold until R3 becomes Idle
     'Filter & transfer': { min: 300, max: 720 }, // 5m – 12m (Inline polish transfer to R3)
     'Clean': { min: 1800, max: 3600 },
   },
@@ -313,6 +315,15 @@ export class ReactorSimulation {
         v.AGIT = this.approach(v.AGIT, 110, 60, 0.1, dt);
         v.VOL = 3000;
         v.N2_BLANKET = 1;
+      case 'Wait for R2':
+        v.JKT_MODE = 0;
+        v.VOL = 3000;
+        v.AGIT_RUN = 1;
+        v.AGIT = this.approach(v.AGIT, 80, 45, 0.1, dt);
+        v.TEMP = this.approach(v.TEMP, 80.0, 360, 0.01, dt);
+        v.JKT_TEMP = this.approach(v.JKT_TEMP, 75.0, 200, 0.01, dt);
+        v.PRES = this.approach(v.PRES, 0.08, 120, 0.003, dt);
+        v.N2_BLANKET = 1;
         break;
 
       case 'Transfer':
@@ -425,6 +436,13 @@ export class ReactorSimulation {
         v.TEMP = this.approach(v.TEMP, targetSwapTemp, 90, 0.015, dt);
         const swapVol = prog < 0.6 ? 3100 - prog * 900 : 2560 + (prog - 0.6) * 400;
         v.VOL = this.approach(v.VOL, swapVol, 120, 0.05, dt);
+        v.N2_BLANKET = 1;
+      case 'Wait for R3':
+        v.AGIT_RUN = 1;
+        v.DOSE_PUMP = 0;
+        v.DOSE_FLOW = 0;
+        v.TEMP = this.approach(v.TEMP, 35.0, 180, 0.01, dt);
+        v.VOL = this.approach(v.VOL, 2700, 120, 0.05, dt);
         v.N2_BLANKET = 1;
         break;
 

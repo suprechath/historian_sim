@@ -34,25 +34,15 @@ export class BatchOrchestrator {
       );
 
       if (activeBatches.length > 0) {
-        this.trainBatch = activeBatches[0];
-
-        // Clean up any extraneous running batches
-        if (activeBatches.length > 1) {
-          const olderIds = activeBatches.slice(1).map((b) => b.id);
-          await query(
-            "UPDATE batches SET status = 'Completed', ended_at = NOW(), current_asset_id = NULL WHERE id = ANY($1::int[])",
-            [olderIds]
-          );
-        }
-
-        // Rehydrate the active reactor holding the batch
+        // Rehydrate each reactor holding an active batch
         for (const sim of this.reactors) {
-          if (sim.asset.id === this.trainBatch.current_asset_id) {
-            sim.activeBatch = this.trainBatch;
+          const matchedBatch = activeBatches.find((b) => b.current_asset_id === sim.asset.id);
+          if (matchedBatch) {
+            sim.activeBatch = matchedBatch;
 
             const { rows: upEv } = await query(
               "SELECT id FROM events WHERE batch_pk = $1 AND asset_id = $2 AND level = 'Unit Procedure' AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
-              [this.trainBatch.id, sim.asset.id]
+              [matchedBatch.id, sim.asset.id]
             );
             if (upEv.length > 0) sim.activeUnitProcedureId = upEv[0].id;
 
@@ -66,7 +56,7 @@ export class BatchOrchestrator {
               sim.phaseOccurrence = phEv[0].occurrence || 1;
             }
             logger.info(
-              `Restored in-flight batch ${this.trainBatch.batch_id} in ${sim.code} (Phase: ${sim.currentPhase})`,
+              `Restored in-flight batch ${matchedBatch.batch_id} in ${sim.code} (Phase: ${sim.currentPhase})`,
               'BatchOrchestrator'
             );
           } else {
@@ -87,11 +77,13 @@ export class BatchOrchestrator {
             }
           }
         }
+        this.trainBatch = this.r1.activeBatch || this.r2.activeBatch || this.r3.activeBatch || activeBatches[0];
       } else {
         this.reactors.forEach((r) => {
           r.currentPhase = 'Idle';
           r.activeBatch = null;
         });
+        this.trainBatch = null;
       }
 
       // Close dangling phase/UP events from previous orphaned sessions
@@ -130,6 +122,9 @@ export class BatchOrchestrator {
     if (batchCommand === 'start_omit_existing') {
       // Combination 3: Omit existing batch across the whole plant and start R1 with new batch immediately
       await withTransaction(async (client) => {
+        const abortedBatchPks = new Set();
+        const abortedBatchIds = new Set();
+
         for (const vessel of this.reactors) {
           if (vessel.activePhaseEventId) {
             await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, vessel.activePhaseEventId]);
@@ -139,22 +134,33 @@ export class BatchOrchestrator {
             await client.query('UPDATE events SET ended_at = $1 WHERE id = $2', [now, vessel.activeUnitProcedureId]);
             vessel.activeUnitProcedureId = null;
           }
-          vessel.activeBatch = null;
+          if (vessel.activeBatch) {
+            abortedBatchPks.add(vessel.activeBatch.id);
+            abortedBatchIds.add(vessel.activeBatch.batch_id);
+            vessel.activeBatch = null;
+          }
           vessel.transitionNextPhase('Idle');
           vessel.phaseElapsedSec = 0;
         }
 
         if (this.trainBatch) {
-          await client.query(
-            "UPDATE batches SET ended_at = $1, status = 'Aborted', current_asset_id = NULL WHERE id = $2",
-            [now, this.trainBatch.id]
-          );
-          await client.query(
-            "UPDATE batch_queue SET status = 'aborted', updated_at = $1 WHERE batch_id = $2 AND status = 'running'",
-            [now, this.trainBatch.batch_id]
-          );
-          logger.info(`Aborted existing batch ${this.trainBatch.batch_id} to start assigned batch immediately`, 'BatchOrchestrator');
+          abortedBatchPks.add(this.trainBatch.id);
+          abortedBatchIds.add(this.trainBatch.batch_id);
           this.trainBatch = null;
+        }
+
+        if (abortedBatchPks.size > 0) {
+          const pkList = Array.from(abortedBatchPks);
+          const idList = Array.from(abortedBatchIds);
+          await client.query(
+            "UPDATE batches SET ended_at = $1, status = 'Aborted', current_asset_id = NULL WHERE id = ANY($2::int[])",
+            [now, pkList]
+          );
+          await client.query(
+            "UPDATE batch_queue SET status = 'aborted', updated_at = $1 WHERE batch_id = ANY($2::text[]) AND status = 'running'",
+            [now, idList]
+          );
+          logger.info(`Aborted existing batches [${idList.join(', ')}] to start assigned batch immediately`, 'BatchOrchestrator');
         }
       });
     }
@@ -186,7 +192,8 @@ export class BatchOrchestrator {
         return false;
       }
 
-      const isTrainIdle = !this.trainBatch && this.r1.currentPhase === 'Idle' && this.r2.currentPhase === 'Idle' && this.r3.currentPhase === 'Idle';
+      const isTrainIdle = !this.r1.activeBatch && !this.r2.activeBatch && !this.r3.activeBatch &&
+                          this.r1.currentPhase === 'Idle' && this.r2.currentPhase === 'Idle' && this.r3.currentPhase === 'Idle';
 
       let eligible = null;
       for (const item of pending) {
@@ -274,7 +281,8 @@ export class BatchOrchestrator {
 
     // 1. If train is completely empty and R1 is Idle:
     // If no queued manual batch just started and no pending manual batches in queue, continue random batch!
-    if (simRunning && !this.trainBatch && this.r1.currentPhase === 'Idle' && !queuedBatchStarted) {
+    const isTrainCompletelyEmpty = !this.r1.activeBatch && !this.r2.activeBatch && !this.r3.activeBatch;
+    if (simRunning && isTrainCompletelyEmpty && this.r1.currentPhase === 'Idle' && !queuedBatchStarted) {
       const { rows: pendingManual } = await query(
         "SELECT id FROM batch_queue WHERE status IN ('waiting_r1', 'in_queue', 'pending_omit') LIMIT 1"
       );
@@ -329,6 +337,49 @@ export class BatchOrchestrator {
         await this._handlePhaseTransition(sim, now, simMode, controlService);
       }
     }
+
+    // 3. Downstream availability interlocks for waiting vessels
+    if (this.r1.currentPhase === 'Wait for R2' && this.r2.currentPhase === 'Idle' && !this.r2.activeBatch) {
+      if (this.r1.activePhaseEventId) {
+        await this.closeEvent(this.r1.activePhaseEventId, now);
+        this.r1.activePhaseEventId = null;
+      }
+      await this._startR1ToR2Transfer(this.r1, now);
+    }
+
+    if (this.r2.currentPhase === 'Wait for R3' && this.r3.currentPhase === 'Idle' && !this.r3.activeBatch) {
+      if (this.r2.activePhaseEventId) {
+        await this.closeEvent(this.r2.activePhaseEventId, now);
+        this.r2.activePhaseEventId = null;
+      }
+      await this._startR2ToR3Transfer(this.r2, now);
+    }
+  }
+
+  async _startR1ToR2Transfer(sim, now) {
+    const r1TransferDur = this.prng.rangeInt(900, 1500); // 15-25 min
+    sim.transitionNextPhase('Transfer');
+    sim.phaseDurationSec = r1TransferDur;
+    await this.openPhaseEvent(sim, 'Transfer', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
+
+    this.r2.activeBatch = sim.activeBatch;
+    this.r2.transitionNextPhase('Receive');
+    this.r2.phaseDurationSec = r1TransferDur;
+    await this.openPhaseEvent(this.r2, 'Receive', this.r2.activeBatch?.id, null, now);
+    logger.info(`Batch ${this.r2.activeBatch?.batch_id} transferring R1 -> R2 (Receive)`, 'BatchOrchestrator');
+  }
+
+  async _startR2ToR3Transfer(sim, now) {
+    const r2TransferDur = this.prng.rangeInt(600, 1200); // 10-20 min
+    sim.transitionNextPhase('Filter & transfer');
+    sim.phaseDurationSec = r2TransferDur;
+    await this.openPhaseEvent(sim, 'Filter & transfer', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
+
+    this.r3.activeBatch = sim.activeBatch;
+    this.r3.transitionNextPhase('Receive');
+    this.r3.phaseDurationSec = r2TransferDur;
+    await this.openPhaseEvent(this.r3, 'Receive', this.r3.activeBatch?.id, null, now);
+    logger.info(`Batch ${this.r3.activeBatch?.batch_id} transferring R2 -> R3 (Receive)`, 'BatchOrchestrator');
   }
 
   async _handlePhaseTransition(sim, now, simMode, controlService) {
@@ -336,33 +387,40 @@ export class BatchOrchestrator {
       switch (sim.currentPhase) {
         case 'Charging':
           sim.transitionNextPhase('Heating');
-          await this.openPhaseEvent(sim, 'Heating', this.trainBatch?.id, sim.activeUnitProcedureId, now);
+          await this.openPhaseEvent(sim, 'Heating', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
           break;
         case 'Heating':
           sim.transitionNextPhase('Distillation');
-          await this.openPhaseEvent(sim, 'Distillation', this.trainBatch?.id, sim.activeUnitProcedureId, now);
+          await this.openPhaseEvent(sim, 'Distillation', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
           break;
         case 'Distillation':
           sim.transitionNextPhase('Reaction hold');
-          await this.openPhaseEvent(sim, 'Reaction hold', this.trainBatch?.id, sim.activeUnitProcedureId, now);
+          await this.openPhaseEvent(sim, 'Reaction hold', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
           break;
         case 'Reaction hold':
           sim.transitionNextPhase('Cooling');
-          await this.openPhaseEvent(sim, 'Cooling', this.trainBatch?.id, sim.activeUnitProcedureId, now);
+          await this.openPhaseEvent(sim, 'Cooling', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
           break;
         case 'Cooling':
-          // Synchronized Handoff to R2
-          const r1TransferDur = this.prng.rangeInt(900, 1500); // 15-25 min
-          sim.transitionNextPhase('Transfer');
-          sim.phaseDurationSec = r1TransferDur;
-          await this.openPhaseEvent(sim, 'Transfer', this.trainBatch?.id, sim.activeUnitProcedureId, now);
-
-          // R2 enters Receive at the exact same moment
-          this.r2.activeBatch = this.trainBatch;
-          this.r2.transitionNextPhase('Receive');
-          this.r2.phaseDurationSec = r1TransferDur;
-          await this.openPhaseEvent(this.r2, 'Receive', this.trainBatch?.id, null, now);
-          logger.info(`Batch ${this.trainBatch?.batch_id} transferring R1 -> R2 (Receive)`, 'BatchOrchestrator');
+          // Interlock check: Is R2 available?
+          if (this.r2.currentPhase !== 'Idle' || this.r2.activeBatch) {
+            sim.transitionNextPhase('Wait for R2');
+            await this.openPhaseEvent(sim, 'Wait for R2', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
+            logger.info(
+              `Batch ${sim.activeBatch?.batch_id} in R1 entered 'Wait for R2' (downstream busy with ${this.r2.activeBatch?.batch_id || this.r2.currentPhase})`,
+              'BatchOrchestrator'
+            );
+            break;
+          }
+          await this._startR1ToR2Transfer(sim, now);
+          break;
+        case 'Wait for R2':
+          if (this.r2.currentPhase === 'Idle' && !this.r2.activeBatch) {
+            await this._startR1ToR2Transfer(sim, now);
+          } else {
+            sim.phaseElapsedSec = 0;
+            await this.openPhaseEvent(sim, 'Wait for R2', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
+          }
           break;
         case 'Transfer':
           if (sim.activeUnitProcedureId) {
@@ -381,39 +439,46 @@ export class BatchOrchestrator {
     } else if (sim.code === 'R2') {
       switch (sim.currentPhase) {
         case 'Receive':
-          if (this.trainBatch) {
-            await query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [this.r2.asset.id, this.trainBatch.id]);
+          if (sim.activeBatch) {
+            await query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [this.r2.asset.id, sim.activeBatch.id]);
             const { rows: up2Rows } = await query(
               `INSERT INTO events (batch_pk, asset_id, name, level, started_at)
                VALUES ($1, $2, 'Unit procedure R2 — Workup', 'Unit Procedure', $3) RETURNING id`,
-              [this.trainBatch.id, this.r2.asset.id, now]
+              [sim.activeBatch.id, this.r2.asset.id, now]
             );
             this.r2.activeUnitProcedureId = up2Rows[0].id;
           }
           sim.transitionNextPhase('pH adjust');
-          await this.openPhaseEvent(sim, 'pH adjust', this.trainBatch?.id, sim.activeUnitProcedureId, now);
+          await this.openPhaseEvent(sim, 'pH adjust', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
           break;
         case 'pH adjust':
           sim.transitionNextPhase('Settle & separate');
-          await this.openPhaseEvent(sim, 'Settle & separate', this.trainBatch?.id, sim.activeUnitProcedureId, now);
+          await this.openPhaseEvent(sim, 'Settle & separate', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
           break;
         case 'Settle & separate':
           sim.transitionNextPhase('Solvent swap');
-          await this.openPhaseEvent(sim, 'Solvent swap', this.trainBatch?.id, sim.activeUnitProcedureId, now);
+          await this.openPhaseEvent(sim, 'Solvent swap', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
           break;
         case 'Solvent swap':
-          // Synchronized Handoff to R3
-          const r2TransferDur = this.prng.rangeInt(600, 1200); // 10-20 min
-          sim.transitionNextPhase('Filter & transfer');
-          sim.phaseDurationSec = r2TransferDur;
-          await this.openPhaseEvent(sim, 'Filter & transfer', this.trainBatch?.id, sim.activeUnitProcedureId, now);
-
-          // R3 enters Receive at the exact same moment
-          this.r3.activeBatch = this.trainBatch;
-          this.r3.transitionNextPhase('Receive');
-          this.r3.phaseDurationSec = r2TransferDur;
-          await this.openPhaseEvent(this.r3, 'Receive', this.trainBatch?.id, null, now);
-          logger.info(`Batch ${this.trainBatch?.batch_id} transferring R2 -> R3 (Receive)`, 'BatchOrchestrator');
+          // Interlock check: Is R3 available?
+          if (this.r3.currentPhase !== 'Idle' || this.r3.activeBatch) {
+            sim.transitionNextPhase('Wait for R3');
+            await this.openPhaseEvent(sim, 'Wait for R3', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
+            logger.info(
+              `Batch ${sim.activeBatch?.batch_id} in R2 entered 'Wait for R3' (downstream busy with ${this.r3.activeBatch?.batch_id || this.r3.currentPhase})`,
+              'BatchOrchestrator'
+            );
+            break;
+          }
+          await this._startR2ToR3Transfer(sim, now);
+          break;
+        case 'Wait for R3':
+          if (this.r3.currentPhase === 'Idle' && !this.r3.activeBatch) {
+            await this._startR2ToR3Transfer(sim, now);
+          } else {
+            sim.phaseElapsedSec = 0;
+            await this.openPhaseEvent(sim, 'Wait for R3', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
+          }
           break;
         case 'Filter & transfer':
         case 'Transfer':
@@ -427,52 +492,63 @@ export class BatchOrchestrator {
           break;
         case 'Clean':
           sim.transitionNextPhase('Idle');
+          // Check if R1 was waiting for R2 to become available
+          if (this.r1.currentPhase === 'Wait for R2') {
+            if (this.r1.activePhaseEventId) {
+              await this.closeEvent(this.r1.activePhaseEventId, now);
+              this.r1.activePhaseEventId = null;
+            }
+            await this._startR1ToR2Transfer(this.r1, now);
+          }
           break;
       }
     } else if (sim.code === 'R3') {
       switch (sim.currentPhase) {
         case 'Receive':
-          if (this.trainBatch) {
-            await query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [this.r3.asset.id, this.trainBatch.id]);
+          if (sim.activeBatch) {
+            await query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [this.r3.asset.id, sim.activeBatch.id]);
             const { rows: up3Rows } = await query(
               `INSERT INTO events (batch_pk, asset_id, name, level, started_at)
                VALUES ($1, $2, 'Unit procedure R3 — Crystallisation', 'Unit Procedure', $3) RETURNING id`,
-              [this.trainBatch.id, this.r3.asset.id, now]
+              [sim.activeBatch.id, this.r3.asset.id, now]
             );
             this.r3.activeUnitProcedureId = up3Rows[0].id;
           }
           sim.transitionNextPhase('Heat to dissolve');
-          await this.openPhaseEvent(sim, 'Heat to dissolve', this.trainBatch?.id, sim.activeUnitProcedureId, now);
+          await this.openPhaseEvent(sim, 'Heat to dissolve', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
           break;
         case 'Heat to dissolve':
           sim.transitionNextPhase('Cooling ramp');
-          await this.openPhaseEvent(sim, 'Cooling ramp', this.trainBatch?.id, sim.activeUnitProcedureId, now);
+          await this.openPhaseEvent(sim, 'Cooling ramp', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
           break;
         case 'Cooling ramp':
           sim.transitionNextPhase('Age');
-          await this.openPhaseEvent(sim, 'Age', this.trainBatch?.id, sim.activeUnitProcedureId, now);
+          await this.openPhaseEvent(sim, 'Age', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
           break;
         case 'Age':
           sim.transitionNextPhase('Transfer');
-          await this.openPhaseEvent(sim, 'Transfer', this.trainBatch?.id, sim.activeUnitProcedureId, now);
+          await this.openPhaseEvent(sim, 'Transfer', sim.activeBatch?.id, sim.activeUnitProcedureId, now);
           break;
         case 'Transfer':
           if (sim.activeUnitProcedureId) {
             await this.closeEvent(sim.activeUnitProcedureId, now);
             sim.activeUnitProcedureId = null;
           }
-          if (this.trainBatch) {
-            const finishedId = this.trainBatch.batch_id;
+          if (sim.activeBatch) {
+            const finishedId = sim.activeBatch.batch_id;
+            const finishedPk = sim.activeBatch.id;
             await query(
               "UPDATE batches SET ended_at = $1, status = 'Completed', current_asset_id = NULL WHERE id = $2",
-              [now, this.trainBatch.id]
+              [now, finishedPk]
             );
             await query(
               "UPDATE batch_queue SET status = 'completed', updated_at = $1 WHERE batch_id = $2 AND status = 'running'",
               [now, finishedId]
             );
             logger.info(`Batch ${finishedId} Completed successfully!`, 'BatchOrchestrator');
-            this.trainBatch = null;
+            if (this.trainBatch?.id === finishedPk) {
+              this.trainBatch = null;
+            }
 
             const started = await this._checkAndStartNextQueuedBatch(now, controlService);
             if (!started) {
@@ -488,13 +564,21 @@ export class BatchOrchestrator {
           break;
         case 'Clean':
           sim.transitionNextPhase('Idle');
+          // Check if R2 was waiting for R3 to become available
+          if (this.r2.currentPhase === 'Wait for R3') {
+            if (this.r2.activePhaseEventId) {
+              await this.closeEvent(this.r2.activePhaseEventId, now);
+              this.r2.activePhaseEventId = null;
+            }
+            await this._startR2ToR3Transfer(this.r2, now);
+          }
           break;
       }
     }
   }
 
   getActiveTrainBatch() {
-    return this.trainBatch;
+    return this.r1.activeBatch || this.r2.activeBatch || this.r3.activeBatch || this.trainBatch || null;
   }
 
   async skipReactorProcess(assetCode, now, simMode, controlService) {
@@ -518,15 +602,27 @@ export class BatchOrchestrator {
         sim.activeUnitProcedureId = null;
       }
 
-      if (this.trainBatch) {
-        this.r2.activeBatch = this.trainBatch;
-        await query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [this.r2.asset.id, this.trainBatch.id]);
+      if (sim.activeBatch) {
+        const isR2Ready = this.r2.currentPhase === 'Idle' && !this.r2.activeBatch;
+        if (!isR2Ready) {
+          // Downstream R2 is occupied! Hold R1 safely in Wait for R2
+          sim.transitionNextPhase('Wait for R2');
+          await this.openPhaseEvent(sim, 'Wait for R2', sim.activeBatch.id, sim.activeUnitProcedureId, now);
+          logger.info(
+            `Batch ${sim.activeBatch.batch_id} in R1 process skipped to 'Wait for R2' (downstream busy with ${this.r2.activeBatch?.batch_id || this.r2.currentPhase})`,
+            'BatchOrchestrator'
+          );
+          return;
+        }
+
+        this.r2.activeBatch = sim.activeBatch;
+        await query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [this.r2.asset.id, sim.activeBatch.id]);
 
         if (!this.r2.activeUnitProcedureId) {
           const { rows: up2Rows } = await query(
             `INSERT INTO events (batch_pk, asset_id, name, level, started_at)
              VALUES ($1, $2, 'Unit procedure R2 — Workup', 'Unit Procedure', $3) RETURNING id`,
-            [this.trainBatch.id, this.r2.asset.id, now]
+            [sim.activeBatch.id, this.r2.asset.id, now]
           );
           this.r2.activeUnitProcedureId = up2Rows[0].id;
         }
@@ -537,8 +633,8 @@ export class BatchOrchestrator {
         }
 
         this.r2.transitionNextPhase('pH adjust');
-        await this.openPhaseEvent(this.r2, 'pH adjust', this.trainBatch.id, this.r2.activeUnitProcedureId, now);
-        logger.info(`Batch ${this.trainBatch.batch_id} skipped R1 process -> transferred to R2 (pH adjust)`, 'BatchOrchestrator');
+        await this.openPhaseEvent(this.r2, 'pH adjust', sim.activeBatch.id, this.r2.activeUnitProcedureId, now);
+        logger.info(`Batch ${sim.activeBatch.batch_id} skipped R1 process -> transferred to R2 (pH adjust)`, 'BatchOrchestrator');
       }
 
       sim.activeBatch = null;
@@ -564,15 +660,27 @@ export class BatchOrchestrator {
         sim.activeUnitProcedureId = null;
       }
 
-      if (this.trainBatch) {
-        this.r3.activeBatch = this.trainBatch;
-        await query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [this.r3.asset.id, this.trainBatch.id]);
+      if (sim.activeBatch) {
+        const isR3Ready = this.r3.currentPhase === 'Idle' && !this.r3.activeBatch;
+        if (!isR3Ready) {
+          // Downstream R3 is occupied! Hold R2 safely in Wait for R3
+          sim.transitionNextPhase('Wait for R3');
+          await this.openPhaseEvent(sim, 'Wait for R3', sim.activeBatch.id, sim.activeUnitProcedureId, now);
+          logger.info(
+            `Batch ${sim.activeBatch.batch_id} in R2 process skipped to 'Wait for R3' (downstream busy with ${this.r3.activeBatch?.batch_id || this.r3.currentPhase})`,
+            'BatchOrchestrator'
+          );
+          return;
+        }
+
+        this.r3.activeBatch = sim.activeBatch;
+        await query('UPDATE batches SET current_asset_id = $1 WHERE id = $2', [this.r3.asset.id, sim.activeBatch.id]);
 
         if (!this.r3.activeUnitProcedureId) {
           const { rows: up3Rows } = await query(
             `INSERT INTO events (batch_pk, asset_id, name, level, started_at)
              VALUES ($1, $2, 'Unit procedure R3 — Crystallisation', 'Unit Procedure', $3) RETURNING id`,
-            [this.trainBatch.id, this.r3.asset.id, now]
+            [sim.activeBatch.id, this.r3.asset.id, now]
           );
           this.r3.activeUnitProcedureId = up3Rows[0].id;
         }
@@ -583,8 +691,8 @@ export class BatchOrchestrator {
         }
 
         this.r3.transitionNextPhase('Heat to dissolve');
-        await this.openPhaseEvent(this.r3, 'Heat to dissolve', this.trainBatch.id, this.r3.activeUnitProcedureId, now);
-        logger.info(`Batch ${this.trainBatch.batch_id} skipped R2 process -> transferred to R3 (Heat to dissolve)`, 'BatchOrchestrator');
+        await this.openPhaseEvent(this.r3, 'Heat to dissolve', sim.activeBatch.id, this.r3.activeUnitProcedureId, now);
+        logger.info(`Batch ${sim.activeBatch.batch_id} skipped R2 process -> transferred to R3 (Heat to dissolve)`, 'BatchOrchestrator');
       }
 
       sim.activeBatch = null;
@@ -609,18 +717,21 @@ export class BatchOrchestrator {
         sim.activeUnitProcedureId = null;
       }
 
-      if (this.trainBatch) {
-        const finishedId = this.trainBatch.batch_id;
+      if (sim.activeBatch) {
+        const finishedId = sim.activeBatch.batch_id;
+        const finishedPk = sim.activeBatch.id;
         await query(
           "UPDATE batches SET ended_at = $1, status = 'Completed', current_asset_id = NULL WHERE id = $2",
-          [now, this.trainBatch.id]
+          [now, finishedPk]
         );
         await query(
           "UPDATE batch_queue SET status = 'completed', updated_at = $1 WHERE batch_id = $2 AND status = 'running'",
           [now, finishedId]
         );
         logger.info(`Batch ${finishedId} Completed via R3 process skip!`, 'BatchOrchestrator');
-        this.trainBatch = null;
+        if (this.trainBatch?.id === finishedPk) {
+          this.trainBatch = null;
+        }
 
         const started = await this._checkAndStartNextQueuedBatch(now, controlService);
         if (!started) {
