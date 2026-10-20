@@ -585,3 +585,207 @@ export async function getBatchExceptions(batchPk, filterPhase = null, filterTag 
 
     return rows;
 }
+
+/**
+ * Resolves an asset record from refElement.
+ * Supports:
+ *  - Asset code (e.g. "R1", "r1")
+ *  - Asset display name / alias (e.g. "Reactor 1", "Reactor 1 — Synthesis")
+ *  - Tag notation referencing an asset (e.g. "R1.TEMP", "Reactor 1.TEMP")
+ *  - Numeric asset ID (e.g. 1)
+ *
+ * @param {string|number} refElement - The equipment element reference from instruction payload.
+ * @param {object|null} [ctx=null] - Optional execution context for structured error reporting.
+ * @returns {Promise<{id: number, code: string, display_name: string, asset_type: string}|null>}
+ */
+export async function resolveAsset(refElement, ctx = null) {
+    if (!refElement) return null;
+    const trimmed = String(refElement).trim();
+
+    // 1. If notation has a dot, extract vessel/asset prefix (e.g. "R1.TEMP" -> "R1")
+    let assetCandidate = trimmed;
+    const dotIndex = trimmed.indexOf('.');
+    if (dotIndex > 0) {
+        assetCandidate = trimmed.slice(0, dotIndex).trim();
+    }
+
+    // 2. Canonicalize "Reactor X" -> "RX"
+    const reactorMatch = assetCandidate.match(/reactor\s*(\d+)/i);
+    if (reactorMatch) {
+        assetCandidate = `R${reactorMatch[1]}`;
+    }
+
+    // 3. Query assets by code, display name, or prefix match
+    const { rows } = await query(`
+        SELECT id, code, display_name, asset_type
+        FROM assets
+        WHERE LOWER(code) = LOWER($1)
+           OR LOWER(display_name) = LOWER($2)
+           OR display_name ILIKE $2 || '%'
+           OR code ILIKE $1 || '%'
+        ORDER BY CASE WHEN LOWER(code) = LOWER($1) THEN 1 ELSE 2 END
+        LIMIT 1;
+    `, [assetCandidate, trimmed]);
+
+    if (rows.length > 0) {
+        logger.debug('DAL', `Resolved asset "${rows[0].code}" for refElement "${refElement}"`, rows[0]);
+        return rows[0];
+    }
+
+    // 4. Fallback: check if refElement is a tag name and resolve asset through tags table
+    const { rows: tagRows } = await query(`
+        SELECT a.id, a.code, a.display_name, a.asset_type
+        FROM tags t
+        JOIN assets a ON t.asset_id = a.id
+        WHERE LOWER(t.name) = LOWER($1)
+        LIMIT 1;
+    `, [trimmed]);
+
+    if (tagRows.length > 0) {
+        logger.debug('DAL', `Resolved asset "${tagRows[0].code}" from tag "${trimmed}"`, tagRows[0]);
+        return tagRows[0];
+    }
+
+    // 5. Fallback: numeric ID check
+    const numericId = parseInt(trimmed, 10);
+    if (!isNaN(numericId) && String(numericId) === trimmed) {
+        const { rows: idRows } = await query(`
+            SELECT id, code, display_name, asset_type
+            FROM assets
+            WHERE id = $1
+            LIMIT 1;
+        `, [numericId]);
+
+        if (idRows.length > 0) {
+            return idRows[0];
+        }
+    }
+
+    await reportError(`[Asset Resolution Error]: Asset not found for candidate "${refElement}"`, ctx);
+    return null;
+}
+
+/**
+ * Queries the previous batch number that ran on the given asset.
+ * Considers both active asset assignment (batches.current_asset_id) and historical asset execution (events).
+ *
+ * @param {object} params
+ * @param {number} params.assetId - The resolved asset ID.
+ * @param {string|null} [params.currentBatchId] - The batch ID currently executing in BatchLine to exclude.
+ * @returns {Promise<object|null>} The previous batch object ({ id, batch_id, started_at, ended_at, status }) or null.
+ */
+export async function getPreviousBatchForAsset({ assetId, currentBatchId = null }) {
+    if (!assetId) return null;
+
+    // Case A: currentBatchId is provided
+    if (currentBatchId) {
+        const { rows: currentRows } = await query(`
+            SELECT id, batch_id, started_at, status
+            FROM batches
+            WHERE LOWER(batch_id) = LOWER($1)
+            ORDER BY id DESC
+            LIMIT 1;
+        `, [currentBatchId]);
+
+        if (currentRows.length > 0) {
+            const currentBatch = currentRows[0];
+            const { rows: prevRows } = await query(`
+                SELECT b.id, b.batch_id, b.started_at, b.ended_at, b.status
+                FROM batches b
+                WHERE (
+                    b.current_asset_id = $1
+                    OR EXISTS (
+                        SELECT 1 FROM events e
+                        WHERE e.batch_pk = b.id AND e.asset_id = $1
+                    )
+                )
+                AND b.id != $2
+                AND LOWER(b.batch_id) != LOWER($3)
+                AND (
+                    b.started_at < $4
+                    OR (b.started_at = $4 AND b.id < $2)
+                    OR b.id < $2
+                )
+                ORDER BY b.started_at DESC, b.id DESC
+                LIMIT 1;
+            `, [assetId, currentBatch.id, currentBatch.batch_id, currentBatch.started_at]);
+
+            if (prevRows.length > 0) {
+                return prevRows[0];
+            }
+        } else {
+            // currentBatchId was supplied from BatchLine, but is not yet recorded in the local batches table
+            const { rows: fallbackRows } = await query(`
+                SELECT b.id, b.batch_id, b.started_at, b.ended_at, b.status
+                FROM batches b
+                WHERE (
+                    b.current_asset_id = $1
+                    OR EXISTS (
+                        SELECT 1 FROM events e
+                        WHERE e.batch_pk = b.id AND e.asset_id = $1
+                    )
+                )
+                AND LOWER(b.batch_id) != LOWER($2)
+                ORDER BY b.started_at DESC, b.id DESC
+                LIMIT 1;
+            `, [assetId, currentBatchId]);
+
+            if (fallbackRows.length > 0) {
+                return fallbackRows[0];
+            }
+        }
+    }
+
+    // Case B: currentBatchId was not provided, check if a batch is currently active on this asset
+    const { rows: activeRunningRows } = await query(`
+        SELECT id, batch_id, started_at
+        FROM batches
+        WHERE current_asset_id = $1 AND status = 'Running'
+        ORDER BY started_at DESC, id DESC
+        LIMIT 1;
+    `, [assetId]);
+
+    if (activeRunningRows.length > 0) {
+        const activeBatch = activeRunningRows[0];
+        const { rows: prevRows } = await query(`
+            SELECT b.id, b.batch_id, b.started_at, b.ended_at, b.status
+            FROM batches b
+            WHERE (
+                b.current_asset_id = $1
+                OR EXISTS (
+                    SELECT 1 FROM events e
+                    WHERE e.batch_pk = b.id AND e.asset_id = $1
+                )
+            )
+            AND b.id != $2
+            AND (
+                b.started_at < $3
+                OR (b.started_at = $3 AND b.id < $2)
+                OR b.id < $2
+            )
+            ORDER BY b.started_at DESC, b.id DESC
+            LIMIT 1;
+        `, [assetId, activeBatch.id, activeBatch.started_at]);
+
+        if (prevRows.length > 0) {
+            return prevRows[0];
+        }
+    }
+
+    // Case C: General fallback - fetch the latest batch on this asset
+    const { rows: latestRows } = await query(`
+        SELECT b.id, b.batch_id, b.started_at, b.ended_at, b.status
+        FROM batches b
+        WHERE (
+            b.current_asset_id = $1
+            OR EXISTS (
+                SELECT 1 FROM events e
+                WHERE e.batch_pk = b.id AND e.asset_id = $1
+            )
+        )
+        ORDER BY b.started_at DESC, b.id DESC
+        LIMIT 1;
+    `, [assetId]);
+
+    return latestRows.length > 0 ? latestRows[0] : null;
+}

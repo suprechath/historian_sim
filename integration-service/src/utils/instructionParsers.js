@@ -47,6 +47,15 @@ export function hasHealthCheckTrigger(text) {
 }
 
 /**
+ * Checks if a Previous Batch trigger is present in text.
+ * Matches: [PREVBATCH], [PREV_BATCH], [PREV-BATCH], with optional inner whitespace.
+ */
+export function hasPrevBatchTrigger(text) {
+    if (!text || typeof text !== 'string') return false;
+    return /\[\s*PREV[-_]?BATCH\s*\]/i.test(text);
+}
+
+/**
  * Extracts [EXCEPTION: REF=...] triggers from text (e.g. [EXCEPTION: REF=REFINST] or [EXCEPTION]).
  */
 export function extractExceptionTriggers(text, defaultRef = null) {

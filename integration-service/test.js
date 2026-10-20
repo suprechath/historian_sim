@@ -22,9 +22,12 @@ import {
     parseRecordInstructionConfig,
     parsePrintLabelPayload,
     extractInstructionPayload,
-    hasHealthCheckTrigger
+    hasHealthCheckTrigger,
+    hasPrevBatchTrigger
 } from './src/utils/instructionParsers.js';
 import { handleOnDemandHealthCheck } from './src/services/healthCheckService.js';
+import { handlePreviousBatchInstruction } from './src/services/previousBatchService.js';
+import { handleInstructionWebhook } from './src/controllers/externalController.js';
 
 import {
     resolveMetric,
@@ -639,6 +642,198 @@ test('handleOnDemandHealthCheck always returns 200 with diagnostics', async () =
     assert.equal(jsonBody.healthCheck.type, 'on_demand');
     assert.ok(['passed', 'failed'].includes(jsonBody.healthCheck.result));
     assert.ok(typeof jsonBody.healthCheck.latencyMs === 'number');
+});
+
+// ============================================================================
+// 10. PREVIOUS BATCH ([PREVBATCH]) TESTS
+// ============================================================================
+test('hasPrevBatchTrigger recognizes all prevbatch variants and aliases', () => {
+    assert.equal(hasPrevBatchTrigger('[PREVBATCH]'), true);
+    assert.equal(hasPrevBatchTrigger('[prevbatch]'), true);
+    assert.equal(hasPrevBatchTrigger('[PrevBatch]'), true);
+    assert.equal(hasPrevBatchTrigger('[PREV_BATCH]'), true);
+    assert.equal(hasPrevBatchTrigger('[prev_batch]'), true);
+    assert.equal(hasPrevBatchTrigger('[PREV-BATCH]'), true);
+    assert.equal(hasPrevBatchTrigger('[  PREVBATCH  ]'), true);
+    assert.equal(hasPrevBatchTrigger('Check previous batch: [PREVBATCH] for line clearance'), true);
+    assert.equal(hasPrevBatchTrigger('[TIME: VALUE=10]'), false);
+    assert.equal(hasPrevBatchTrigger('PREVBATCH'), false); // must have brackets
+    assert.equal(hasPrevBatchTrigger(''), false);
+    assert.equal(hasPrevBatchTrigger(null), false);
+    assert.equal(hasPrevBatchTrigger(undefined), false);
+});
+
+test('handlePreviousBatchInstruction rejects missing RefElement with 400', async () => {
+    let statusCode = null;
+    let jsonBody = null;
+    const mockRes = {
+        status(code) { statusCode = code; return this; },
+        json(payload) { jsonBody = payload; return this; }
+    };
+
+    const ctx = {
+        refElement: null,
+        refInstruction: 'INST-01',
+        batchId: 'B-2026-0001'
+    };
+
+    await handlePreviousBatchInstruction(ctx, mockRes);
+    assert.equal(statusCode, 400);
+    assert.match(jsonBody.error, /Missing required RefElement/);
+});
+
+test('handlePreviousBatchInstruction rejects missing RefInstruction with 400', async () => {
+    let statusCode = null;
+    let jsonBody = null;
+    const mockRes = {
+        status(code) { statusCode = code; return this; },
+        json(payload) { jsonBody = payload; return this; }
+    };
+
+    const ctx = {
+        refElement: 'R1',
+        refInstruction: null,
+        batchId: 'B-2026-0001'
+    };
+
+    await handlePreviousBatchInstruction(ctx, mockRes);
+    assert.equal(statusCode, 400);
+    assert.match(jsonBody.error, /Missing required RefInstruction/);
+});
+
+test('handlePreviousBatchInstruction rejects missing BatchId with 400', async () => {
+    let statusCode = null;
+    let jsonBody = null;
+    const mockRes = {
+        status(code) { statusCode = code; return this; },
+        json(payload) { jsonBody = payload; return this; }
+    };
+
+    const ctx = {
+        refElement: 'R1',
+        refInstruction: 'INST-01',
+        batchId: null
+    };
+
+    await handlePreviousBatchInstruction(ctx, mockRes);
+    assert.equal(statusCode, 400);
+    assert.match(jsonBody.error, /Missing required BatchId/);
+});
+
+test('handlePreviousBatchInstruction allows RefTime to be null', async () => {
+    let statusCode = null;
+    let jsonBody = null;
+    const mockRes = {
+        status(code) { statusCode = code; return this; },
+        json(payload) { jsonBody = payload; return this; }
+    };
+
+    const ctx = {
+        refElement: 'NON_EXISTENT_ASSET_XYZ',
+        refInstruction: 'INST-01',
+        batchId: 'B-2026-0001',
+        refTime: null
+    };
+
+    await handlePreviousBatchInstruction(ctx, mockRes);
+    // Should pass RefTime validation and reach asset resolution or 404/500, but NOT 400
+    assert.notEqual(statusCode, 400);
+});
+
+test('handleInstructionWebhook routes EventType 1 with [PREVBATCH] without requiring RefTime', async () => {
+    let statusCode = null;
+    let jsonBody = null;
+    const mockRes = {
+        status(code) { statusCode = code; return this; },
+        json(payload) { jsonBody = payload; return this; }
+    };
+
+    const req = {
+        body: {
+            Topic: 'batch_active_instruction.update',
+            Data: {
+                Batch: {
+                    BatchId: 'B-2026-0010',
+                    Phase: {
+                        Step: {
+                            Instruction: {
+                                EventType: 1,
+                                InstructionId: 'INST-RECORD-PREV',
+                                InstructionDescription: 'Find and record [PREVBATCH] into step',
+                                RefElement: 'Reactor 1',
+                                RefInstruction: 'INST-TARGET-01',
+                                RefTime: null // Explicitly null as specified in user requirement
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    await handleInstructionWebhook(req, mockRes);
+    // Should route to previous batch handler and not fail with 400 (EventType/RefTime missing)
+    assert.notEqual(statusCode, 400);
+});
+
+test('handlePreviousBatchInstruction succeeds and returns previous batch when found in database', async () => {
+    let statusCode = 200;
+    let jsonBody = null;
+    const mockRes = {
+        status(code) { statusCode = code; return this; },
+        json(payload) { jsonBody = payload; return this; }
+    };
+
+    const origQuery = pool.query;
+    pool.query = async (text, params) => {
+        const queryStr = String(text).toLowerCase();
+        // Asset query
+        if (queryStr.includes('from assets')) {
+            return {
+                rows: [{ id: 1, code: 'R1', display_name: 'Reactor 1 — Synthesis', asset_type: 'Reactor' }]
+            };
+        }
+        // Current batch existence query
+        if (queryStr.includes('select id, batch_id, started_at, status from batches')) {
+            return {
+                rows: [{ id: 2, batch_id: 'B-2026-0005', started_at: new Date('2026-10-20T10:00:00Z'), status: 'Running' }]
+            };
+        }
+        // Previous batch query
+        if (queryStr.includes('from batches b')) {
+            return {
+                rows: [{
+                    id: 1,
+                    batch_id: 'B-2026-0004',
+                    started_at: new Date('2026-10-19T10:00:00Z'),
+                    ended_at: new Date('2026-10-19T18:00:00Z'),
+                    status: 'Completed'
+                }]
+            };
+        }
+        return { rows: [] };
+    };
+
+    try {
+        const ctx = {
+            refElement: 'R1',
+            refInstruction: 'INST-PREV-01',
+            batchId: 'B-2026-0005',
+            refTime: null,
+            instructionDescription: 'Record previous batch [PREVBATCH]'
+        };
+
+        await handlePreviousBatchInstruction(ctx, mockRes);
+        assert.equal(statusCode, 200);
+        assert.equal(jsonBody.status, 'success');
+        assert.equal(jsonBody.case, 1);
+        assert.equal(jsonBody.subcase, 'previous_batch');
+        assert.equal(jsonBody.previous_batch.batch_id, 'B-2026-0004');
+        assert.equal(jsonBody.asset.code, 'R1');
+        assert.equal(jsonBody.target_instruction, 'INST-PREV-01');
+    } finally {
+        pool.query = origQuery;
+    }
 });
 
 test('test suite teardown closes database pool', async () => {

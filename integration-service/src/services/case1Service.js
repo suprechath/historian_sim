@@ -9,9 +9,11 @@ import {
     getCombinedDescription,
     extractTimeTriggers,
     extractRecordDurationMs,
-    extractInterpretMapping
+    extractInterpretMapping,
+    hasPrevBatchTrigger
 } from '../utils/instructionParsers.js';
 import { reportError, sendBatchLineInstructionUpdate } from '../clients/batchLineClient.js';
+import { handlePreviousBatchInstruction } from './previousBatchService.js';
 import {
     resolveTag,
     getNearestReading,
@@ -22,9 +24,17 @@ import {
 const MAX_FUTURE_SCHEDULE_HOURS = 48;
 
 /**
- * Case 1: Point-in-time value lookup and [TIME: VALUE=...] trigger processing
+ * Case 1: Point-in-time value lookup, [PREVBATCH] lookup, and [TIME: VALUE=...] trigger processing
  */
 export async function handleCase1PointInTime(ctx, res) {
+    const fullDesc = getCombinedDescription(ctx);
+
+    // 0. Check for [PREVBATCH] trigger word in instruction description
+    if (hasPrevBatchTrigger(fullDesc) || hasPrevBatchTrigger(ctx.instructionDescription)) {
+        logger.info('Case1', `[PREVBATCH] trigger detected for RefElement "${ctx.refElement}". Routing to previous batch handler.`);
+        return await handlePreviousBatchInstruction(ctx, res);
+    }
+
     if (!ctx.refElement) {
         await reportError('[BatchLine Case 1]: Missing required RefElement in instruction payload', ctx);
         return res.status(400).json({ error: 'Missing required RefElement in instruction payload' });
@@ -41,7 +51,6 @@ export async function handleCase1PointInTime(ctx, res) {
         return res.status(404).json({ error: `Could not resolve tag for RefElement: "${ctx.refElement}"` });
     }
 
-    const fullDesc = getCombinedDescription(ctx);
     const triggers = extractTimeTriggers(fullDesc);
     const parsedRefTime = ctx.refTime ? (parseBatchLineDate(ctx.refTime) || new Date(ctx.refTime)) : null;
 
