@@ -39,7 +39,7 @@ import { handleRecordMode } from './src/services/case3Service.js';
 
 import { getHighExceptionDedupeKey } from './src/services/highExceptionService.js';
 import { jobRegistry } from './src/services/jobRegistry.js';
-import { extractBatchStatusPayload } from './src/services/batchQueueService.js';
+import { extractBatchStatusPayload, isProductSpecExcluded } from './src/services/batchQueueService.js';
 import { auditLog } from './src/middleware/auditLog.js';
 import { requireApiKey } from './src/middleware/requireApiKey.js';
 
@@ -368,6 +368,7 @@ test('extractBatchStatusPayload extracts Started status and batchId correctly', 
     const extracted = extractBatchStatusPayload(payload);
     assert.equal(extracted.topic, 'batch_status.update');
     assert.equal(extracted.batchId, 'ff_261009_3_1');
+    assert.equal(extracted.productSpecificationId, 'FF_test');
     assert.equal(extracted.batchStatus, 'Started');
     assert.equal(extracted.isStarted, true);
 });
@@ -387,6 +388,13 @@ test('extractBatchStatusPayload returns isStarted=false for non-Started statuses
     assert.equal(extracted.batchId, 'ff_261009_3_1');
     assert.equal(extracted.batchStatus, 'Completed');
     assert.equal(extracted.isStarted, false);
+});
+
+test('isProductSpecExcluded handles null, undefined, and empty string safely', async () => {
+    assert.equal(await isProductSpecExcluded(null), false);
+    assert.equal(await isProductSpecExcluded(undefined), false);
+    assert.equal(await isProductSpecExcluded(''), false);
+    assert.equal(await isProductSpecExcluded('   '), false);
 });
 
 // ============================================================================

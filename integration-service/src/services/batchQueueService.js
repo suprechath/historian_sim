@@ -22,9 +22,11 @@ export function extractBatchStatusPayload(body = {}) {
     const batchObj = body?.Data?.Batch || body?.Batch || {};
     const rawBatchStatus = batchObj.BatchStatus || body?.BatchStatus || null;
     const rawBatchId = batchObj.BatchId || body?.BatchId || null;
+    const rawProductSpecId = batchObj.ProductSpecificationId || body?.ProductSpecificationId || null;
 
     const batchStatus = rawBatchStatus ? String(rawBatchStatus).trim() : null;
     const batchId = rawBatchId ? String(rawBatchId).trim() : null;
+    const productSpecificationId = rawProductSpecId ? String(rawProductSpecId).trim() : null;
     const isStarted = batchStatus ? batchStatus.toLowerCase() === 'started' : false;
 
     return {
@@ -32,12 +34,40 @@ export function extractBatchStatusPayload(body = {}) {
         batchObj,
         batchStatus,
         batchId,
+        productSpecificationId,
         isStarted
     };
 }
 
 /**
- * Ensures simulation_control and batch_queue tables and columns exist.
+ * Checks whether a given ProductSpecificationId exists in the excluded_product_specifications database table.
+ * Comparison is case-insensitive and whitespace-trimmed.
+ *
+ * @param {string|null} productSpecificationId
+ * @returns {Promise<boolean>} True if excluded, false otherwise
+ */
+export async function isProductSpecExcluded(productSpecificationId) {
+    if (!productSpecificationId || typeof productSpecificationId !== 'string' || !productSpecificationId.trim()) {
+        return false;
+    }
+
+    try {
+        const cleanSpecId = productSpecificationId.trim();
+        const { rows } = await query(
+            `SELECT 1 FROM excluded_product_specifications 
+             WHERE LOWER(TRIM(product_specification_id)) = LOWER($1) 
+             LIMIT 1`,
+            [cleanSpecId]
+        );
+        return rows.length > 0;
+    } catch (err) {
+        logger.warn('BatchQueue', `Could not query excluded_product_specifications table: ${err.message}`);
+        return false;
+    }
+}
+
+/**
+ * Ensures simulation_control, batch_queue, and excluded_product_specifications tables exist.
  */
 export async function ensureSimulationControl() {
     await query(`
@@ -70,6 +100,11 @@ export async function ensureSimulationControl() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_batch_queue_status ON batch_queue(status);
+
+      CREATE TABLE IF NOT EXISTS excluded_product_specifications (
+        product_specification_id TEXT PRIMARY KEY,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
     `);
 }
 

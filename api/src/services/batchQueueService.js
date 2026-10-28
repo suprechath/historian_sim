@@ -22,9 +22,11 @@ export function extractBatchStatusPayload(body = {}) {
     const batchObj = body?.Data?.Batch || body?.Batch || {};
     const rawBatchStatus = batchObj.BatchStatus || body?.BatchStatus || null;
     const rawBatchId = batchObj.BatchId || body?.BatchId || null;
+    const rawProductSpecId = batchObj.ProductSpecificationId || body?.ProductSpecificationId || null;
 
     const batchStatus = rawBatchStatus ? String(rawBatchStatus).trim() : null;
     const batchId = rawBatchId ? String(rawBatchId).trim() : null;
+    const productSpecificationId = rawProductSpecId ? String(rawProductSpecId).trim() : null;
     const isStarted = batchStatus ? batchStatus.toLowerCase() === 'started' : false;
 
     return {
@@ -32,6 +34,7 @@ export function extractBatchStatusPayload(body = {}) {
         batchObj,
         batchStatus,
         batchId,
+        productSpecificationId,
         isStarted
     };
 }

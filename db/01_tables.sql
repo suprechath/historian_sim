@@ -217,3 +217,9 @@ CREATE TABLE IF NOT EXISTS batch_queue (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_batch_queue_status ON batch_queue(status);
+
+-- 14. Excluded Product Specifications (Skipped from Automatic Batch Queue)
+CREATE TABLE IF NOT EXISTS excluded_product_specifications (
+  product_specification_id TEXT PRIMARY KEY,
+  created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

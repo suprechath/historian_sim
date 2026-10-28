@@ -14,7 +14,7 @@ import { handlePreviousBatchInstruction } from '../services/previousBatchService
 import { handleCase2PhaseTimestamp } from '../services/case2Service.js';
 import { handleCase3TimeRange } from '../services/case3Service.js';
 import { handlePrintLabelInstruction } from '../services/printLabelService.js';
-import { assignBatchToQueue, extractBatchStatusPayload } from '../services/batchQueueService.js';
+import { assignBatchToQueue, extractBatchStatusPayload, isProductSpecExcluded } from '../services/batchQueueService.js';
 import { jobRegistry } from '../services/jobRegistry.js';
 import { handleOnDemandHealthCheck } from '../services/healthCheckService.js';
 
@@ -144,7 +144,7 @@ export async function handleInstructionWebhook(req, res) {
 export async function handleStatusPost(req, res) {
     try {
         // logger.info('StatusWebhook', 'Received status payload:', req.body);
-        const { isStarted, batchId, topic, batchStatus } = extractBatchStatusPayload(req.body);
+        const { isStarted, batchId, topic, batchStatus, productSpecificationId } = extractBatchStatusPayload(req.body);
 
         const isFinished = batchStatus ? ['completed', 'aborted', 'stopped', 'failed', 'cancelled'].includes(batchStatus.toLowerCase()) : false;
         if (isFinished && batchId) {
@@ -154,29 +154,42 @@ export async function handleStatusPost(req, res) {
 
         let batchAssignment = null;
         if (isStarted && batchId) {
-            logger.info('StatusWebhook', `BatchStatus 'Started' detected for BatchId '${batchId}'. Triggering automatic batch queue assignment with startImmediate=true...`);
-            try {
-                const result = await assignBatchToQueue({
-                    batchId,
-                    startImmediate: true,
-                    resetDownstream: false,
-                    resume: false
-                });
-                logger.info('StatusWebhook', `Batch '${result.cleanBatchId}' assigned to queue successfully with status '${result.initialStatus}'.`);
-                batchAssignment = {
-                    assigned: true,
-                    batchId: result.cleanBatchId,
-                    command: result.cmd,
-                    status: result.initialStatus,
-                    queueId: result.queueEntry?.id
-                };
-            } catch (assignErr) {
-                logger.warn('StatusWebhook', `Automatic batch assignment skipped/failed for batch '${batchId}': ${assignErr.message}`);
+            const isExcluded = await isProductSpecExcluded(productSpecificationId);
+            if (isExcluded) {
+                logger.info('StatusWebhook', `Batch '${batchId}' with ProductSpecificationId '${productSpecificationId}' matches excluded_product_specifications table. Skipping automatic batch queue assignment.`);
                 batchAssignment = {
                     assigned: false,
+                    skipped: true,
+                    reason: `ProductSpecificationId '${productSpecificationId}' is listed in excluded_product_specifications table.`,
                     batchId,
-                    error: assignErr.message
+                    productSpecificationId
                 };
+            } else {
+                logger.info('StatusWebhook', `BatchStatus 'Started' detected for BatchId '${batchId}'. Triggering automatic batch queue assignment with startImmediate=true...`);
+                try {
+                    const result = await assignBatchToQueue({
+                        batchId,
+                        startImmediate: true,
+                        resetDownstream: false,
+                        resume: false
+                    });
+                    logger.info('StatusWebhook', `Batch '${result.cleanBatchId}' assigned to queue successfully with status '${result.initialStatus}'.`);
+                    batchAssignment = {
+                        assigned: true,
+                        batchId: result.cleanBatchId,
+                        command: result.cmd,
+                        status: result.initialStatus,
+                        queueId: result.queueEntry?.id
+                    };
+                } catch (assignErr) {
+                    logger.warn('StatusWebhook', `Automatic batch assignment skipped/failed for batch '${batchId}': ${assignErr.message}`);
+                    batchAssignment = {
+                        assigned: false,
+                        skipped: false,
+                        batchId,
+                        error: assignErr.message
+                    };
+                }
             }
         }
 
