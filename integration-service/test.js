@@ -652,6 +652,94 @@ test('handleOnDemandHealthCheck always returns 200 with diagnostics', async () =
     assert.ok(typeof jsonBody.healthCheck.latencyMs === 'number');
 });
 
+test('handleInstructionWebhook routes [HEALTH_CHECK] with RefInstruction and sends BatchId back to BatchLine', async () => {
+    const origFetch = global.fetch;
+    const fetchCalls = [];
+
+    global.fetch = async (url, opts) => {
+        const bodyStr = opts?.body;
+        let parsedBody = null;
+        try { parsedBody = JSON.parse(bodyStr); } catch {}
+        fetchCalls.push({ url: String(url), method: opts?.method, body: parsedBody, headers: opts?.headers });
+        return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ status: 'success' })
+        };
+    };
+
+    try {
+        let statusCode = null;
+        let jsonBody = null;
+        const mockRes = {
+            status(code) {
+                statusCode = code;
+                return this;
+            },
+            json(payload) {
+                jsonBody = payload;
+                return this;
+            }
+        };
+
+        const mockReq = {
+            body: {
+                Topic: 'batch_active_instruction.update',
+                Data: {
+                    Batch: {
+                        BatchId: 'VV_261022_PoC_1',
+                        ProcessNumber: 'VV_261022_PoC',
+                        MaterialId: 'Aspirin',
+                        Phase: {
+                            PhaseId: '1',
+                            PhaseDescription: 'Case 1',
+                            Step: {
+                                StepId: '1',
+                                StepDescription: 'Single Value',
+                                Instruction: {
+                                    InstructionId: '1',
+                                    InstructionDescription: 'Click for send request to historian [HEALTH_CHECK]',
+                                    InstructionType: 'Instruction',
+                                    ExpectedResult: null,
+                                    RefElement: 'R1.N2_BLANKET',
+                                    RefTime: null,
+                                    RefRecipe: null,
+                                    RefEvent: null,
+                                    RefStartTime: null,
+                                    RefEndTime: null,
+                                    RefType: null,
+                                    RefInstruction: 'EXC',
+                                    EventType: 1,
+                                    TriggeredByEmail: 'qa1@cs.com',
+                                    ActualResult: null
+                                }
+                            }
+                        }
+                    }
+                },
+                CallbackKey: '27340ec0-f56b-4bac-b18c-5eae13b37840'
+            }
+        };
+
+        await handleInstructionWebhook(mockReq, mockRes);
+
+        assert.equal(statusCode, 200);
+        assert.equal(jsonBody.status, 'received');
+        assert.ok(jsonBody.healthCheck);
+        assert.equal(jsonBody.healthCheck.refInstruction, 'EXC');
+        assert.equal(jsonBody.healthCheck.refInstructionUpdated, true);
+
+        // Verify outgoing instruction update call to BatchLine
+        const updateCall = fetchCalls.find(c => c.url.includes('/api/v1/batch/instruction/update/EXC'));
+        assert.ok(updateCall, 'Expected outbound call to /api/v1/batch/instruction/update/EXC');
+        assert.equal(updateCall.body.batch_id, 'VV_261022_PoC_1');
+        assert.equal(updateCall.body.actual_result[0].value, 'VV_261022_PoC_1');
+        assert.equal(updateCall.body.actual_result[0].executed_user_email, 'qa1@cs.com');
+    } finally {
+        global.fetch = origFetch;
+    }
+});
+
 // ============================================================================
 // 10. PREVIOUS BATCH ([PREVBATCH]) TESTS
 // ============================================================================

@@ -241,7 +241,8 @@ export function extractInstructionPayload(body = {}) {
         refStartTime: cleanPayloadField(instruction.RefStartTime || body.RefStartTime),
         refEndTime: cleanPayloadField(instruction.RefEndTime || body.RefEndTime),
         callbackKey: body.CallbackKey || body.callbackkey || null,
-        triggeredByEmail: instruction.TriggeredByEmail || body.TriggeredByEmail || null
+        triggeredByEmail: instruction.TriggeredByEmail || body.TriggeredByEmail || null,
+        rawBody: body
     };
 }
 

@@ -10,10 +10,12 @@ import {
     extractTimeTriggers,
     extractRecordDurationMs,
     extractInterpretMapping,
-    hasPrevBatchTrigger
+    hasPrevBatchTrigger,
+    hasHealthCheckTrigger
 } from '../utils/instructionParsers.js';
 import { reportError, sendBatchLineInstructionUpdate } from '../clients/batchLineClient.js';
 import { handlePreviousBatchInstruction } from './previousBatchService.js';
+import { handleOnDemandHealthCheck } from './healthCheckService.js';
 import {
     resolveTag,
     getNearestReading,
@@ -29,7 +31,13 @@ const MAX_FUTURE_SCHEDULE_HOURS = 48;
 export async function handleCase1PointInTime(ctx, res) {
     const fullDesc = getCombinedDescription(ctx);
 
-    // 0. Check for [PREVBATCH] trigger word in instruction description
+    // 0. Check for [HEALTH_CHECK] trigger in instruction description
+    if (hasHealthCheckTrigger(fullDesc) || hasHealthCheckTrigger(ctx.instructionDescription)) {
+        logger.info('Case1', `[HEALTH_CHECK] trigger detected in Case 1 instruction description. Routing to on-demand health check handler.`);
+        return await handleOnDemandHealthCheck({ body: ctx.rawBody || ctx }, res);
+    }
+
+    // 0.1 Check for [PREVBATCH] trigger word in instruction description
     if (hasPrevBatchTrigger(fullDesc) || hasPrevBatchTrigger(ctx.instructionDescription)) {
         logger.info('Case1', `[PREVBATCH] trigger detected for RefElement "${ctx.refElement}". Routing to previous batch handler.`);
         return await handlePreviousBatchInstruction(ctx, res);

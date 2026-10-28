@@ -1,8 +1,9 @@
 import { performance } from 'perf_hooks';
 import { query } from '../db.js';
 import { logger } from '../utils/logger.js';
-import { sendBatchLineNotification } from '../clients/batchLineClient.js';
-import { formatBatchLineDate } from '../utils/formatters.js';
+import { sendBatchLineNotification, sendBatchLineInstructionUpdate } from '../clients/batchLineClient.js';
+import { formatBatchLineDate, formatExecutedTimestamp, cleanPayloadField } from '../utils/formatters.js';
+import { extractInstructionPayload } from '../utils/instructionParsers.js';
 
 let ensureTablesPromise = null;
 
@@ -125,9 +126,19 @@ export async function handleOnDemandHealthCheck(req, res) {
     const step = phase.Step || {};
     const instruction = step.Instruction || {};
 
-    const batchId = batch.BatchId || batch.BatchID || body.batch_id || body.BatchId || body.BatchID || 'UNKNOWN';
-    const instructionId = instruction.InstructionId || body.InstructionId || null;
-    const callbackKey = body.CallbackKey || body.callbackkey || data.CallbackKey || null;
+    const payloadCtx = extractInstructionPayload(body);
+    const phases = Array.isArray(batch.Phases) ? batch.Phases : (batch.Phase ? [batch.Phase] : []);
+    const firstPhase = phases[0] || {};
+    const steps = Array.isArray(firstPhase.Steps) ? firstPhase.Steps : (firstPhase.Step ? [firstPhase.Step] : []);
+    const firstStep = steps[0] || {};
+    const instructions = Array.isArray(firstStep.Instructions) ? firstStep.Instructions : (firstStep.Instruction ? [firstStep.Instruction] : []);
+    const firstInstruction = instructions[0] || body.Instruction || {};
+
+    const batchId = payloadCtx.batchId || batch.BatchId || batch.BatchID || body.batch_id || body.BatchId || body.BatchID || 'UNKNOWN';
+    const instructionId = firstInstruction.InstructionId || instruction.InstructionId || body.InstructionId || null;
+    const refInstruction = payloadCtx.refInstruction || cleanPayloadField(firstInstruction.RefInstruction || instruction.RefInstruction || body.RefInstruction || data.RefInstruction);
+    const triggeredByEmail = payloadCtx.triggeredByEmail || firstInstruction.TriggeredByEmail || instruction.TriggeredByEmail || body.TriggeredByEmail || null;
+    const callbackKey = payloadCtx.callbackKey || body.CallbackKey || body.callbackkey || data.CallbackKey || null;
 
     let dbHealthy = false;
     let dbError = null;
@@ -161,7 +172,39 @@ export async function handleOnDemandHealthCheck(req, res) {
         notificationResult = { ok: false, error: notifErr.message };
     }
 
+    // If RefInstruction is specified, update BatchLine instruction with BatchId
+    let refUpdateResult = null;
+    if (refInstruction && batchId && batchId !== 'UNKNOWN') {
+        try {
+            logger.info('HealthCheck', `RefInstruction "${refInstruction}" detected in health check payload. Sending BatchId "${batchId}" back to BatchLine...`);
+            refUpdateResult = await sendBatchLineInstructionUpdate({
+                refInstruction,
+                batchId,
+                callbackKey,
+                actualResult: [
+                    {
+                        repeat_no: 1,
+                        value: String(batchId),
+                        executed_timestamp: formatExecutedTimestamp(new Date()),
+                        executed_user_email: triggeredByEmail
+                    }
+                ]
+            });
+
+            if (refUpdateResult?.ok) {
+                logger.info('HealthCheck', `Successfully updated instruction "${refInstruction}" with BatchId "${batchId}"`);
+            } else {
+                logger.warn('HealthCheck', `Failed to update instruction "${refInstruction}" with BatchId "${batchId}":`, refUpdateResult?.error || refUpdateResult?.data);
+            }
+        } catch (refErr) {
+            logger.warn('HealthCheck', `Error updating instruction "${refInstruction}" with BatchId "${batchId}":`, refErr.message);
+            refUpdateResult = { ok: false, error: refErr.message };
+        }
+    }
+
     const details = {
+        refInstruction,
+        refUpdateResult,
         batchId,
         instructionId,
         callbackKey,
@@ -186,7 +229,7 @@ export async function handleOnDemandHealthCheck(req, res) {
     // Record into plant events table for real-time operator feed
     await recordPlantEvent({ batchId, status, details });
 
-    logger.info('HealthCheck', `On-demand health check completed: ${status.toUpperCase()} in ${latencyMs}ms`);
+    logger.info('HealthCheck', `On-demand health check completed: ${status.toUpperCase()} in ${latencyMs}ms (RefInstruction: ${refInstruction || 'N/A'})`);
 
     // Best practice: Always return 200 OK to the webhook caller to prevent retry storms
     return res.status(200).json({
@@ -198,6 +241,9 @@ export async function handleOnDemandHealthCheck(req, res) {
             message: blMessage,
             latencyMs,
             notificationSent: Boolean(notificationResult?.ok),
+            refInstruction: refInstruction || null,
+            refInstructionUpdated: Boolean(refUpdateResult?.ok),
+            refUpdateResult: refUpdateResult || null,
             timestamp: new Date().toISOString()
         }
     });

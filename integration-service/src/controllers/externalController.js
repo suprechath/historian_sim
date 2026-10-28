@@ -29,10 +29,6 @@ export async function handleInstructionWebhook(req, res) {
 
         // 0. Check for On-Demand Health Check trigger ([HEALTH_CHECK], [PING])
         const fullDesc = getCombinedDescription({ rawBody: body });
-        if (hasHealthCheckTrigger(fullDesc)) {
-            logger.info('InstructionWebhook', 'On-Demand Health Check trigger detected in instruction description.');
-            return await handleOnDemandHealthCheck(req, res);
-        }
 
         // 1. Topic: print_label_instruction.update
         if (topic === 'print_label_instruction.update') {
@@ -128,6 +124,11 @@ export async function handleInstructionWebhook(req, res) {
                 batchId: ctx.batchId,
                 refInstruction: ctx.refInstruction
             });
+        }
+
+        if (hasHealthCheckTrigger(fullDesc)) {
+            logger.info('InstructionWebhook', 'On-Demand Health Check trigger detected in instruction description.');
+            return await handleOnDemandHealthCheck(req, res);
         }
 
         logger.warn('InstructionWebhook', `Unhandled or unknown topic: '${topic}'`);
