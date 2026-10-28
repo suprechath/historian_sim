@@ -5,6 +5,7 @@ import { sendBatchLineNotification, sendBatchLineInstructionUpdate } from '../cl
 import { formatBatchLineDate, formatExecutedTimestamp, cleanPayloadField } from '../utils/formatters.js';
 import { extractInstructionPayload } from '../utils/instructionParsers.js';
 
+
 let ensureTablesPromise = null;
 
 /**
@@ -181,6 +182,7 @@ export async function handleOnDemandHealthCheck(req, res) {
                 refInstruction,
                 batchId,
                 callbackKey,
+                triggeredByEmail,
                 actualResult: [
                     {
                         repeat_no: 1,
@@ -208,6 +210,7 @@ export async function handleOnDemandHealthCheck(req, res) {
         batchId,
         instructionId,
         callbackKey,
+        triggeredByEmail,
         dbHealthy,
         dbError,
         notificationResult,

@@ -14,6 +14,7 @@ import { ensureSimulationControl } from './services/batchQueueService.js';
 import { jobRegistry } from './services/jobRegistry.js';
 import { startScheduledInstructionWorker, stopScheduledInstructionWorker } from './services/scheduledInstructionWorker.js';
 import { ensureHealthCheckTables } from './services/healthCheckService.js';
+import { ensureTemplateTables } from './services/instructionTemplateService.js';
 import { logger } from './utils/logger.js';
 
 const app = express();
@@ -74,6 +75,7 @@ await ensureSimulationControl();
 await ensureForwardedExceptionsTable();
 await ensureScheduledInstructionsTable();
 await ensureHealthCheckTables();
+await ensureTemplateTables();
 startScheduledInstructionWorker();
 
 const server = app.listen(PORT, () => {

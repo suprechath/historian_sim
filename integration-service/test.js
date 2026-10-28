@@ -28,6 +28,7 @@ import {
 import { handleOnDemandHealthCheck } from './src/services/healthCheckService.js';
 import { handlePreviousBatchInstruction } from './src/services/previousBatchService.js';
 import { handleInstructionWebhook, handleStatusPost } from './src/controllers/externalController.js';
+import externalRouter from './src/routes/external.js';
 
 import {
     resolveMetric,
@@ -42,6 +43,13 @@ import { jobRegistry } from './src/services/jobRegistry.js';
 import { extractBatchStatusPayload, isProductSpecExcluded, assignBatchToQueue } from './src/services/batchQueueService.js';
 import { auditLog } from './src/middleware/auditLog.js';
 import { requireApiKey } from './src/middleware/requireApiKey.js';
+import {
+    createMockResponse,
+    ensureTemplateTables,
+    instantiatePredefinedBatchInstructions,
+    getPredefinedTemplates,
+    upsertPredefinedTemplate
+} from './src/services/instructionTemplateService.js';
 
 // ============================================================================
 // 1. FORMATTERS & DATE PARSING TESTS
@@ -1177,6 +1185,371 @@ test('handleStatusPost recognizes pending health check and duplicate queue avoid
         assert.equal(jsonResponse2.batchAssignment.assigned, false);
         assert.equal(jsonResponse2.batchAssignment.alreadyInQueue, true);
         assert.equal(jsonResponse2.batchAssignment.status, 'waiting_r1');
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+// ============================================================================
+// 12. PREDEFINED INSTRUCTION TEMPLATE TESTS
+// ============================================================================
+test('createMockResponse captures statusCode, json data, and headersSent cleanly', () => {
+    const res = createMockResponse();
+    assert.equal(res.headersSent, false);
+    assert.equal(res.statusCode, 200);
+
+    const payload = { test: 'value', number: 42 };
+    const returned = res.status(201).json(payload);
+
+    assert.equal(res.headersSent, true);
+    assert.equal(res.statusCode, 201);
+    assert.deepEqual(res.data, payload);
+    assert.deepEqual(returned, payload);
+});
+
+test('instantiatePredefinedBatchInstructions safely skips when batchId is invalid or UNKNOWN', async () => {
+    const resNull = await instantiatePredefinedBatchInstructions({ batchId: null });
+    assert.equal(resNull.total, 0);
+    assert.equal(resNull.enqueued, 0);
+
+    const resUnknown = await instantiatePredefinedBatchInstructions({ batchId: 'UNKNOWN' });
+    assert.equal(resUnknown.total, 0);
+    assert.equal(resUnknown.enqueued, 0);
+});
+
+test('instantiatePredefinedBatchInstructions correctly routes and enqueues Case 1, 2, and 3', async () => {
+    const origQuery = pool.query;
+    try {
+        pool.query = async (sql, params = []) => {
+            const queryStr = String(sql);
+            if (queryStr.includes('predefined_instruction_templates')) {
+                return {
+                    rows: [
+                        {
+                            id: 1,
+                            recipe_version: 'v2.1',
+                            name: 'R1 Charging Start Time',
+                            instruction_id: '1',
+                            instruction_description: '[SCHEDULE] Record R1 Charging phase start time',
+                            ref_instruction: 'INST_R1_CHARGE_START',
+                            event_type: 2,
+                            ref_event: 'Charging',
+                            ref_type: 'StartTime',
+                            ref_element: null,
+                            ref_time: null,
+                            ref_start_time: null,
+                            ref_end_time: null,
+                            expected_result: null
+                        },
+                        {
+                            id: 2,
+                            recipe_version: 'v2.1',
+                            name: 'R1 Agitator State Check',
+                            instruction_id: '2',
+                            instruction_description: '[INTERPRET: 0=STOPPED, 1=RUNNING]',
+                            ref_instruction: 'INST_R1_AGIT_STATE',
+                            event_type: 1,
+                            ref_event: null,
+                            ref_type: null,
+                            ref_element: 'R1.AGIT_RUN',
+                            ref_time: null,
+                            ref_start_time: null,
+                            ref_end_time: null,
+                            expected_result: null
+                        }
+                    ]
+                };
+            }
+            if (queryStr.includes('FROM events') || queryStr.includes('FROM tags') || queryStr.includes('FROM readings') || queryStr.includes('FROM snapshots')) {
+                if (queryStr.includes('FROM tags')) {
+                    return { rows: [{ id: 10, name: 'R1.AGIT_RUN', display_digits: 0 }] };
+                }
+                if (queryStr.includes('FROM readings') || queryStr.includes('FROM snapshots')) {
+                    return { rows: [{ tag_id: 10, value: 1, ts: new Date() }] };
+                }
+                return { rows: [] };
+            }
+            if (queryStr.includes('INSERT INTO scheduled_instructions')) {
+                return { rows: [{ id: 'mock-sched-uuid-01', scheduled_time: new Date() }] };
+            }
+            return { rows: [] };
+        };
+
+        const result = await instantiatePredefinedBatchInstructions({
+            batchId: 'B-2026-TPL-TEST',
+            callbackKey: 'cb-key-test',
+            triggeredByEmail: 'operator@plant.com',
+            recipeVersion: 'v2.1'
+        });
+
+        assert.equal(result.batchId, 'B-2026-TPL-TEST');
+        assert.equal(result.total, 2);
+        assert.equal(result.enqueued, 2);
+        assert.equal(result.results.length, 2);
+        assert.equal(result.results[0].refInstruction, 'INST_R1_CHARGE_START');
+        assert.equal(result.results[0].status, 'scheduled');
+        assert.equal(result.results[1].refInstruction, 'INST_R1_AGIT_STATE');
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('handleOnDemandHealthCheck records check and details with callbackKey and triggeredByEmail on PASSED check', async () => {
+    const origQuery = pool.query;
+    try {
+        let recordedDetails = null;
+        pool.query = async (sql, params = []) => {
+            const queryStr = String(sql);
+            if (queryStr.includes('SELECT 1')) {
+                return { rows: [{ 1: 1 }] };
+            }
+            if (queryStr.includes('INSERT INTO integration_health_checks')) {
+                recordedDetails = JSON.parse(params[6]);
+                return { rows: [{ id: 'hc-mock-uuid' }] };
+            }
+            return { rows: [{ id: 'hc-mock-uuid' }] };
+        };
+
+        const req = {
+            body: {
+                Topic: 'batch_active_instruction.update',
+                CallbackKey: 'cb-test',
+                TriggeredByEmail: 'operator@pharma.com',
+                Instruction: {
+                    InstructionDescription: '[HEALTH_CHECK]'
+                },
+                Data: {
+                    Batch: {
+                        BatchId: 'B-2026-HC-PASSED'
+                    }
+                }
+            }
+        };
+
+        let responseBody = null;
+        const res = {
+            status: () => res,
+            json: (data) => { responseBody = data; return data; }
+        };
+
+        await handleOnDemandHealthCheck(req, res);
+        assert.equal(responseBody.status, 'received');
+        assert.equal(responseBody.healthCheck.result, 'passed');
+        assert.ok(recordedDetails);
+        assert.equal(recordedDetails.callbackKey, 'cb-test');
+        assert.equal(recordedDetails.triggeredByEmail, 'operator@pharma.com');
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('handleHealthClose acknowledges check, assigns batch to queue, and auto-instantiates predefined instructions', async () => {
+    const origQuery = pool.query;
+    try {
+        let templateInstantiated = false;
+        let acknowledged = false;
+
+        const healthCloseLayer = externalRouter.stack.find(s => s.route && (s.route.path === '/health/close' || (Array.isArray(s.route.path) && s.route.path.includes('/health/close'))));
+        const handleHealthClose = healthCloseLayer.route.stack[0].handle;
+
+        pool.query = async (sql, params = []) => {
+            const queryStr = String(sql);
+            if (queryStr.includes('UPDATE integration_health_checks')) {
+                acknowledged = true;
+                return {
+                    rows: [{
+                        details: JSON.stringify({
+                            callbackKey: 'cb-key-hc-close',
+                            triggeredByEmail: 'operator@plant.com'
+                        })
+                    }]
+                };
+            }
+            if (queryStr.includes('from simulation_control')) {
+                return { rows: [{ running: true, speed: 1, mode: 'continuous' }] };
+            }
+            if (queryStr.includes('from batches where batch_id')) {
+                return { rows: [] };
+            }
+            if (queryStr.includes('from batch_queue where batch_id')) {
+                return { rows: [] };
+            }
+            if (queryStr.includes('insert into batch_queue')) {
+                return {
+                    rows: [{
+                        id: 99,
+                        batch_id: 'B-2026-HC-PASSED',
+                        command: 'start_immediate',
+                        status: 'waiting_r1'
+                    }]
+                };
+            }
+            if (queryStr.includes('predefined_instruction_templates')) {
+                templateInstantiated = true;
+                return {
+                    rows: [
+                        {
+                            id: 101,
+                            recipe_version: 'v2.1',
+                            name: 'R1 Heat Start Time',
+                            instruction_id: '101',
+                            instruction_description: '[SCHEDULE] Heat start',
+                            ref_instruction: 'INST_R1_HEAT_START',
+                            event_type: 2,
+                            ref_event: 'Heating',
+                            ref_type: 'StartTime',
+                            ref_element: null,
+                            ref_time: null,
+                            ref_start_time: null,
+                            ref_end_time: null,
+                            expected_result: null
+                        }
+                    ]
+                };
+            }
+            if (queryStr.includes('INSERT INTO scheduled_instructions')) {
+                return { rows: [{ id: 'sched-101', scheduled_time: new Date() }] };
+            }
+            return { rows: [] };
+        };
+
+        const req = {
+            body: {
+                id: 'hc-mock-uuid',
+                batchId: 'B-2026-HC-PASSED'
+            }
+        };
+
+        let responseBody = null;
+        const res = {
+            status: () => res,
+            json: (data) => { responseBody = data; return data; }
+        };
+
+        await handleHealthClose(req, res);
+        assert.equal(acknowledged, true);
+        assert.equal(responseBody.status, 'closed');
+        assert.equal(responseBody.batchAssignment.assigned, true);
+        assert.equal(responseBody.batchAssignment.batchId, 'B-2026-HC-PASSED');
+        assert.equal(templateInstantiated, true);
+        assert.ok(responseBody.templates);
+        assert.equal(responseBody.templates.batchId, 'B-2026-HC-PASSED');
+        assert.equal(responseBody.templates.enqueued, 1);
+        assert.equal(responseBody.templates.results[0].refInstruction, 'INST_R1_HEAT_START');
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('handleHealthClose skips template instantiation when assignBatchToQueue fails or batchId is missing', async () => {
+    const origQuery = pool.query;
+    try {
+        let templateInstantiated = false;
+
+        const healthCloseLayer = externalRouter.stack.find(s => s.route && (s.route.path === '/health/close' || (Array.isArray(s.route.path) && s.route.path.includes('/health/close'))));
+        const handleHealthClose = healthCloseLayer.route.stack[0].handle;
+
+        pool.query = async (sql, params = []) => {
+            const queryStr = String(sql);
+            if (queryStr.includes('UPDATE integration_health_checks')) {
+                return { rows: [{ details: {} }] };
+            }
+            if (queryStr.includes('predefined_instruction_templates')) {
+                templateInstantiated = true;
+                return { rows: [] };
+            }
+            return { rows: [] };
+        };
+
+        // Case 1: missing batchId
+        let resBody1 = null;
+        const res1 = {
+            status: () => res1,
+            json: (data) => { resBody1 = data; return data; }
+        };
+        await handleHealthClose({ body: { id: 'hc-uuid-empty' } }, res1);
+        assert.equal(resBody1.status, 'closed');
+        assert.equal(resBody1.batchAssignment, null);
+        assert.equal(resBody1.templates, null);
+        assert.equal(templateInstantiated, false);
+
+        // Case 2: assignBatchToQueue fails due to invalid characters
+        let resBody2 = null;
+        const res2 = {
+            status: () => res2,
+            json: (data) => { resBody2 = data; return data; }
+        };
+        await handleHealthClose({ body: { id: 'hc-uuid-fail', batchId: 'INVALID CHARACTERS WITH SPACES' } }, res2);
+        assert.equal(resBody2.status, 'closed');
+        assert.equal(resBody2.batchAssignment.assigned, false);
+        assert.equal(resBody2.templates, null);
+        assert.equal(templateInstantiated, false);
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('instantiatePredefinedBatchInstructions supports actual BatchLine instruction schema including CGET for VV_261022_PoC_1', async () => {
+    const origQuery = pool.query;
+    try {
+        let enqueuedPayload = null;
+        pool.query = async (sql, params = []) => {
+            const queryStr = String(sql);
+            if (queryStr.includes('predefined_instruction_templates')) {
+                return {
+                    rows: [
+                        {
+                            id: 42,
+                            recipe_version: 'v2.1',
+                            name: 'R1 Charging End Time (CGET)',
+                            instruction_id: '2',
+                            instruction_description: 'Schedule the charging event time fetching [SCHEDULE]',
+                            ref_instruction: 'CGET',
+                            event_type: 2,
+                            ref_event: 'Charging',
+                            ref_type: 'EndTime',
+                            ref_element: null,
+                            ref_time: null,
+                            ref_start_time: null,
+                            ref_end_time: null,
+                            expected_result: null
+                        }
+                    ]
+                };
+            }
+            if (queryStr.includes('FROM events')) {
+                return { rows: [] }; // Charging not yet ended
+            }
+            if (queryStr.includes('INSERT INTO scheduled_instructions')) {
+                enqueuedPayload = JSON.parse(params[5]);
+                return { rows: [{ id: 'sched-cget-uuid-42', scheduled_time: new Date() }] };
+            }
+            return { rows: [] };
+        };
+
+        const result = await instantiatePredefinedBatchInstructions({
+            batchId: 'VV_261022_PoC_1',
+            callbackKey: '15849ab8-14b6-4ce7-9d30-2718f13e4bb6',
+            triggeredByEmail: 'qa2@cs.com',
+            recipeVersion: 'v2.1'
+        });
+
+        assert.equal(result.batchId, 'VV_261022_PoC_1');
+        assert.equal(result.total, 1);
+        assert.equal(result.enqueued, 1);
+        assert.equal(result.results[0].refInstruction, 'CGET');
+        assert.equal(result.results[0].eventType, 2);
+        assert.equal(result.results[0].refEvent, 'Charging');
+        assert.equal(result.results[0].refType, 'EndTime');
+        assert.equal(result.results[0].status, 'scheduled');
+
+        // Verify that enqueued task payload has exact BatchLine context
+        assert.ok(enqueuedPayload);
+        assert.equal(enqueuedPayload.recipeBatchId, 'VV_261022_PoC_1');
+        assert.equal(enqueuedPayload.refEvent, 'Charging');
+        assert.equal(enqueuedPayload.refType, 'EndTime');
+        assert.equal(enqueuedPayload.ctx.callbackKey, '15849ab8-14b6-4ce7-9d30-2718f13e4bb6');
+        assert.equal(enqueuedPayload.ctx.triggeredByEmail, 'qa2@cs.com');
     } finally {
         pool.query = origQuery;
     }

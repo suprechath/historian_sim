@@ -240,3 +240,27 @@ CREATE TABLE IF NOT EXISTS integration_health_checks (
 CREATE INDEX IF NOT EXISTS idx_health_checks_created_at ON integration_health_checks (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_health_checks_type_created ON integration_health_checks (check_type, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_health_checks_batch_ack ON integration_health_checks (batch_id, check_type, acknowledged_at);
+
+-- 16. Predefined Instruction Templates (Automated Batch Dispatch on Health Check Pass)
+CREATE TABLE IF NOT EXISTS predefined_instruction_templates (
+  id                      SERIAL PRIMARY KEY,
+  recipe_version          TEXT NOT NULL DEFAULT 'v2.1',
+  name                    TEXT NOT NULL,
+  instruction_id          TEXT,
+  instruction_description TEXT NOT NULL,
+  ref_instruction         TEXT NOT NULL,
+  event_type              INTEGER NOT NULL CHECK (event_type IN (1, 2, 3)),
+  ref_event               TEXT,
+  ref_type                TEXT,
+  ref_element             TEXT,
+  ref_time                TEXT,
+  ref_start_time          TEXT,
+  ref_end_time            TEXT,
+  expected_result         TEXT,
+  is_active               BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (recipe_version, ref_instruction)
+);
+CREATE INDEX IF NOT EXISTS idx_predefined_templates_recipe ON predefined_instruction_templates (recipe_version, is_active);
+CREATE INDEX IF NOT EXISTS idx_predefined_templates_ref ON predefined_instruction_templates (ref_instruction);
