@@ -1343,6 +1343,103 @@ test('handleOnDemandHealthCheck records check and details with callbackKey and t
     }
 });
 
+test('handleOnDemandHealthCheck auto-instantiates predefined instructions when refInstruction is updated successfully', async () => {
+    const origQuery = pool.query;
+    const origFetch = global.fetch;
+    let templateInstantiated = false;
+
+    global.fetch = async (url, opts) => {
+        return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ status: 'success' })
+        };
+    };
+
+    pool.query = async (sql, params = []) => {
+        const queryStr = String(sql);
+        if (queryStr.includes('SELECT 1')) {
+            return { rows: [{ '?column?': 1 }] };
+        }
+        if (queryStr.includes('predefined_instruction_templates')) {
+            templateInstantiated = true;
+            return {
+                rows: [
+                    {
+                        id: 501,
+                        recipe_version: 'v2.1',
+                        name: 'R1 Charging End Time (CGET)',
+                        instruction_id: '501',
+                        instruction_description: '[SCHEDULE] Charging end',
+                        ref_instruction: 'CGET',
+                        event_type: 2,
+                        ref_event: 'Charging',
+                        ref_type: 'EndTime',
+                        ref_element: null,
+                        ref_time: null,
+                        ref_start_time: null,
+                        ref_end_time: null,
+                        expected_result: null
+                    }
+                ]
+            };
+        }
+        if (queryStr.includes('FROM events')) {
+            return { rows: [] };
+        }
+        if (queryStr.includes('INSERT INTO scheduled_instructions')) {
+            return { rows: [{ id: 'sched-501', scheduled_time: new Date() }] };
+        }
+        if (queryStr.includes('INSERT INTO integration_health_checks')) {
+            return { rows: [{ id: 'hc-auto-uuid', created_at: new Date() }] };
+        }
+        return { rows: [] };
+    };
+
+    try {
+        const req = {
+            body: {
+                Topic: 'batch_active_instruction.update',
+                CallbackKey: 'cb-auto-test',
+                Data: {
+                    Batch: {
+                        BatchId: 'B-AUTO-TPL-01',
+                        Phase: {
+                            Step: {
+                                Instruction: {
+                                    InstructionId: 'INST-INIT',
+                                    InstructionDescription: 'Start Batch Check [HEALTH_CHECK]',
+                                    RefInstruction: 'REF_INIT_01',
+                                    TriggeredByEmail: 'lead@pharma.com'
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        let responseBody = null;
+        const res = {
+            status: () => res,
+            json: (data) => { responseBody = data; return data; }
+        };
+
+        await handleOnDemandHealthCheck(req, res);
+        assert.equal(responseBody.status, 'received');
+        assert.equal(responseBody.healthCheck.result, 'passed');
+        assert.equal(responseBody.healthCheck.refInstruction, 'REF_INIT_01');
+        assert.equal(responseBody.healthCheck.refInstructionUpdated, true);
+        assert.equal(templateInstantiated, true);
+        assert.ok(responseBody.healthCheck.templates);
+        assert.equal(responseBody.healthCheck.templates.batchId, 'B-AUTO-TPL-01');
+        assert.equal(responseBody.healthCheck.templates.enqueued, 1);
+    } finally {
+        pool.query = origQuery;
+        global.fetch = origFetch;
+    }
+});
+
 test('handleHealthClose acknowledges check, assigns batch to queue, and auto-instantiates predefined instructions', async () => {
     const origQuery = pool.query;
     try {

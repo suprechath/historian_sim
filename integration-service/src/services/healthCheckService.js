@@ -4,6 +4,7 @@ import { logger } from '../utils/logger.js';
 import { sendBatchLineNotification, sendBatchLineInstructionUpdate } from '../clients/batchLineClient.js';
 import { formatBatchLineDate, formatExecutedTimestamp, cleanPayloadField } from '../utils/formatters.js';
 import { extractInstructionPayload } from '../utils/instructionParsers.js';
+import { instantiatePredefinedBatchInstructions } from './instructionTemplateService.js';
 
 
 let ensureTablesPromise = null;
@@ -204,9 +205,31 @@ export async function handleOnDemandHealthCheck(req, res) {
         }
     }
 
+    let templateInstantiation = null;
+    if (refUpdateResult?.ok) {
+        try {
+            logger.info('HealthCheck', `Health check PASSED for Batch "${batchId}". Auto-instantiating predefined recipe instructions into scheduled worker...`);
+            templateInstantiation = await instantiatePredefinedBatchInstructions({
+                batchId: batchId,
+                callbackKey,
+                triggeredByEmail
+            });
+            logger.info('HealthCheck', `Auto-instantiation complete: ${templateInstantiation.enqueued}/${templateInstantiation.total} instructions queued for Batch "${batchId}".`);
+        } catch (templateErr) {
+            logger.warn('HealthCheck', `Failed to auto-instantiate predefined instructions for Batch "${batchId}":`, templateErr.message);
+            templateInstantiation = {
+                batchId: batchId,
+                total: 0,
+                enqueued: 0,
+                error: templateErr.message
+            };
+        }
+    }
+
     const details = {
         refInstruction,
         refUpdateResult,
+        templates: templateInstantiation,
         batchId,
         instructionId,
         callbackKey,
@@ -247,6 +270,7 @@ export async function handleOnDemandHealthCheck(req, res) {
             refInstruction: refInstruction || null,
             refInstructionUpdated: Boolean(refUpdateResult?.ok),
             refUpdateResult: refUpdateResult || null,
+            templates: templateInstantiation,
             timestamp: new Date().toISOString()
         }
     });

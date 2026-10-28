@@ -39,8 +39,8 @@ router.get('/status', handleStatusGet);
  */
 router.post(['/health/close', '/integration/health/close'], async (req, res) => {
     try {
-        logger.info('HealthCheck', `Health check dialogue closed for Batch "${batchId}".`);
         const { id, batchId } = req.body || {};
+        logger.info('HealthCheck', `Health check dialogue closed for Batch "${batchId}".`);
         let hcDetails = null;
         if (id) {
             try {
