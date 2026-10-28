@@ -118,6 +118,175 @@ test('assignBatchToQueue validates batch ID character constraints', async () => 
     );
 });
 
+test('assignBatchToQueue defers start when on-demand health check is pending and fromHealthCheckClose is false', async () => {
+    const origQuery = pool.query;
+    pool.query = async (text, params) => {
+        const queryStr = String(text).toLowerCase();
+        if (queryStr.includes('from simulation_control')) {
+            return { rows: [{ running: true, speed: 1, mode: 'continuous', updated_at: new Date() }] };
+        }
+        if (queryStr.includes('from batches where batch_id')) {
+            return { rows: [] };
+        }
+        if (queryStr.includes('from batch_queue where batch_id')) {
+            return { rows: [] };
+        }
+        if (queryStr.includes('from integration_health_checks')) {
+            return { rows: [{ id: 'hc-api-test-01', created_at: new Date() }] };
+        }
+        return { rows: [] };
+    };
+
+    try {
+        const result = await assignBatchToQueue({ batchId: 'B-2026-API-HC-DEFER' });
+        assert.equal(result.cleanBatchId, 'B-2026-API-HC-DEFER');
+        assert.equal(result.cmd, 'awaiting_health_check_close');
+        assert.equal(result.initialStatus, 'awaiting_health_check');
+        assert.equal(result.pendingHealthCheck, true);
+        assert.equal(result.alreadyInQueue, false);
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('assignBatchToQueue starts batch with status waiting_r1 when fromHealthCheckClose is true', async () => {
+    const origQuery = pool.query;
+    let insertedQueueRow = false;
+    pool.query = async (text, params) => {
+        const queryStr = String(text).toLowerCase();
+        if (queryStr.includes('from simulation_control')) {
+            return { rows: [{ running: true, speed: 1, mode: 'continuous', updated_at: new Date() }] };
+        }
+        if (queryStr.includes('from batches where batch_id')) {
+            return { rows: [] };
+        }
+        if (queryStr.includes('from batch_queue where batch_id')) {
+            return { rows: [] };
+        }
+        if (queryStr.includes('insert into batch_queue')) {
+            insertedQueueRow = true;
+            return {
+                rows: [{
+                    id: 201,
+                    batch_id: 'B-2026-API-HC-START',
+                    command: 'start_immediate',
+                    status: 'waiting_r1'
+                }]
+            };
+        }
+        if (queryStr.includes('update simulation_control')) {
+            return {
+                rows: [{
+                    running: true,
+                    speed: 1,
+                    mode: 'single',
+                    assigned_batch_id: 'B-2026-API-HC-START',
+                    single_batch_status: 'waiting_r1',
+                    updated_at: new Date()
+                }]
+            };
+        }
+        return { rows: [] };
+    };
+
+    try {
+        const result = await assignBatchToQueue({
+            batchId: 'B-2026-API-HC-START',
+            startImmediate: true,
+            fromHealthCheckClose: true
+        });
+        assert.equal(insertedQueueRow, true);
+        assert.equal(result.cleanBatchId, 'B-2026-API-HC-START');
+        assert.equal(result.cmd, 'start_immediate');
+        assert.equal(result.initialStatus, 'waiting_r1');
+        assert.equal(result.queueEntry.id, 201);
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('assignBatchToQueue avoids duplicate queue entry when batch is already in batch_queue (Condition 3.1)', async () => {
+    const origQuery = pool.query;
+    let attemptedInsert = false;
+    pool.query = async (text, params) => {
+        const queryStr = String(text).toLowerCase();
+        if (queryStr.includes('from simulation_control')) {
+            return { rows: [{ running: true, speed: 1, mode: 'single', updated_at: new Date() }] };
+        }
+        if (queryStr.includes('from batches where batch_id')) {
+            return { rows: [] };
+        }
+        if (queryStr.includes('from batch_queue where batch_id')) {
+            return {
+                rows: [{
+                    id: 88,
+                    batch_id: 'B-2026-API-ALREADY-QUEUED',
+                    command: 'start_immediate',
+                    status: 'waiting_r1'
+                }]
+            };
+        }
+        if (queryStr.includes('insert into batch_queue')) {
+            attemptedInsert = true;
+            return { rows: [] };
+        }
+        return { rows: [] };
+    };
+
+    try {
+        const result = await assignBatchToQueue({
+            batchId: 'B-2026-API-ALREADY-QUEUED',
+            startImmediate: true
+        });
+        assert.equal(attemptedInsert, false, 'Should avoid inserting duplicate queue entry');
+        assert.equal(result.alreadyInQueue, true);
+        assert.equal(result.cleanBatchId, 'B-2026-API-ALREADY-QUEUED');
+        assert.equal(result.initialStatus, 'waiting_r1');
+        assert.equal(result.queueEntry.id, 88);
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('assignBatchToQueue avoids duplicate queue entry when batch is already in batches table (Condition 3.1)', async () => {
+    const origQuery = pool.query;
+    let attemptedInsert = false;
+    pool.query = async (text, params) => {
+        const queryStr = String(text).toLowerCase();
+        if (queryStr.includes('from simulation_control')) {
+            return { rows: [{ running: true, speed: 1, mode: 'single', updated_at: new Date() }] };
+        }
+        if (queryStr.includes('from batches where batch_id')) {
+            return {
+                rows: [{
+                    id: 2,
+                    batch_id: 'B-2026-API-ALREADY-STARTED',
+                    status: 'Running',
+                    started_at: new Date()
+                }]
+            };
+        }
+        if (queryStr.includes('insert into batch_queue')) {
+            attemptedInsert = true;
+            return { rows: [] };
+        }
+        return { rows: [] };
+    };
+
+    try {
+        const result = await assignBatchToQueue({
+            batchId: 'B-2026-API-ALREADY-STARTED',
+            startImmediate: true
+        });
+        assert.equal(attemptedInsert, false, 'Should avoid inserting duplicate queue entry');
+        assert.equal(result.alreadyInQueue, true);
+        assert.equal(result.alreadyStarted, true);
+        assert.equal(result.initialStatus, 'Running');
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
 // ============================================================================
 // 3. SIMULATION STATE INITIALIZATION
 // ============================================================================

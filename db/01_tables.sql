@@ -223,3 +223,20 @@ CREATE TABLE IF NOT EXISTS excluded_product_specifications (
   product_specification_id TEXT PRIMARY KEY,
   created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- 15. Integration Health Checks (On-Demand & 24/7 Heartbeat Audits)
+CREATE TABLE IF NOT EXISTS integration_health_checks (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  check_type      TEXT NOT NULL CHECK (check_type IN ('on_demand', 'heartbeat')),
+  batch_id        TEXT,
+  instruction_id  TEXT,
+  status          TEXT NOT NULL CHECK (status IN ('passed', 'failed', 'degraded')),
+  message         TEXT,
+  latency_ms      INTEGER,
+  details         JSONB,
+  acknowledged_at TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_health_checks_created_at ON integration_health_checks (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_health_checks_type_created ON integration_health_checks (check_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_health_checks_batch_ack ON integration_health_checks (batch_id, check_type, acknowledged_at);

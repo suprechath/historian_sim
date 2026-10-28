@@ -63,23 +63,43 @@ export default function PlantOverview() {
         dismissedHealthCheckId !== stream.integrationHealth?.id
     );
 
+    const handleCloseHealthCheck = async () => {
+        const health = stream.integrationHealth;
+        if (!health?.id) return;
+
+        setDismissedHealthCheckId(health.id);
+
+        try {
+            await fetch('/ui/integration/health/close', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: health.id,
+                    batchId: health.batch_id
+                })
+            });
+        } catch (err) {
+            console.error('Failed to close health check dialog and queue batch:', err);
+        }
+    };
+
     // Dismiss with Escape key
     useEffect(() => {
         const handleKeyDown = (e) => {
             if (e.key === 'Escape' && showOnDemandAlert) {
-                setDismissedHealthCheckId(stream.integrationHealth?.id);
+                handleCloseHealthCheck();
             }
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [showOnDemandAlert, stream.integrationHealth?.id]);
+    }, [showOnDemandAlert, stream.integrationHealth?.id, stream.integrationHealth?.batch_id]);
 
     return (
         <div>
             {showOnDemandAlert && (
                 <div
                     className="healthcheck-popup-backdrop"
-                    onClick={() => setDismissedHealthCheckId(stream.integrationHealth?.id)}
+                    onClick={handleCloseHealthCheck}
                 >
                     <div
                         className={`healthcheck-popup-card ${stream.integrationHealth.status}`}
@@ -96,7 +116,7 @@ export default function PlantOverview() {
                             </div>
                             <button
                                 className="healthcheck-popup-close"
-                                onClick={() => setDismissedHealthCheckId(stream.integrationHealth?.id)}
+                                onClick={handleCloseHealthCheck}
                                 title="Close"
                             >
                                 &times;
@@ -185,9 +205,14 @@ export default function PlantOverview() {
                         </div>
 
                         <div className="healthcheck-popup-footer">
+                            {stream.integrationHealth?.batch_id && stream.integrationHealth.batch_id !== 'UNKNOWN' && (
+                                <span className="healthcheck-footer-hint" style={{ marginRight: 'auto', fontSize: '11px', color: '#64748b' }}>
+                                    Batch <b>{stream.integrationHealth.batch_id}</b> will start (Wait for R1)
+                                </span>
+                            )}
                             <button
                                 className="healthcheck-popup-btn"
-                                onClick={() => setDismissedHealthCheckId(stream.integrationHealth?.id)}
+                                onClick={handleCloseHealthCheck}
                                 autoFocus
                             >
                                 OK

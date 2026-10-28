@@ -98,7 +98,7 @@ router.get('/stream', (req, res) => {
             let integrationHealth = null;
             try {
                 const { rows } = await query(`
-                    SELECT id, check_type, batch_id, instruction_id, status, message, latency_ms, created_at
+                    SELECT id, check_type, batch_id, instruction_id, status, message, latency_ms, created_at, acknowledged_at
                     FROM integration_health_checks
                     ORDER BY created_at DESC
                     LIMIT 1;
@@ -109,11 +109,30 @@ router.get('/stream', (req, res) => {
                     integrationHealth = {
                         ...row,
                         ageSeconds,
-                        isRecentOnDemand: row.check_type === 'on_demand' && ageSeconds <= 60
+                        isRecentOnDemand: row.check_type === 'on_demand' && !row.acknowledged_at && ageSeconds <= 60
                     };
                 }
             } catch (hErr) {
-                // Ignore if table does not exist yet
+                // Fallback if acknowledged_at column does not exist yet
+                try {
+                    const { rows } = await query(`
+                        SELECT id, check_type, batch_id, instruction_id, status, message, latency_ms, created_at
+                        FROM integration_health_checks
+                        ORDER BY created_at DESC
+                        LIMIT 1;
+                    `);
+                    if (rows.length > 0) {
+                        const row = rows[0];
+                        const ageSeconds = Math.round((Date.now() - new Date(row.created_at).getTime()) / 1000);
+                        integrationHealth = {
+                            ...row,
+                            ageSeconds,
+                            isRecentOnDemand: row.check_type === 'on_demand' && ageSeconds <= 60
+                        };
+                    }
+                } catch (fallbackErr) {
+                    // Ignore if table does not exist yet
+                }
             }
 
             res.write(`data: ${JSON.stringify({
@@ -513,7 +532,7 @@ router.get('/readings', async (req, res) => {
 router.get('/integration/health', async (req, res) => {
     try {
         const { rows } = await query(`
-            SELECT id, check_type, batch_id, instruction_id, status, message, latency_ms, created_at
+            SELECT id, check_type, batch_id, instruction_id, status, message, latency_ms, created_at, acknowledged_at
             FROM integration_health_checks
             ORDER BY created_at DESC
             LIMIT 20;
@@ -523,6 +542,62 @@ router.get('/integration/health', async (req, res) => {
         if (err.message?.includes('does not exist')) {
             return res.json([]);
         }
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// 7. Acknowledge Health Check Dialogue & Start Batch ("wait R1 available")
+// ---------------------------------------------------------------------------
+router.post('/integration/health/close', async (req, res) => {
+    try {
+        const { id, batchId } = req.body || {};
+
+        if (id) {
+            try {
+                await query(`
+                    UPDATE integration_health_checks
+                    SET acknowledged_at = NOW()
+                    WHERE id = $1;
+                `, [id]);
+            } catch (uErr) {
+                console.warn('Could not update acknowledged_at on health check (non-fatal):', uErr.message);
+            }
+        }
+
+        let batchAssignment = null;
+        if (batchId && batchId !== 'UNKNOWN' && String(batchId).trim()) {
+            try {
+                const result = await assignBatchToQueue({
+                    batchId: String(batchId).trim(),
+                    startImmediate: true,
+                    resetDownstream: false,
+                    resume: false,
+                    fromHealthCheckClose: true
+                });
+                batchAssignment = {
+                    assigned: true,
+                    batchId: result.cleanBatchId,
+                    command: result.cmd,
+                    status: result.initialStatus,
+                    alreadyInQueue: Boolean(result.alreadyInQueue)
+                };
+            } catch (assignErr) {
+                console.warn(`[HealthCheck Close] Batch assignment skipped for '${batchId}':`, assignErr.message);
+                batchAssignment = {
+                    assigned: false,
+                    batchId,
+                    error: assignErr.message
+                };
+            }
+        }
+
+        res.json({
+            status: 'closed',
+            healthCheckId: id || null,
+            batchAssignment
+        });
+    } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });

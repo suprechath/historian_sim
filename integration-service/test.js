@@ -27,7 +27,7 @@ import {
 } from './src/utils/instructionParsers.js';
 import { handleOnDemandHealthCheck } from './src/services/healthCheckService.js';
 import { handlePreviousBatchInstruction } from './src/services/previousBatchService.js';
-import { handleInstructionWebhook } from './src/controllers/externalController.js';
+import { handleInstructionWebhook, handleStatusPost } from './src/controllers/externalController.js';
 
 import {
     resolveMetric,
@@ -39,7 +39,7 @@ import { handleRecordMode } from './src/services/case3Service.js';
 
 import { getHighExceptionDedupeKey } from './src/services/highExceptionService.js';
 import { jobRegistry } from './src/services/jobRegistry.js';
-import { extractBatchStatusPayload, isProductSpecExcluded } from './src/services/batchQueueService.js';
+import { extractBatchStatusPayload, isProductSpecExcluded, assignBatchToQueue } from './src/services/batchQueueService.js';
 import { auditLog } from './src/middleware/auditLog.js';
 import { requireApiKey } from './src/middleware/requireApiKey.js';
 
@@ -839,6 +839,256 @@ test('handlePreviousBatchInstruction succeeds and returns previous batch when fo
         assert.equal(jsonBody.previous_batch.batch_id, 'B-2026-0004');
         assert.equal(jsonBody.asset.code, 'R1');
         assert.equal(jsonBody.target_instruction, 'INST-PREV-01');
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+// ============================================================================
+// 11. HEALTH_CHECK DIALOGUE & BATCH QUEUE ASSIGNMENT (CONDITION 3.1)
+// ============================================================================
+test('assignBatchToQueue defers start when on-demand health check is pending and fromHealthCheckClose is false', async () => {
+    const origQuery = pool.query;
+    pool.query = async (text, params) => {
+        const queryStr = String(text).toLowerCase();
+        if (queryStr.includes('from simulation_control')) {
+            return { rows: [{ running: true, speed: 1, mode: 'continuous' }] };
+        }
+        if (queryStr.includes('from batches where batch_id')) {
+            return { rows: [] };
+        }
+        if (queryStr.includes('from batch_queue where batch_id')) {
+            return { rows: [] };
+        }
+        if (queryStr.includes('from integration_health_checks')) {
+            return { rows: [{ id: 'hc-uuid-test-01', created_at: new Date() }] };
+        }
+        return { rows: [] };
+    };
+
+    try {
+        const result = await assignBatchToQueue({ batchId: 'B-2026-HC-DEFER' });
+        assert.equal(result.cleanBatchId, 'B-2026-HC-DEFER');
+        assert.equal(result.cmd, 'awaiting_health_check_close');
+        assert.equal(result.initialStatus, 'awaiting_health_check');
+        assert.equal(result.pendingHealthCheck, true);
+        assert.equal(result.alreadyInQueue, false);
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('assignBatchToQueue starts batch with status waiting_r1 when fromHealthCheckClose is true', async () => {
+    const origQuery = pool.query;
+    let insertedQueueRow = false;
+    pool.query = async (text, params) => {
+        const queryStr = String(text).toLowerCase();
+        if (queryStr.includes('from simulation_control')) {
+            return { rows: [{ running: true, speed: 1, mode: 'continuous' }] };
+        }
+        if (queryStr.includes('from batches where batch_id')) {
+            return { rows: [] };
+        }
+        if (queryStr.includes('from batch_queue where batch_id')) {
+            return { rows: [] };
+        }
+        if (queryStr.includes('insert into batch_queue')) {
+            insertedQueueRow = true;
+            return {
+                rows: [{
+                    id: 101,
+                    batch_id: 'B-2026-HC-START',
+                    command: 'start_immediate',
+                    status: 'waiting_r1'
+                }]
+            };
+        }
+        if (queryStr.includes('update simulation_control')) {
+            return {
+                rows: [{
+                    running: true,
+                    speed: 1,
+                    mode: 'single',
+                    assigned_batch_id: 'B-2026-HC-START',
+                    single_batch_status: 'waiting_r1',
+                    updated_at: new Date()
+                }]
+            };
+        }
+        return { rows: [] };
+    };
+
+    try {
+        const result = await assignBatchToQueue({
+            batchId: 'B-2026-HC-START',
+            startImmediate: true,
+            fromHealthCheckClose: true
+        });
+        assert.equal(insertedQueueRow, true);
+        assert.equal(result.cleanBatchId, 'B-2026-HC-START');
+        assert.equal(result.cmd, 'start_immediate');
+        assert.equal(result.initialStatus, 'waiting_r1');
+        assert.equal(result.queueEntry.id, 101);
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('assignBatchToQueue avoids a new queue if batch is already in batch_queue (Condition 3.1)', async () => {
+    const origQuery = pool.query;
+    let attemptedInsert = false;
+    pool.query = async (text, params) => {
+        const queryStr = String(text).toLowerCase();
+        if (queryStr.includes('from simulation_control')) {
+            return { rows: [{ running: true, speed: 1, mode: 'single' }] };
+        }
+        if (queryStr.includes('from batches where batch_id')) {
+            return { rows: [] };
+        }
+        if (queryStr.includes('from batch_queue where batch_id')) {
+            return {
+                rows: [{
+                    id: 55,
+                    batch_id: 'B-2026-ALREADY-QUEUED',
+                    command: 'start_immediate',
+                    status: 'waiting_r1'
+                }]
+            };
+        }
+        if (queryStr.includes('insert into batch_queue')) {
+            attemptedInsert = true;
+            return { rows: [] };
+        }
+        return { rows: [] };
+    };
+
+    try {
+        const result = await assignBatchToQueue({
+            batchId: 'B-2026-ALREADY-QUEUED',
+            startImmediate: true
+        });
+        assert.equal(attemptedInsert, false, 'Should avoid inserting a duplicate queue entry');
+        assert.equal(result.alreadyInQueue, true);
+        assert.equal(result.cleanBatchId, 'B-2026-ALREADY-QUEUED');
+        assert.equal(result.initialStatus, 'waiting_r1');
+        assert.equal(result.queueEntry.id, 55);
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('assignBatchToQueue avoids a new queue if batch is already in batches table (Condition 3.1)', async () => {
+    const origQuery = pool.query;
+    let attemptedInsert = false;
+    pool.query = async (text, params) => {
+        const queryStr = String(text).toLowerCase();
+        if (queryStr.includes('from simulation_control')) {
+            return { rows: [{ running: true, speed: 1, mode: 'single' }] };
+        }
+        if (queryStr.includes('from batches where batch_id')) {
+            return {
+                rows: [{
+                    id: 1,
+                    batch_id: 'B-2026-ALREADY-STARTED',
+                    status: 'Running',
+                    started_at: new Date()
+                }]
+            };
+        }
+        if (queryStr.includes('insert into batch_queue')) {
+            attemptedInsert = true;
+            return { rows: [] };
+        }
+        return { rows: [] };
+    };
+
+    try {
+        const result = await assignBatchToQueue({
+            batchId: 'B-2026-ALREADY-STARTED',
+            startImmediate: true
+        });
+        assert.equal(attemptedInsert, false, 'Should avoid inserting duplicate queue entry');
+        assert.equal(result.alreadyInQueue, true);
+        assert.equal(result.alreadyStarted, true);
+        assert.equal(result.initialStatus, 'Running');
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('handleStatusPost recognizes pending health check and duplicate queue avoidance cleanly', async () => {
+    const origQuery = pool.query;
+    let pendingHcMode = true;
+    pool.query = async (text, params) => {
+        const queryStr = String(text).toLowerCase();
+        if (queryStr.includes('excluded_product_specifications')) {
+            return { rows: [] }; // Not excluded
+        }
+        if (queryStr.includes('from simulation_control')) {
+            return { rows: [{ running: true, speed: 1, mode: 'continuous' }] };
+        }
+        if (queryStr.includes('from batches where batch_id')) {
+            return { rows: [] };
+        }
+        if (pendingHcMode) {
+            if (queryStr.includes('from batch_queue where batch_id')) {
+                return { rows: [] };
+            }
+            if (queryStr.includes('from integration_health_checks')) {
+                return { rows: [{ id: 'hc-uuid-002', created_at: new Date() }] };
+            }
+        } else {
+            // Duplicate queue mode
+            if (queryStr.includes('from batch_queue where batch_id')) {
+                return {
+                    rows: [{
+                        id: 77,
+                        batch_id: 'B-2026-STATUS-TEST',
+                        command: 'start_immediate',
+                        status: 'waiting_r1'
+                    }]
+                };
+            }
+        }
+        return { rows: [] };
+    };
+
+    try {
+        // Case 1: Pending Health Check
+        let jsonResponse = null;
+        const mockRes1 = {
+            json(payload) { jsonResponse = payload; return this; }
+        };
+        const mockReq1 = {
+            body: {
+                Topic: 'batch_execute.update',
+                Data: {
+                    Batch: {
+                        BatchId: 'B-2026-STATUS-TEST',
+                        BatchStatus: 'Started'
+                    }
+                }
+            }
+        };
+
+        await handleStatusPost(mockReq1, mockRes1);
+        assert.equal(jsonResponse.status, 'received');
+        assert.equal(jsonResponse.batchAssignment.assigned, false);
+        assert.equal(jsonResponse.batchAssignment.pendingHealthCheck, true);
+        assert.equal(jsonResponse.batchAssignment.status, 'awaiting_health_check');
+
+        // Case 2: Batch already in queue (Condition 3.1)
+        pendingHcMode = false;
+        let jsonResponse2 = null;
+        const mockRes2 = {
+            json(payload) { jsonResponse2 = payload; return this; }
+        };
+
+        await handleStatusPost(mockReq1, mockRes2);
+        assert.equal(jsonResponse2.status, 'received');
+        assert.equal(jsonResponse2.batchAssignment.assigned, false);
+        assert.equal(jsonResponse2.batchAssignment.alreadyInQueue, true);
+        assert.equal(jsonResponse2.batchAssignment.status, 'waiting_r1');
     } finally {
         pool.query = origQuery;
     }

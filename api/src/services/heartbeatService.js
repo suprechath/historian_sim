@@ -27,12 +27,16 @@ export async function ensureHealthCheckTables() {
                         message TEXT,
                         latency_ms INTEGER,
                         details JSONB,
+                        acknowledged_at TIMESTAMPTZ,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
+                    ALTER TABLE integration_health_checks ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMPTZ;
                     CREATE INDEX IF NOT EXISTS idx_health_checks_created_at 
                     ON integration_health_checks (created_at DESC);
                     CREATE INDEX IF NOT EXISTS idx_health_checks_type_created 
                     ON integration_health_checks (check_type, created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_health_checks_batch_ack
+                    ON integration_health_checks (batch_id, check_type, acknowledged_at);
                 `);
                 logger.info('HeartbeatService', 'Integration health check tables verified.');
             } catch (err) {

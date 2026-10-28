@@ -73,6 +73,25 @@ export async function ensureSimulationControl() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_batch_queue_status ON batch_queue(status);
+
+      CREATE TABLE IF NOT EXISTS excluded_product_specifications (
+        product_specification_id TEXT PRIMARY KEY,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS integration_health_checks (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        check_type TEXT NOT NULL CHECK (check_type IN ('on_demand', 'heartbeat')),
+        batch_id TEXT,
+        instruction_id TEXT,
+        status TEXT NOT NULL CHECK (status IN ('passed', 'failed', 'degraded')),
+        message TEXT,
+        latency_ms INTEGER,
+        details JSONB,
+        acknowledged_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      ALTER TABLE integration_health_checks ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMPTZ;
     `);
 }
 
@@ -106,6 +125,7 @@ export async function getSimulationState() {
  * @param {boolean} [options.resetDownstream=false] - Clear train & omit existing (Combination 3)
  * @param {boolean} [options.clearTrain=false] - Alias for resetDownstream
  * @param {boolean} [options.resume=false] - Ensure simulator running is unpaused
+ * @param {boolean} [options.fromHealthCheckClose=false] - Explicitly called upon operator closing HEALTH_CHECK dialogue
  * @returns {Promise<Object>} Assignment result
  */
 export async function assignBatchToQueue({
@@ -114,7 +134,8 @@ export async function assignBatchToQueue({
     startImmediately,
     resetDownstream = false,
     clearTrain = false,
-    resume = false
+    resume = false,
+    fromHealthCheckClose = false
 } = {}) {
     if (!batchId || typeof batchId !== 'string' || !batchId.trim()) {
         throw new Error('Batch number or identifier is required.');
@@ -134,19 +155,77 @@ export async function assignBatchToQueue({
 
     await ensureSimulationControl();
 
-    // Check if batch ID already exists in batches table
+    // 1. Check if batch ID already exists in batches table (already running or recorded in Historian)
     const { rows: existing } = await query('SELECT id, status, started_at FROM batches WHERE batch_id = $1', [cleanBatchId]);
     if (existing.length > 0) {
-        throw new Error(`Batch '${cleanBatchId}' already exists in historian records (Status: ${existing[0].status}). Please choose a unique batch number.`);
+        logger.info('BatchQueue', `Batch '${cleanBatchId}' already exists in historian records (Status: ${existing[0].status}). Avoiding a new queue.`);
+        const currentSim = await getSimulationState();
+        return {
+            cleanBatchId,
+            cmd: 'already_started',
+            initialStatus: existing[0].status,
+            alreadyInQueue: true,
+            alreadyStarted: true,
+            queueEntry: null,
+            control: currentSim,
+            simState: currentSim
+        };
     }
 
-    // Check if batch ID is already pending in batch_queue
+    // 2. Condition 3.1: If the batch was already in queue, avoid a new queue
     const { rows: pendingExisting } = await query(
-        "SELECT id, status FROM batch_queue WHERE batch_id = $1 AND status IN ('waiting_r1', 'in_queue')",
+        "SELECT id, batch_id, command, status FROM batch_queue WHERE batch_id = $1 AND status IN ('waiting_r1', 'in_queue', 'pending_omit')",
         [cleanBatchId]
     );
     if (pendingExisting.length > 0) {
-        throw new Error(`Batch '${cleanBatchId}' is already in the manual request queue.`);
+        logger.info('BatchQueue', `Batch '${cleanBatchId}' is already in queue with status '${pendingExisting[0].status}'. Avoiding a new queue.`);
+        const currentSim = await getSimulationState();
+        return {
+            cleanBatchId,
+            cmd: pendingExisting[0].command,
+            initialStatus: pendingExisting[0].status,
+            alreadyInQueue: true,
+            queueEntry: pendingExisting[0],
+            control: currentSim,
+            simState: currentSim
+        };
+    }
+
+    // 3. Condition: Batch will start after user clicks close HEALTH_CHECK dialogue
+    // If an on-demand health check exists for this batch and has NOT been closed/acknowledged yet,
+    // hold off starting the batch until the operator closes the dialogue.
+    if (!fromHealthCheckClose) {
+        try {
+            const { rows: pendingHealthChecks } = await query(`
+                SELECT id, created_at
+                FROM integration_health_checks
+                WHERE batch_id = $1
+                  AND check_type = 'on_demand'
+                  AND acknowledged_at IS NULL
+                  AND created_at >= NOW() - INTERVAL '10 minutes'
+                ORDER BY created_at DESC
+                LIMIT 1;
+            `, [cleanBatchId]);
+
+            if (pendingHealthChecks.length > 0) {
+                logger.info('BatchQueue', `Batch '${cleanBatchId}' has an active HEALTH_CHECK dialogue pending operator closure (HealthCheck ID: ${pendingHealthChecks[0].id}). Batch in Historian will start after user clicks close HEALTH_CHECK dialogue.`);
+                const currentSim = await getSimulationState();
+                return {
+                    cleanBatchId,
+                    cmd: 'awaiting_health_check_close',
+                    initialStatus: 'awaiting_health_check',
+                    pendingHealthCheck: true,
+                    healthCheckId: pendingHealthChecks[0].id,
+                    alreadyInQueue: false,
+                    queueEntry: null,
+                    control: currentSim,
+                    simState: currentSim
+                };
+            }
+        } catch (hcErr) {
+            // Non-fatal if table or column does not exist yet
+            logger.warn('BatchQueue', `Could not check pending health check status: ${hcErr.message}`);
+        }
     }
 
     const isStartImmediate = Boolean(startImmediate ?? startImmediately ?? false);

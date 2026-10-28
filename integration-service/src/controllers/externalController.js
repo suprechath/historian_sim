@@ -173,13 +173,21 @@ export async function handleStatusPost(req, res) {
                         resetDownstream: false,
                         resume: false
                     });
-                    logger.info('StatusWebhook', `Batch '${result.cleanBatchId}' assigned to queue successfully with status '${result.initialStatus}'.`);
+                    if (result.alreadyInQueue) {
+                        logger.info('StatusWebhook', `Batch '${result.cleanBatchId}' was already in queue/records (Status: '${result.initialStatus}'). Duplicate queue avoided.`);
+                    } else if (result.pendingHealthCheck) {
+                        logger.info('StatusWebhook', `Batch '${result.cleanBatchId}' has an active HEALTH_CHECK dialogue. Batch in Historian will start after user clicks close HEALTH_CHECK dialogue.`);
+                    } else {
+                        logger.info('StatusWebhook', `Batch '${result.cleanBatchId}' assigned to queue successfully with status '${result.initialStatus}'.`);
+                    }
                     batchAssignment = {
-                        assigned: true,
+                        assigned: !result.alreadyInQueue && !result.pendingHealthCheck,
                         batchId: result.cleanBatchId,
                         command: result.cmd,
                         status: result.initialStatus,
-                        queueId: result.queueEntry?.id
+                        queueId: result.queueEntry?.id,
+                        alreadyInQueue: Boolean(result.alreadyInQueue),
+                        pendingHealthCheck: Boolean(result.pendingHealthCheck)
                     };
                 } catch (assignErr) {
                     logger.warn('StatusWebhook', `Automatic batch assignment skipped/failed for batch '${batchId}': ${assignErr.message}`);
