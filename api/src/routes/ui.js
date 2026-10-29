@@ -7,6 +7,15 @@ import {
     assignBatchToQueue
 } from '../services/batchQueueService.js';
 
+import {
+    getScheduledInstructions,
+    getScheduledInstructionsSummary,
+    getScheduledInstructionById,
+    cancelScheduledInstruction,
+    triggerScheduledInstructionNow
+} from '../services/scheduledInstructionsService.js';
+import { logger } from '../utils/logger.js';
+
 export { simState, ensureSimulationControl, getSimulationState, assignBatchToQueue };
 
 const router = Router();
@@ -135,6 +144,19 @@ router.get('/stream', (req, res) => {
                 }
             }
 
+            // 5. Active Pending Scheduled Instructions Count
+            let pendingScheduledCount = 0;
+            try {
+                const { rows: schedRows } = await query(`
+                    SELECT COUNT(*)::int AS count
+                    FROM scheduled_instructions
+                    WHERE status = 'pending';
+                `);
+                pendingScheduledCount = schedRows[0]?.count || 0;
+            } catch (schedErr) {
+                // Ignore if table does not exist yet
+            }
+
             res.write(`data: ${JSON.stringify({
                 clock: new Date(),
                 running: currentSimState.running,
@@ -145,7 +167,8 @@ router.get('/stream', (req, res) => {
                 batchQueue,
                 reactors: reactorMap,
                 tags,
-                integrationHealth
+                integrationHealth,
+                pendingScheduledCount
             })}\n\n`);
         } catch (err) {
             console.error('SSE snapshot fetch error:', err.message);
@@ -599,6 +622,94 @@ router.post('/integration/health/close', async (req, res) => {
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+
+// ---------------------------------------------------------------------------
+// 8. Scheduled Instructions Monitoring & Management
+// ---------------------------------------------------------------------------
+router.get('/scheduled-instructions', async (req, res) => {
+    try {
+        const {
+            status = 'pending',
+            caseType,
+            batchId,
+            search,
+            limit = 100,
+            offset = 0,
+            sortBy,
+            sortOrder
+        } = req.query;
+
+        const result = await getScheduledInstructions({
+            status,
+            caseType: (caseType !== undefined && caseType !== '' && caseType !== 'ALL') ? parseInt(caseType, 10) : undefined,
+            batchId: batchId || undefined,
+            search: search || undefined,
+            limit: Math.min(Math.max(parseInt(limit, 10) || 50, 1), 500),
+            offset: Math.max(parseInt(offset, 10) || 0, 0),
+            sortBy,
+            sortOrder
+        });
+
+        const summary = await getScheduledInstructionsSummary();
+
+        res.json({
+            tasks: result.tasks,
+            totalMatching: result.totalMatching,
+            summary,
+            serverTime: new Date().toISOString()
+        });
+    } catch (err) {
+        logger.error('HistorianAPI', 'Error fetching scheduled instructions', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.get('/scheduled-instructions/summary', async (req, res) => {
+    try {
+        const summary = await getScheduledInstructionsSummary();
+        res.json({ summary, serverTime: new Date().toISOString() });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.get('/scheduled-instructions/:id', async (req, res) => {
+    try {
+        const task = await getScheduledInstructionById(req.params.id);
+        if (!task) return res.status(404).json({ error: `Scheduled instruction '${req.params.id}' not found` });
+        res.json(task);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/scheduled-instructions/:id/cancel', async (req, res) => {
+    try {
+        const { reason } = req.body || {};
+        const updated = await cancelScheduledInstruction(req.params.id, reason);
+        res.json({
+            message: `Task ${req.params.id} cancelled.`,
+            task: updated
+        });
+    } catch (err) {
+        const statusCode = err.message.includes('not in pending') ? 400 : (err.message.includes('not found') ? 404 : 500);
+        res.status(statusCode).json({ error: err.message });
+    }
+});
+
+router.post('/scheduled-instructions/:id/trigger-now', async (req, res) => {
+    try {
+        const updated = await triggerScheduledInstructionNow(req.params.id);
+        res.json({
+            message: `Task ${req.params.id} scheduled for immediate execution.`,
+            task: updated
+        });
+    } catch (err) {
+        const statusCode = err.message.includes('not in pending') ? 400 : (err.message.includes('not found') ? 404 : 500);
+        res.status(statusCode).json({ error: err.message });
     }
 });
 

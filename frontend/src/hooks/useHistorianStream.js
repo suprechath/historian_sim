@@ -11,7 +11,8 @@ export function useHistorianStream() {
         batchQueue: [],
         reactors: { R1: { phase: 'Idle' }, R2: { phase: 'Idle' }, R3: { phase: 'Idle' } },
         tags: [],
-        integrationHealth: null
+        integrationHealth: null,
+        pendingScheduledCount: 0
     });
     const [connected, setConnected] = useState(false);
 
@@ -23,8 +24,13 @@ export function useHistorianStream() {
         es.onmessage = (event) => {
             try {
                 const payload = JSON.parse(event.data);
-                // console.log("payload", payload)
-                setData(payload);
+                setData((prev) => ({
+                    ...prev,
+                    ...payload,
+                    pendingScheduledCount: payload.pendingScheduledCount !== undefined
+                        ? payload.pendingScheduledCount
+                        : prev.pendingScheduledCount
+                }));
             } catch (err) {
                 console.error('SSE JSON error:', err);
             }

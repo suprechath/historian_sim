@@ -12,6 +12,7 @@ import {
     stopInternalHeartbeatWorker
 } from './services/heartbeatService.js';
 import { logger } from './utils/logger.js';
+import { ensureScheduledInstructionsTable } from './services/scheduledInstructionsService.js';
 
 // Resolve and load root .env (two levels up from api/src)
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -93,6 +94,7 @@ app.use((err, req, res, next) => {
 
 // 6. Initialize Database state and Background Workers
 await ensureSimulationControl();
+await ensureScheduledInstructionsTable();
 await ensureHealthCheckTables();
 startJobsWorker();
 startInternalHeartbeatWorker();

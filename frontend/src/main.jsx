@@ -1,10 +1,10 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import PlantOverview from './pages/PlantOverview';
+import App from './App';
 import '../index.css';
 
 ReactDOM.createRoot(document.getElementById('root')).render(
     <React.StrictMode>
-        <PlantOverview />
+        <App />
     </React.StrictMode>
 );

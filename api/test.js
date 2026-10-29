@@ -9,6 +9,13 @@ import {
 import { pool } from './src/db.js';
 import { logger } from './src/utils/logger.js';
 import { startInternalHeartbeatWorker, stopInternalHeartbeatWorker } from './src/services/heartbeatService.js';
+import {
+    getScheduledInstructions,
+    getScheduledInstructionsSummary,
+    getScheduledInstructionById,
+    cancelScheduledInstruction,
+    triggerScheduledInstructionNow
+} from './src/services/scheduledInstructionsService.js';
 
 after(async () => {
     await pool.end();
@@ -326,4 +333,235 @@ test('startInternalHeartbeatWorker and stopInternalHeartbeatWorker manage worker
         stopInternalHeartbeatWorker();
         stopInternalHeartbeatWorker();
     });
+});
+
+// ============================================================================
+// 6. SCHEDULED INSTRUCTIONS SERVICE (QUEUE & ABSENT STATUS LOGIC)
+// ============================================================================
+test('getScheduledInstructions defaults to status=pending and filters completed/cancelled tasks out', async () => {
+    const origQuery = pool.query;
+    let executedSql = '';
+    let executedParams = [];
+
+    pool.query = async (text, params) => {
+        executedSql = String(text);
+        executedParams = params || [];
+        if (executedSql.toLowerCase().includes('count(*)::int as total')) {
+            return { rows: [{ total: 2 }] };
+        }
+        return {
+            rows: [
+                {
+                    id: '11111111-1111-1111-1111-111111111111',
+                    case_type: 2,
+                    batch_id: 'VV_261029_2_1',
+                    ref_instruction: 'CGET',
+                    status: 'pending',
+                    scheduled_time: new Date()
+                },
+                {
+                    id: '22222222-2222-2222-2222-222222222222',
+                    case_type: 4,
+                    batch_id: 'VV_261029_2_1',
+                    ref_instruction: 'CGST',
+                    status: 'pending',
+                    scheduled_time: new Date()
+                }
+            ]
+        };
+    };
+
+    try {
+        const result = await getScheduledInstructions();
+        assert.equal(result.totalMatching, 2);
+        assert.equal(result.tasks.length, 2);
+        assert.ok(executedSql.includes('s.status = $1'));
+        assert.equal(executedParams[0], 'pending');
+        assert.ok(executedSql.includes('ORDER BY s.scheduled_time ASC'));
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('getScheduledInstructions handles status=all and filters by caseType and search', async () => {
+    const origQuery = pool.query;
+    let executedSql = '';
+    let executedParams = [];
+
+    pool.query = async (text, params) => {
+        executedSql = String(text);
+        executedParams = params || [];
+        if (executedSql.toLowerCase().includes('count(*)::int as total')) {
+            return { rows: [{ total: 1 }] };
+        }
+        return {
+            rows: [
+                {
+                    id: '33333333-3333-3333-3333-333333333333',
+                    case_type: 3,
+                    batch_id: 'VV_261029_2_1',
+                    ref_instruction: 'RECPRESS',
+                    status: 'cancelled',
+                    last_error: 'Explicitly cancelled'
+                }
+            ]
+        };
+    };
+
+    try {
+        const result = await getScheduledInstructions({
+            status: 'all',
+            caseType: 3,
+            search: 'RECPRESS'
+        });
+        assert.equal(result.totalMatching, 1);
+        assert.equal(result.tasks.length, 1);
+        assert.ok(executedSql.includes('s.case_type = $1'));
+        assert.equal(executedParams[0], 3);
+        assert.ok(executedSql.includes('ILIKE $2'));
+        assert.equal(executedParams[1], '%RECPRESS%');
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('getScheduledInstructionsSummary aggregates counts accurately', async () => {
+    const origQuery = pool.query;
+
+    pool.query = async (text, params) => {
+        return {
+            rows: [
+                {
+                    pending_count: 5,
+                    processing_count: 1,
+                    completed_24h: 12,
+                    failed_24h: 0,
+                    cancelled_24h: 2,
+                    total_all_time: 20,
+                    earliest_pending_time: new Date('2026-10-29T16:00:00Z')
+                }
+            ]
+        };
+    };
+
+    try {
+        const summary = await getScheduledInstructionsSummary();
+        assert.equal(summary.pendingCount, 5);
+        assert.equal(summary.processingCount, 1);
+        assert.equal(summary.completed24hCount, 12);
+        assert.equal(summary.cancelled24hCount, 2);
+        assert.equal(summary.totalAllTime, 20);
+        assert.ok(summary.earliestPendingTime);
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('cancelScheduledInstruction cancels pending task and rejects already completed task', async () => {
+    const origQuery = pool.query;
+
+    // Test 1: Rejects if status is not 'pending'
+    pool.query = async (text, params) => {
+        return {
+            rows: [
+                {
+                    id: 'task-completed-01',
+                    status: 'completed',
+                    batch_id: 'VV_261029_2_1'
+                }
+            ]
+        };
+    };
+
+    try {
+        await assert.rejects(
+            async () => {
+                await cancelScheduledInstruction('task-completed-01');
+            },
+            /only 'pending' tasks can be cancelled/
+        );
+    } finally {
+        pool.query = origQuery;
+    }
+
+    // Test 2: Successfully cancels if status is 'pending'
+    let cancelled = false;
+    pool.query = async (text, params) => {
+        const sql = String(text);
+        if (sql.includes('SELECT') && sql.includes('FROM scheduled_instructions')) {
+            return {
+                rows: [
+                    {
+                        id: 'task-pending-01',
+                        status: 'pending',
+                        batch_id: 'VV_261029_2_1',
+                        ref_instruction: 'CGET'
+                    }
+                ]
+            };
+        }
+        if (sql.includes('UPDATE scheduled_instructions') && sql.includes("status = 'cancelled'")) {
+            cancelled = true;
+            return {
+                rows: [
+                    {
+                        id: 'task-pending-01',
+                        status: 'cancelled',
+                        last_error: 'Cancelled by operator via UI'
+                    }
+                ]
+            };
+        }
+        return { rows: [] };
+    };
+
+    try {
+        const res = await cancelScheduledInstruction('task-pending-01', 'Operator cancelled');
+        assert.equal(cancelled, true);
+        assert.equal(res.status, 'cancelled');
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('triggerScheduledInstructionNow sets scheduled_time to NOW for pending task', async () => {
+    const origQuery = pool.query;
+    let triggered = false;
+
+    pool.query = async (text, params) => {
+        const sql = String(text);
+        if (sql.includes('SELECT') && sql.includes('FROM scheduled_instructions')) {
+            return {
+                rows: [
+                    {
+                        id: 'task-pending-02',
+                        status: 'pending',
+                        batch_id: 'VV_261029_2_1',
+                        ref_instruction: 'HTST'
+                    }
+                ]
+            };
+        }
+        if (sql.includes('UPDATE scheduled_instructions') && sql.includes('scheduled_time = NOW()')) {
+            triggered = true;
+            return {
+                rows: [
+                    {
+                        id: 'task-pending-02',
+                        status: 'pending',
+                        last_error: 'Triggered immediately by operator'
+                    }
+                ]
+            };
+        }
+        return { rows: [] };
+    };
+
+    try {
+        const res = await triggerScheduledInstructionNow('task-pending-02');
+        assert.equal(triggered, true);
+        assert.equal(res.id, 'task-pending-02');
+    } finally {
+        pool.query = origQuery;
+    }
 });
