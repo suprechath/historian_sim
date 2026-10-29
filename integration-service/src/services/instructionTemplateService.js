@@ -38,40 +38,6 @@ export function createMockResponse() {
     return res;
 }
 
-/**
- * Default industrial predefined instruction templates for Recipe v2.1.
- * Normalized to map directly to BatchLine's Instruction schema attributes.
- */
-export const DEFAULT_RECIPE_TEMPLATES = [
-    {
-        name: 'R1 Charging Start Time',
-        instructionId: '1',
-        instructionDescription: 'Schedule the charging event time fetching [SCHEDULE]',
-        refInstruction: 'CGST', //CHGST
-        eventType: 2,
-        refEvent: 'Charging',
-        refType: 'StartTime',
-        refElement: null,
-        refTime: null,
-        refStartTime: null,
-        refEndTime: null,
-        expectedResult: null
-    },
-    {
-        name: 'R1 Charging End Time (CGET)',
-        instructionId: '2',
-        instructionDescription: 'Schedule the charging event time fetching [SCHEDULE]',
-        refInstruction: 'CGET', //CHGET
-        eventType: 2,
-        refEvent: 'Charging',
-        refType: 'EndTime',
-        refElement: null,
-        refTime: null,
-        refStartTime: null,
-        refEndTime: null,
-        expectedResult: null
-    }
-];
 
 /**
  * Ensures the predefined_instruction_templates table exists with broken-down attributes.
@@ -121,42 +87,7 @@ export async function ensureTemplateTables() {
                     ON predefined_instruction_templates (ref_instruction);
                 `);
 
-                // Check if default seeds needed
-                const { rows: existing } = await query(
-                    "SELECT COUNT(*)::int AS count FROM predefined_instruction_templates WHERE recipe_version = 'v2.1';"
-                );
-
-                if ((existing[0]?.count || 0) === 0) {
-                    logger.info('TemplateService', 'Seeding default normalized instruction templates for Recipe v2.1...');
-                    for (const tpl of DEFAULT_RECIPE_TEMPLATES) {
-                        await query(`
-                            INSERT INTO predefined_instruction_templates 
-                            (
-                                recipe_version, name, instruction_id, instruction_description, 
-                                ref_instruction, event_type, ref_event, ref_type, 
-                                ref_element, ref_time, ref_start_time, ref_end_time, 
-                                expected_result, is_active
-                            )
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, TRUE)
-                            ON CONFLICT (recipe_version, ref_instruction) DO NOTHING;
-                        `, [
-                            'v2.1',
-                            tpl.name,
-                            tpl.instructionId,
-                            tpl.instructionDescription,
-                            tpl.refInstruction,
-                            tpl.eventType,
-                            tpl.refEvent,
-                            tpl.refType,
-                            tpl.refElement,
-                            tpl.refTime,
-                            tpl.refStartTime,
-                            tpl.refEndTime,
-                            tpl.expectedResult
-                        ]);
-                    }
-                    logger.info('TemplateService', `Seeded ${DEFAULT_RECIPE_TEMPLATES.length} default instruction templates.`);
-                }
+                logger.info('TemplateService', 'predefined_instruction_templates table verified.');
             } catch (err) {
                 logger.warn('TemplateService', 'Could not ensure predefined templates table:', err.message);
             }

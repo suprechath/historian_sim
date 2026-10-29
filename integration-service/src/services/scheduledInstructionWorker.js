@@ -7,18 +7,20 @@ import {
 import { executeScheduledCase1 } from './case1Service.js';
 import { executeScheduledCase2 } from './case2Service.js';
 import { executeScheduledCase3 } from './continuousIntervalService.js';
+import { executeScheduledEventDependentStep, CASE_TYPE_EVENT_DEPENDENT } from './stepTriggeredTemplateService.js';
 
 let workerInterval = null;
 let isProcessing = false;
 
 /**
  * Registry of handlers by case type.
- * Easily extensible for Case 2, Case 3, etc.
+ * Easily extensible for Case 2, Case 3, Case 4 (Event-dependent step triggers), etc.
  */
 const CASE_DISPATCHERS = {
     1: executeScheduledCase1,
     2: executeScheduledCase2,
-    3: executeScheduledCase3
+    3: executeScheduledCase3,
+    [CASE_TYPE_EVENT_DEPENDENT]: executeScheduledEventDependentStep
 };
 
 /**

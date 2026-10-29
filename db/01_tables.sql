@@ -264,3 +264,36 @@ CREATE TABLE IF NOT EXISTS predefined_instruction_templates (
 );
 CREATE INDEX IF NOT EXISTS idx_predefined_templates_recipe ON predefined_instruction_templates (recipe_version, is_active);
 CREATE INDEX IF NOT EXISTS idx_predefined_templates_ref ON predefined_instruction_templates (ref_instruction);
+
+-- 11. Step-Triggered Instruction Templates (Layer-2 On-Demand Execution / Schedulers)
+CREATE TABLE IF NOT EXISTS step_triggered_instruction_templates (
+  id                          SERIAL PRIMARY KEY,
+  recipe_version              TEXT NOT NULL DEFAULT 'v2.1',
+  name                        TEXT NOT NULL,
+  trigger_instruction_id      TEXT NOT NULL,
+  time_source                 TEXT NOT NULL CHECK (time_source IN ('HISTORIAN_EVENT', 'PAYLOAD', 'STATIC')),
+  instruction_id              TEXT,
+  instruction_description     TEXT NOT NULL,
+  ref_instruction             TEXT NOT NULL,
+  event_type                  INTEGER NOT NULL CHECK (event_type IN (1, 2, 3)),
+  ref_event                   TEXT,
+  ref_type                    TEXT,
+  ref_element                 TEXT,
+  ref_time                    TEXT,
+  ref_start_time              TEXT,
+  ref_end_time                TEXT,
+  expected_result             TEXT,
+  is_active                   BOOLEAN NOT NULL DEFAULT TRUE,
+  ref_start_event             TEXT,
+  ref_start_type              TEXT DEFAULT 'StartTime' CHECK (ref_start_type IN ('StartTime', 'EndTime')),
+  ref_end_event               TEXT,
+  ref_end_type                TEXT CHECK (ref_end_type IS NULL OR ref_end_type IN ('StartTime', 'EndTime')),
+  payload_start_field         TEXT DEFAULT 'ActualResult',
+  payload_end_field           TEXT,
+  offset_duration_ms          INTEGER DEFAULT 0,
+  created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (recipe_version, trigger_instruction_id, ref_instruction)
+);
+CREATE INDEX IF NOT EXISTS idx_step_templates_trigger ON step_triggered_instruction_templates (recipe_version, trigger_instruction_id, is_active);
+CREATE INDEX IF NOT EXISTS idx_step_templates_ref ON step_triggered_instruction_templates (ref_instruction);

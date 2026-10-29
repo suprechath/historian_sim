@@ -17,6 +17,7 @@ import { handlePrintLabelInstruction } from '../services/printLabelService.js';
 import { assignBatchToQueue, extractBatchStatusPayload, isProductSpecExcluded } from '../services/batchQueueService.js';
 import { jobRegistry } from '../services/jobRegistry.js';
 import { handleOnDemandHealthCheck } from '../services/healthCheckService.js';
+import { handleStepTriggeredInstructions } from '../services/stepTriggeredTemplateService.js';
 
 /**
  * Handles incoming BatchLine Instruction Webhook (/instruction)
@@ -83,6 +84,23 @@ export async function handleInstructionWebhook(req, res) {
                 return await handleBatchExceptionTrigger(ctx, res, exceptionTriggers);
             }
 
+            // 2.3 Health Check
+            if (hasHealthCheckTrigger(fullDesc)) {
+                logger.info('InstructionWebhook', 'On-Demand Health Check trigger detected in instruction description.');
+                return await handleOnDemandHealthCheck(req, res);
+            }
+
+            // 2.4 Check for Layer-2 step-triggered instruction templates
+            const stepTriggerResult = await handleStepTriggeredInstructions(body);
+            if (stepTriggerResult.matched > 0) {
+                logger.info('InstructionWebhook', `batch_execute.update triggered ${stepTriggerResult.matched} step template(s) (${stepTriggerResult.executed} executed, ${stepTriggerResult.enqueued} enqueued).`);
+                return res.json({
+                    status: 'success',
+                    message: `Triggered ${stepTriggerResult.matched} step template(s)`,
+                    stepTriggers: stepTriggerResult
+                });
+            }
+
             logger.info('InstructionWebhook', 'batch_execute.update received, no action is needed.');
             return res.json({ status: 'ignored', message: 'No action needed for batch_execute.update' });
         }
@@ -124,11 +142,6 @@ export async function handleInstructionWebhook(req, res) {
                 batchId: ctx.batchId,
                 refInstruction: ctx.refInstruction
             });
-        }
-
-        if (hasHealthCheckTrigger(fullDesc)) {
-            logger.info('InstructionWebhook', 'On-Demand Health Check trigger detected in instruction description.');
-            return await handleOnDemandHealthCheck(req, res);
         }
 
         logger.warn('InstructionWebhook', `Unhandled or unknown topic: '${topic}'`);

@@ -50,6 +50,16 @@ import {
     getPredefinedTemplates,
     upsertPredefinedTemplate
 } from './src/services/instructionTemplateService.js';
+import {
+    ensureStepTriggeredTables,
+    getStepTriggeredTemplates,
+    upsertStepTriggeredTemplate,
+    resolveHistorianEventTimes,
+    resolvePayloadTimes,
+    executeScheduledEventDependentStep,
+    handleStepTriggeredInstructions,
+    CASE_TYPE_EVENT_DEPENDENT
+} from './src/services/stepTriggeredTemplateService.js';
 
 // ============================================================================
 // 1. FORMATTERS & DATE PARSING TESTS
@@ -1649,6 +1659,553 @@ test('instantiatePredefinedBatchInstructions supports actual BatchLine instructi
         assert.equal(enqueuedPayload.ctx.triggeredByEmail, 'qa2@cs.com');
     } finally {
         pool.query = origQuery;
+    }
+});
+
+test('resolveHistorianEventTimes correctly resolves start and end times, including start-only Case 3 mode', async () => {
+    const origQuery = pool.query;
+    try {
+        pool.query = async (sql, params = []) => {
+            const queryStr = String(sql);
+            if (queryStr.includes('FROM events')) {
+                const eventName = params[1];
+                if (eventName === 'Charging') {
+                    return {
+                        rows: [{
+                            id: 1,
+                            name: 'Charging',
+                            level: 'Phase',
+                            started_at: new Date('2026-03-27T10:00:00.000Z'),
+                            ended_at: new Date('2026-03-27T10:30:00.000Z'),
+                            asset_code: 'R1',
+                            batch_id: 'B-TEST'
+                        }]
+                    };
+                }
+            }
+            return { rows: [] };
+        };
+
+        // 1. Full Range: Start and End Time
+        const fullRangeTpl = {
+            ref_event: 'Charging',
+            ref_start_type: 'StartTime',
+            ref_end_type: 'EndTime'
+        };
+        const fullRes = await resolveHistorianEventTimes(fullRangeTpl, 'B-TEST');
+        assert.equal(fullRes.isReady, true);
+        assert.ok(fullRes.startTime);
+        assert.ok(fullRes.endTime);
+
+        // 2. Start-only Case 3 Subcase (ref_end_type is null)
+        const startOnlyTpl = {
+            ref_event: 'Charging',
+            ref_start_type: 'StartTime',
+            ref_end_type: null
+        };
+        const startRes = await resolveHistorianEventTimes(startOnlyTpl, 'B-TEST');
+        assert.equal(startRes.isReady, true);
+        assert.ok(startRes.startTime);
+        assert.equal(startRes.endTime, null);
+
+        // 3. Event not yet ready in DB
+        const pendingTpl = {
+            ref_event: 'NonExistentPhase',
+            ref_start_type: 'StartTime',
+            ref_end_type: 'EndTime'
+        };
+        const pendingRes = await resolveHistorianEventTimes(pendingTpl, 'B-TEST');
+        assert.equal(pendingRes.isReady, false);
+        assert.ok(pendingRes.reason.includes('not yet created'));
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('resolvePayloadTimes extracts ActualResult, ExecutedTimestamp, and handles offset_duration_ms', () => {
+    // 1. ActualResult extraction
+    const tpl1 = { payload_start_field: 'ActualResult', payload_end_field: null, offset_duration_ms: 0 };
+    const body1 = {
+        Data: {
+            Batch: {
+                Phase: {
+                    Step: {
+                        Instruction: {
+                            ActualResult: [{ Value: 'Mar 27, 2026 10:15:00' }]
+                        }
+                    }
+                }
+            }
+        }
+    };
+    const res1 = resolvePayloadTimes(tpl1, body1);
+    assert.ok(res1.startTime);
+    assert.equal(res1.endTime, null);
+
+    // 2. ExecutedTimestamp extraction with +30m offset duration
+    const tpl2 = {
+        payload_start_field: 'ExecutedTimestamp',
+        payload_end_field: null,
+        offset_duration_ms: 30 * 60 * 1000 // +30m
+    };
+    const body2 = {
+        Data: {
+            Batch: {
+                Phase: {
+                    Step: {
+                        Instruction: {
+                            ExecutedTimestamp: '2026-03-27T10:00:00.000Z'
+                        }
+                    }
+                }
+            }
+        }
+    };
+    const res2 = resolvePayloadTimes(tpl2, body2);
+    assert.ok(res2.startTime);
+    assert.ok(res2.endTime);
+    assert.ok(res2.targetDate);
+});
+
+test('handleStepTriggeredInstructions enqueues case_type 4 when event is pending, executes when ready', async () => {
+    const origQuery = pool.query;
+    try {
+        let enqueuedCaseType = null;
+        let eventFound = false;
+
+        pool.query = async (sql, params = []) => {
+            const queryStr = String(sql);
+            if (queryStr.includes('step_triggered_instruction_templates')) {
+                return {
+                    rows: [{
+                        id: 10,
+                        recipe_version: 'v2.1',
+                        name: 'R1 Agitator Check at Charging End',
+                        trigger_instruction_id: 'STEP_CHARGE_DONE',
+                        time_source: 'HISTORIAN_EVENT',
+                        instruction_id: 'INST_AGIT_01',
+                        instruction_description: 'Check agitator at charging end',
+                        ref_instruction: 'AGIT_END',
+                        event_type: 1,
+                        ref_element: 'R1.AGIT_RUN',
+                        ref_type: null,
+                        ref_event: 'Charging',
+                        ref_start_event: 'Charging',
+                        ref_start_type: 'EndTime',
+                        ref_end_type: null,
+                        is_active: true
+                    }]
+                };
+            }
+            if (queryStr.includes('FROM events')) {
+                if (eventFound) {
+                    return {
+                        rows: [{
+                            id: 1,
+                            name: 'Charging',
+                            level: 'Phase',
+                            started_at: new Date('2026-03-27T10:00:00.000Z'),
+                            ended_at: new Date('2026-03-27T10:30:00.000Z'),
+                            asset_code: 'R1',
+                            batch_id: 'B-STEP-01'
+                        }]
+                    };
+                }
+                return { rows: [] };
+            }
+            if (queryStr.includes('INSERT INTO scheduled_instructions')) {
+                enqueuedCaseType = params[0];
+                return { rows: [{ id: 'sched-step-uuid-1', scheduled_time: new Date() }] };
+            }
+            if (queryStr.includes('FROM tags')) {
+                return { rows: [{ id: 5, name: 'R1.AGIT_RUN', display_digits: 0 }] };
+            }
+            if (queryStr.includes('FROM readings') || queryStr.includes('FROM snapshots')) {
+                return { rows: [{ tag_id: 5, value: 1, ts: new Date('2026-03-27T10:30:00.000Z') }] };
+            }
+            return { rows: [] };
+        };
+
+        const incomingBody = {
+            Topic: 'batch_execute.update',
+            CallbackKey: 'cb-key-step',
+            Data: {
+                Batch: {
+                    BatchId: 'B-STEP-01',
+                    Phase: {
+                        Step: {
+                            Instruction: {
+                                InstructionId: 'STEP_CHARGE_DONE',
+                                InstructionDescription: 'Charging operation finished'
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        // Phase 1: Event not ready -> Enqueued into scheduled_instructions with case_type: 4
+        eventFound = false;
+        const resPending = await handleStepTriggeredInstructions(incomingBody);
+        assert.equal(resPending.matched, 1);
+        assert.equal(resPending.enqueued, 1);
+        assert.equal(enqueuedCaseType, CASE_TYPE_EVENT_DEPENDENT);
+        assert.equal(resPending.results[0].status, 'scheduled');
+
+        // Phase 2: Event ready -> Executed immediately
+        eventFound = true;
+        const resReady = await handleStepTriggeredInstructions(incomingBody);
+        assert.equal(resReady.matched, 1);
+        assert.equal(resReady.executed, 1);
+        assert.equal(resReady.results[0].status, 'success');
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('handleStepTriggeredInstructions executes Case 3 wave profile with [RECORD: START=140, STOP=140, DIRECTION=Rise, INTERVAL=2m, DURATION=200m]', async () => {
+    const origQuery = pool.query;
+    const origFetch = global.fetch;
+    global.fetch = async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ status: 'success' }),
+        json: async () => ({ status: 'success' })
+    });
+
+    try {
+        const startTs = new Date('2026-03-27T10:00:00.000Z');
+        const peakTs = new Date('2026-03-27T10:10:00.000Z');
+        const stopTs = new Date('2026-03-27T10:20:00.000Z');
+
+        pool.query = async (sql, params = []) => {
+            const queryStr = String(sql);
+            if (queryStr.includes('step_triggered_instruction_templates')) {
+                return {
+                    rows: [{
+                        id: 20,
+                        recipe_version: 'v2.1',
+                        name: 'R1 Temperature Wave Profile',
+                        trigger_instruction_id: 'TRIGGER_HEAT_WAVE',
+                        time_source: 'HISTORIAN_EVENT',
+                        instruction_id: 'INST_WAVE_01',
+                        instruction_description: 'Record heating wave [RECORD: START=140, STOP=140, DIRECTION=Rise, INTERVAL=2m, DURATION=200m]',
+                        ref_instruction: 'TEMP_PROFILE_WAVE',
+                        event_type: 3,
+                        ref_element: 'R1.TEMP',
+                        ref_type: 'PROFILE',
+                        ref_event: 'Heating',
+                        ref_start_event: 'Heating',
+                        ref_start_type: 'StartTime',
+                        ref_end_type: null,
+                        is_active: true
+                    }]
+                };
+            }
+            if (queryStr.includes('FROM events')) {
+                return {
+                    rows: [{
+                        id: 2,
+                        name: 'Heating',
+                        level: 'Phase',
+                        started_at: startTs,
+                        ended_at: stopTs,
+                        asset_code: 'R1',
+                        batch_id: 'B-WAVE-01'
+                    }]
+                };
+            }
+            if (queryStr.includes('FROM tags')) {
+                return { rows: [{ id: 12, name: 'R1.TEMP', display_digits: 1 }] };
+            }
+            if (queryStr.includes('FROM readings')) {
+                return {
+                    rows: [
+                        { ts: startTs, value: 120 },
+                        { ts: new Date('2026-03-27T10:05:00.000Z'), value: 142 },
+                        { ts: peakTs, value: 155 },
+                        { ts: new Date('2026-03-27T10:15:00.000Z'), value: 145 },
+                        { ts: stopTs, value: 138 }
+                    ]
+                };
+            }
+            return { rows: [] };
+        };
+
+        const incomingBody = {
+            Topic: 'batch_execute.update',
+            CallbackKey: 'cb-wave-test',
+            Data: {
+                Batch: {
+                    BatchId: 'B-WAVE-01',
+                    Phase: {
+                        Step: {
+                            Instruction: {
+                                InstructionId: 'TRIGGER_HEAT_WAVE',
+                                InstructionDescription: 'Heating step triggered'
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        const res = await handleStepTriggeredInstructions(incomingBody);
+        assert.equal(res.matched, 1);
+        assert.equal(res.executed, 1);
+        assert.equal(res.results[0].status, 'success');
+        assert.equal(res.results[0].data?.mode, 'record_profile');
+        assert.ok(res.results[0].data?.wave_start);
+    } finally {
+        pool.query = origQuery;
+        global.fetch = origFetch;
+    }
+});
+
+test('handleStepTriggeredInstructions executes Case 1 milestone with [TIME: VALUE=130]', async () => {
+    const origQuery = pool.query;
+    const origFetch = global.fetch;
+    global.fetch = async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ status: 'success' }),
+        json: async () => ({ status: 'success' })
+    });
+    try {
+        const afterTime = new Date('2026-03-27T10:00:00.000Z');
+        const hitTs = new Date('2026-03-27T10:12:00.000Z');
+
+        pool.query = async (sql, params = []) => {
+            const queryStr = String(sql);
+            if (queryStr.includes('step_triggered_instruction_templates')) {
+                return {
+                    rows: [{
+                        id: 30,
+                        recipe_version: 'v2.1',
+                        name: 'Timestamp when R1 Temp reached 130C',
+                        trigger_instruction_id: 'TRIGGER_PREHEAT_DONE',
+                        time_source: 'HISTORIAN_EVENT',
+                        instruction_id: 'INST_TIME_130',
+                        instruction_description: 'Find time when temp hits 130C [TIME: VALUE=130]',
+                        ref_instruction: 'TIME_HIT_130',
+                        event_type: 1,
+                        ref_element: 'R1.TEMP',
+                        ref_type: null,
+                        ref_event: 'PreHeat',
+                        ref_start_event: 'PreHeat',
+                        ref_start_type: 'EndTime',
+                        ref_end_type: null,
+                        is_active: true
+                    }]
+                };
+            }
+            if (queryStr.includes('FROM events')) {
+                return {
+                    rows: [{
+                        id: 3,
+                        name: 'PreHeat',
+                        level: 'Phase',
+                        started_at: new Date('2026-03-27T09:30:00.000Z'),
+                        ended_at: afterTime,
+                        asset_code: 'R1',
+                        batch_id: 'B-TIME-01'
+                    }]
+                };
+            }
+            if (queryStr.includes('FROM tags')) {
+                return { rows: [{ id: 15, name: 'R1.TEMP', display_digits: 1 }] };
+            }
+            if (queryStr.includes('FROM readings')) {
+                return { rows: [{ ts: hitTs, value: 130.1, quality: 'GOOD' }] };
+            }
+            return { rows: [] };
+        };
+
+        const incomingBody = {
+            Topic: 'batch_execute.update',
+            CallbackKey: 'cb-time-test',
+            Data: {
+                Batch: {
+                    BatchId: 'B-TIME-01',
+                    Phase: {
+                        Step: {
+                            Instruction: {
+                                InstructionId: 'TRIGGER_PREHEAT_DONE'
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        const res = await handleStepTriggeredInstructions(incomingBody);
+        assert.equal(res.matched, 1);
+        assert.equal(res.executed, 1);
+        assert.equal(res.results[0].status, 'success');
+        assert.equal(res.results[0].data?.subcase, 'time_trigger');
+        assert.equal(res.results[0].data?.target_value, 130);
+    } finally {
+        pool.query = origQuery;
+        global.fetch = origFetch;
+    }
+});
+
+test('executeScheduledEventDependentStep worker reschedules if pending and executes when event appears', async () => {
+    const origQuery = pool.query;
+    const origFetch = global.fetch;
+    global.fetch = async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ status: 'success' }),
+        json: async () => ({ status: 'success' })
+    });
+    try {
+        let rescheduleDelay = null;
+        let eventReady = false;
+
+        pool.query = async (sql, params = []) => {
+            const queryStr = String(sql);
+            if (queryStr.includes('UPDATE scheduled_instructions')) {
+                rescheduleDelay = params[1];
+                return { rows: [{ id: 'task-step-01' }] };
+            }
+            if (queryStr.includes('FROM events')) {
+                if (eventReady) {
+                    return {
+                        rows: [{
+                            id: 4,
+                            name: 'Cooling',
+                            level: 'Phase',
+                            started_at: new Date('2026-03-27T11:00:00.000Z'),
+                            ended_at: new Date('2026-03-27T11:30:00.000Z'),
+                            asset_code: 'R1',
+                            batch_id: 'B-WORKER-01'
+                        }]
+                    };
+                }
+                return { rows: [] };
+            }
+            if (queryStr.includes('FROM tags')) {
+                return { rows: [{ id: 22, name: 'R1.TEMP', display_digits: 1 }] };
+            }
+            if (queryStr.includes('FROM readings') || queryStr.includes('FROM snapshots')) {
+                return { rows: [{ tag_id: 22, value: 45.2, ts: new Date() }] };
+            }
+            return { rows: [] };
+        };
+
+        const mockTask = {
+            id: 'task-step-01',
+            case_type: 4,
+            payload: JSON.stringify({
+                cleanBatchId: 'B-WORKER-01',
+                callbackKey: 'cb-worker-key',
+                triggeredByEmail: 'operator@plant.com',
+                template: {
+                    name: 'Temp at Cooling End',
+                    ref_instruction: 'TEMP_COOL_END',
+                    event_type: 1,
+                    ref_element: 'R1.TEMP',
+                    ref_event: 'Cooling',
+                    ref_start_event: 'Cooling',
+                    ref_start_type: 'EndTime',
+                    ref_end_type: null,
+                    instruction_description: 'Record temp at cooling end'
+                }
+            })
+        };
+
+        // 1. Event not ready -> Rescheduled
+        eventReady = false;
+        const resPending = await executeScheduledEventDependentStep(mockTask);
+        assert.equal(resPending.scheduled, true);
+        assert.equal(rescheduleDelay, 10);
+
+        // 2. Event ready -> Executed
+        eventReady = true;
+        const resReady = await executeScheduledEventDependentStep(mockTask);
+        assert.equal(resReady.status, 'success');
+        assert.equal(resReady.tag, 'R1.TEMP');
+    } finally {
+        pool.query = origQuery;
+        global.fetch = origFetch;
+    }
+});
+
+test('handleInstructionWebhook triggers step templates on batch_execute.update', async () => {
+    const origQuery = pool.query;
+    const origFetch = global.fetch;
+    global.fetch = async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ status: 'success' }),
+        json: async () => ({ status: 'success' })
+    });
+    try {
+        pool.query = async (sql, params = []) => {
+            const queryStr = String(sql);
+            if (queryStr.includes('step_triggered_instruction_templates')) {
+                return {
+                    rows: [{
+                        id: 50,
+                        recipe_version: 'v2.1',
+                        name: 'Agitator Run State',
+                        trigger_instruction_id: 'STEP_CONFIRM_CHARGE',
+                        time_source: 'PAYLOAD',
+                        payload_start_field: 'ActualResult',
+                        payload_end_field: null,
+                        instruction_id: 'INST_AGIT_STATE',
+                        instruction_description: 'Check agitator [INTERPRET: 1=RUNNING, 0=STOPPED]',
+                        ref_instruction: 'AGIT_STATE',
+                        event_type: 1,
+                        ref_element: 'R1.AGIT_RUN',
+                        is_active: true
+                    }]
+                };
+            }
+            if (queryStr.includes('FROM tags')) {
+                return { rows: [{ id: 30, name: 'R1.AGIT_RUN', display_digits: 0 }] };
+            }
+            if (queryStr.includes('FROM readings') || queryStr.includes('FROM snapshots')) {
+                return { rows: [{ tag_id: 30, value: 1, ts: new Date() }] };
+            }
+            return { rows: [] };
+        };
+
+        const req = {
+            body: {
+                Topic: 'batch_execute.update',
+                CallbackKey: 'cb-key-wh',
+                Data: {
+                    Batch: {
+                        BatchId: 'B-WH-01',
+                        Phase: {
+                            Step: {
+                                Instruction: {
+                                    InstructionId: 'STEP_CONFIRM_CHARGE',
+                                    ActualResult: [{ Value: 'Mar 27, 2026 10:00:00' }]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        let responseCode = null;
+        let responseJson = null;
+        const res = {
+            status: (code) => { responseCode = code; return res; },
+            json: (data) => { responseJson = data; return res; }
+        };
+
+        await handleInstructionWebhook(req, res);
+        assert.equal(responseJson.status, 'success');
+        assert.equal(responseJson.stepTriggers.matched, 1);
+        assert.equal(responseJson.stepTriggers.executed, 1);
+    } finally {
+        pool.query = origQuery;
+        global.fetch = origFetch;
     }
 });
 

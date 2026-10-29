@@ -94,3 +94,62 @@ SELECT id, now(), NULL, 2 FROM tags;
 INSERT INTO simulation_control (id, running, speed, mode)
 VALUES (1, true, 1, 'continuous')
 ON CONFLICT (id) DO UPDATE SET speed = 1;
+
+-- 5. Default Predefined Instruction Templates (Layer-1 Batch-Start Schedulers)
+INSERT INTO predefined_instruction_templates (
+  recipe_version, name, instruction_id, instruction_description, 
+  ref_instruction, event_type, ref_event, ref_type, 
+  ref_element, ref_time, ref_start_time, ref_end_time, 
+  expected_result, is_active
+) VALUES
+  ('v2.1', 'R1 Charging Start Time', '1', 'Schedule the charging event time fetching [SCHEDULE]', 'CGST', 2, 'Charging', 'StartTime', NULL, NULL, NULL, NULL, NULL, TRUE),
+  ('v2.1', 'R1 Charging End Time (CGET)', '2', 'Schedule the charging event time fetching [SCHEDULE]', 'CGET', 2, 'Charging', 'EndTime', NULL, NULL, NULL, NULL, NULL, TRUE)
+ON CONFLICT (recipe_version, ref_instruction) DO NOTHING;
+
+-- 6. Default Step-Triggered Instruction Templates (Layer-2 On-Demand Step Schedulers)
+INSERT INTO step_triggered_instruction_templates (
+  recipe_version, name, trigger_instruction_id, time_source,
+  instruction_id, instruction_description, ref_instruction,
+  event_type, ref_event, ref_type, ref_element,
+  ref_time, ref_start_time, ref_end_time, expected_result, is_active,
+  ref_start_event, ref_start_type, ref_end_event, ref_end_type,
+  payload_start_field, payload_end_field, offset_duration_ms
+) VALUES
+  (
+    '1', 'Previous batch number in current line', 'HMI', 'HISTORIAN_EVENT',
+    '1', '[PREVBATCH]', 'PREVB',
+    1, NULL, NULL, 'R1.TEMP',
+    NULL, NULL, NULL, NULL, TRUE,
+    NULL, NULL, NULL, NULL,
+    NULL, NULL, 0
+  ),
+  (
+    '1', 'Pressure curves of filter', 'CGET', 'HISTORIAN_EVENT',
+    '1', '[RECORD]', 'PRESS',
+    3, NULL, 'MAX', 'R1.FILTER_DP',
+    NULL, NULL, NULL, NULL, TRUE,
+    'PreHeat', 'EndTime', NULL, NULL,
+    'ActualResult', NULL, 0
+  ),
+  -- (
+  --   'v2.1', 'Timestamp when R1 Temp reached 130C after Preheat', 'STEP_PREHEAT_COMPLETE', 'HISTORIAN_EVENT',
+  --   'INST_TIME_130', 'Find time when temp hits 130C [TIME: VALUE=130]', 'TIME_HIT_130',
+  --   1, 'PreHeat', NULL, 'R1.TEMP',
+  --   NULL, NULL, NULL, NULL, TRUE,
+  --   'PreHeat', 'EndTime', NULL, NULL,
+  --   'ActualResult', NULL, 0
+  -- ),
+  -- (
+  --   'v2.1', 'R1 Agitator State on Operator Confirmation', 'STEP_CONFIRM_CHARGE', 'PAYLOAD',
+  --   'INST_AGIT_STATE', 'Check agitator state at operator time [INTERPRET: 1=RUNNING, 0=STOPPED]', 'AGIT_STATE',
+  --   1, NULL, NULL, 'R1.AGIT_RUN',
+  --   NULL, NULL, NULL, NULL, TRUE,
+  --   NULL, 'StartTime', NULL, NULL,
+  --   'ActualResult', NULL, 0
+  -- )
+ON CONFLICT (recipe_version, trigger_instruction_id, ref_instruction) DO NOTHING;
+
+-- 7. Excluded Product Specifications (Skipped from automatic queue assignment)
+INSERT INTO excluded_product_specifications (product_specification_id)
+VALUES ('Vistin_Metformin_HCl_auto')
+ON CONFLICT (product_specification_id) DO NOTHING;
