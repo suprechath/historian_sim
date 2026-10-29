@@ -102,8 +102,47 @@ INSERT INTO predefined_instruction_templates (
   ref_element, ref_time, ref_start_time, ref_end_time, 
   expected_result, is_active
 ) VALUES
-  ('R1 Charging Start Time', '1', 'Schedule the charging event time fetching [SCHEDULE]', 'CGST', 2, 'Charging', 'StartTime', NULL, NULL, NULL, NULL, NULL, TRUE),
-  ('R1 Charging End Time (CGET)', '2', 'Schedule the charging event time fetching [SCHEDULE]', 'CGET', 2, 'Charging', 'EndTime', NULL, NULL, NULL, NULL, NULL, TRUE)
+  (
+    'R1 Charging Start Time', '1', 'Schedule the charging event time fetching [SCHEDULE]',
+    'CGST', 2, 'Charging', 'StartTime', 
+    NULL, NULL, NULL, NULL, NULL, TRUE
+  ),
+  (
+    'R1 Charging End Time', '2', 'Schedule the charging event time fetching [SCHEDULE]', 
+    'CGET', 2, 'Charging', 'EndTime', 
+    NULL, NULL, NULL, NULL, NULL, TRUE
+  ),
+  (
+    'R1 Heating Start Time', '3', 'Schedule the heating event time fetching [SCHEDULE]', 
+    'HTST', 2, 'Heating', 'StartTime', 
+    NULL, NULL, NULL, NULL, NULL, TRUE
+  ),
+  (
+    'R1 Reaction End Time', '4', 'Schedule the Reaction event time fetching [SCHEDULE]', 
+    'REET', 2, 'Reaction hold', 'EndTime', 
+    NULL, NULL, NULL, NULL, NULL, TRUE
+  ),
+  (
+    'R1 Cooling Start Time', '5', 'Schedule the Cooling event time fetching [SCHEDULE]', 
+    'CLST', 2, 'Cooling', 'StartTime', 
+    NULL, NULL, NULL, NULL, NULL, TRUE
+  ),
+  (
+    'R1 Cooling End Time', '6', 'Schedule the Cooling event time fetching [SCHEDULE]', 
+    'CLET', 2, 'Cooling', 'EndTime', 
+    NULL, NULL, NULL, NULL, NULL, TRUE
+  ),
+  (
+    'R1 Filter & transfer Start Time', '7', 'Schedule the Filter & transfer event time fetching [SCHEDULE]', 
+    'FTST', 2, 'Filter & transfer', 'StartTime', 
+    NULL, NULL, NULL, NULL, NULL, TRUE
+  ),
+  (
+    'R1 Filter & transfer End Time', '8', 'Schedule the Filter & transfer event time fetching [SCHEDULE]', 
+    'FTET', 2, 'Filter & transfer', 'EndTime', 
+    NULL, NULL, NULL, NULL, NULL, TRUE
+  )
+  
 ON CONFLICT (ref_instruction) DO NOTHING;
 
 -- 6. Default Step-Triggered Instruction Templates (Layer-2 On-Demand Step Schedulers)
@@ -159,10 +198,50 @@ INSERT INTO step_triggered_instruction_templates (
   ),
   (
     'Pressure curves of filter', 'CGET', 'HISTORIAN_EVENT',
-    '1', '[RECORD]', 'PRESS',
+    '2', '[RECORD]', 'PRESS',
     3, NULL, 'MAX', 'R1.FILTER_DP',
     NULL, NULL, NULL, NULL, TRUE,
     'Charging', 'StartTime', 'Charging', 'EndTime',
+    NULL, NULL, 0
+  ),
+  (
+    'Get temperature curve above 140 °C.', 'HTST', 'HISTORIAN_EVENT',
+    '3', '[RECORD: START=140, STOP=140, DIRECTION=Rise, INTERVAL=2s, DURATION=200s]', 'RECTEMP',
+    3, NULL, 'MAX', 'R1.TEMP',
+    NULL, NULL, NULL, NULL, TRUE,
+    'Heating', 'StartTime', NULL, NULL,
+    NULL, NULL, 0
+  ),
+  (
+    'Get pressure sentinel', 'HTST', 'HISTORIAN_EVENT',
+    '4', '[RECORD: INTERVAL=10s, SENTINEL]', 'RECPRESS',
+    3, NULL, 'MAX', 'R1.PRES',
+    NULL, NULL, NULL, NULL, TRUE,
+    'Heating', 'StartTime', NULL, NULL,
+    NULL, NULL, 0
+  ),
+  (
+    'time of 130°C', 'REET', 'HISTORIAN_EVENT',
+    '5', '[TIME: VALUE=130]', '130T',
+    1, NULL, NULL, 'R1.TEMP',
+    NULL, NULL, NULL, NULL, TRUE,
+    'Heating', 'StartTime', NULL, NULL,
+    NULL, NULL, 0
+  ),
+  (
+    'Temperature after 200 mins of 130°C', '130T', 'PAYLOAD',
+    '6', '[RECORD: DURATION=3m]', '200TEMP',
+    1, NULL, NULL, 'R1.TEMP',
+    NULL, NULL, NULL, NULL, TRUE,
+    NULL, NULL, NULL, NULL,
+    'ActualResult', NULL, 0
+  ),
+  (
+    'Inerted check', 'CLET', 'HISTORIAN_EVENT',
+    '7', '[INTERPRET: 1="Yes", 0="No"]', 'CLING',
+    3, NULL, 'Min', 'R1.N2_BLANKET',
+    NULL, NULL, NULL, NULL, TRUE,
+    'Cooling', 'StartTime', 'Cooling', 'EndTime',
     NULL, NULL, 0
   )
 ON CONFLICT (trigger_instruction_id, ref_instruction) DO NOTHING;

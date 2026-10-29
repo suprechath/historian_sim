@@ -129,7 +129,7 @@ export async function instantiatePredefinedBatchInstructions({
         return { total: 0, enqueued: 0, results: [] };
     }
 
-    const cleanBatchId = batchId.trim();
+    const cleanBatchId = String(batchId || '').replace(/[\[\]]/g, '').trim();
     await ensureTemplateTables();
 
     // 1. Fetch active templates with all broken-down columns

@@ -63,7 +63,7 @@ export function parseBatchLineDate(dateStr) {
  */
 export function cleanInstructionId(instructionId = '') {
     if (!instructionId) return '';
-    return String(instructionId).trim().replace(/^\[+/, '').replace(/\]+$/, '').toUpperCase();
+    return String(instructionId).replace(/[\[\]]/g, '').trim().toUpperCase();
 }
 
 /**

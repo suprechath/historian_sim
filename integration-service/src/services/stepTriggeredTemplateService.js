@@ -1,6 +1,6 @@
 import { query } from '../db.js';
 import { logger } from '../utils/logger.js';
-import { formatBatchLineDate, parseBatchLineDate } from '../utils/formatters.js';
+import { formatBatchLineDate, parseBatchLineDate, cleanInstructionId } from '../utils/formatters.js';
 import { extractInstructionPayload } from '../utils/instructionParsers.js';
 import { handleCase1PointInTime } from './case1Service.js';
 import { handleCase2PhaseTimestamp } from './case2Service.js';
@@ -115,8 +115,9 @@ export async function getStepTriggeredTemplates({ triggerInstructionId = null, a
 
 
     if (triggerInstructionId) {
-        params.push(String(triggerInstructionId).trim());
-        sql += ` AND (trigger_instruction_id = $${params.length} OR LOWER(trigger_instruction_id) = LOWER($${params.length}))`;
+        const cleanTrigger = cleanInstructionId(triggerInstructionId) || String(triggerInstructionId).replace(/[\[\]]/g, '').trim();
+        params.push(cleanTrigger);
+        sql += ` AND (trigger_instruction_id = $${params.length} OR LOWER(trigger_instruction_id) = LOWER($${params.length}) OR UPPER(REGEXP_REPLACE(trigger_instruction_id, '[\\[\\]]', '', 'g')) = UPPER($${params.length}))`;
     }
     if (activeOnly) {
         sql += ' AND is_active = TRUE';
@@ -155,8 +156,8 @@ export async function upsertStepTriggeredTemplate({
     offsetDurationMs = 0
 }) {
     await ensureStepTriggeredTables();
-    const cleanRef = String(refInstruction).trim().toUpperCase();
-    const cleanTrigger = String(triggerInstructionId).trim();
+    const cleanRef = cleanInstructionId(refInstruction) || String(refInstruction).replace(/[\[\]]/g, '').trim().toUpperCase();
+    const cleanTrigger = cleanInstructionId(triggerInstructionId) || String(triggerInstructionId).replace(/[\[\]]/g, '').trim();
 
     const { rows } = await query(`
         INSERT INTO step_triggered_instruction_templates 
@@ -324,13 +325,13 @@ export function resolvePayloadTimes(tpl, body) {
     let rawStart = null;
     const startField = String(tpl.payload_start_field || 'ActualResult').toLowerCase();
 
-    if (startField === 'executeddate') {
-        rawStart = latestResult.ExecutedDate || instruction.ExecutedDate || body.ExecutedDate;
+    if (startField === 'executeddate' || startField === 'executedtimestamp') {
+        rawStart = latestResult.ExecutedDate || latestResult.ExecutedTimestamp || latestResult.executed_timestamp || instruction.ExecutedDate || instruction.ExecutedTimestamp || body.ExecutedDate || body.ExecutedTimestamp;
     } else if (startField === 'refstarttime') {
         rawStart = instruction.RefStartTime || body.RefStartTime;
     } else {
         // Default: ActualResult value or RefTime
-        rawStart = latestResult.Value;
+        rawStart = latestResult.Value !== undefined ? latestResult.Value : (latestResult.value !== undefined ? latestResult.value : (instruction.RefTime || body.RefTime));
     }
 
     const parsedStart = rawStart ? (parseBatchLineDate(rawStart) || new Date(rawStart)) : null;
@@ -426,8 +427,9 @@ export async function handleStepTriggeredInstructions(body) {
     const step = phase.Step || {};
     const instruction = step.Instruction || body.Instruction || {};
 
-    const cleanBatchId = String(batch.BatchId || body.batch_id || body.BatchId || '').trim();
-    const triggerId = String(instruction.InstructionId || instruction.RefInstruction || body.InstructionId || body.refInstruction || '').trim();
+    const cleanBatchId = String(batch.BatchId || body.batch_id || body.BatchId || data.batch_id || data.BatchId || body.batchId || '').replace(/[\[\]]/g, '').trim();
+    const rawTriggerId = String(instruction.InstructionId || instruction.RefInstruction || body.InstructionId || body.refInstruction || '').trim();
+    const triggerId = cleanInstructionId(rawTriggerId) || rawTriggerId.replace(/[\[\]]/g, '').trim();
     const callbackKey = body.CallbackKey || body.callbackkey || null;
     const actualResults = Array.isArray(instruction.ActualResult)
         ? instruction.ActualResult : (instruction.ActualResult ? [instruction.ActualResult] : []);

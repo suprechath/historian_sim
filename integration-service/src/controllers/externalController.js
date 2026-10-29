@@ -38,31 +38,6 @@ export async function handleInstructionWebhook(req, res) {
 
         // 2. Topic: batch_execute.update
         if (topic === 'batch_execute.update') {
-            // 2.1 High Exception requiring shopfloor intervention
-            const highExceptionCheck = await checkAndForwardHighExceptions(body);
-            if (highExceptionCheck.matched) {
-                if (highExceptionCheck.suppressed) {
-                    return res.json({
-                        status: 'suppressed',
-                        message: highExceptionCheck.reason,
-                        lastAlertedAt: highExceptionCheck.lastAlertedAt
-                    });
-                }
-                if (!highExceptionCheck.dispatched) {
-                    return res.status(502).json({
-                        status: 'error',
-                        message: 'Failed to dispatch high exception alert to external webhook',
-                        error: highExceptionCheck.error,
-                        details: highExceptionCheck.results
-                    });
-                }
-                return res.json({
-                    status: 'success',
-                    message: 'High exception forwarded to Make.com',
-                    count: highExceptionCheck.results.length,
-                    details: highExceptionCheck.results
-                });
-            }
 
             // 2.2 Check for [EXCEPTION: REF=...] trigger across all description fields
             const exceptionTriggers = extractExceptionTriggers(fullDesc);
@@ -98,6 +73,32 @@ export async function handleInstructionWebhook(req, res) {
                     status: 'success',
                     message: `Triggered ${stepTriggerResult.matched} step template(s)`,
                     stepTriggers: stepTriggerResult
+                });
+            }
+
+            // 2.1 High Exception requiring shopfloor intervention
+            const highExceptionCheck = await checkAndForwardHighExceptions(body);
+            if (highExceptionCheck.matched) {
+                if (highExceptionCheck.suppressed) {
+                    return res.json({
+                        status: 'suppressed',
+                        message: highExceptionCheck.reason,
+                        lastAlertedAt: highExceptionCheck.lastAlertedAt
+                    });
+                }
+                if (!highExceptionCheck.dispatched) {
+                    return res.status(502).json({
+                        status: 'error',
+                        message: 'Failed to dispatch high exception alert to external webhook',
+                        error: highExceptionCheck.error,
+                        details: highExceptionCheck.results
+                    });
+                }
+                return res.json({
+                    status: 'success',
+                    message: 'High exception forwarded to Make.com',
+                    count: highExceptionCheck.results.length,
+                    details: highExceptionCheck.results
                 });
             }
 

@@ -2201,6 +2201,93 @@ test('handleInstructionWebhook triggers step templates on batch_execute.update',
 });
 
 
+test('handleStepTriggeredInstructions parses square brackets from InstructionId and BatchId (e.g. [CGET] and [B-CGET-01])', async () => {
+    const origQuery = pool.query;
+    const origFetch = global.fetch;
+    global.fetch = async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ status: 'success' }),
+        json: async () => ({ status: 'success' })
+    });
+
+    try {
+        let queriedTriggerId = null;
+        let queriedBatchId = null;
+
+        pool.query = async (sql, params = []) => {
+            const queryStr = String(sql);
+            if (queryStr.includes('step_triggered_instruction_templates')) {
+                queriedTriggerId = params[0];
+                return {
+                    rows: [{
+                        id: 99,
+                        name: 'R1 Charging End Time (CGET)',
+                        trigger_instruction_id: 'CGET',
+                        time_source: 'HISTORIAN_EVENT',
+                        instruction_id: '2',
+                        instruction_description: 'Schedule the charging event time fetching [SCHEDULE]',
+                        ref_instruction: 'CGET',
+                        event_type: 2,
+                        ref_element: null,
+                        ref_type: 'EndTime',
+                        ref_event: 'Charging',
+                        ref_start_event: 'Charging',
+                        ref_start_type: 'EndTime',
+                        ref_end_type: null,
+                        is_active: true
+                    }]
+                };
+            }
+            if (queryStr.includes('FROM events')) {
+                queriedBatchId = params[0];
+                return {
+                    rows: [{
+                        id: 1,
+                        name: 'Charging',
+                        level: 'Phase',
+                        started_at: new Date('2026-03-27T10:00:00.000Z'),
+                        ended_at: new Date('2026-03-27T10:30:00.000Z'),
+                        asset_code: 'R1',
+                        batch_id: 'B-CGET-01'
+                    }]
+                };
+            }
+            return { rows: [] };
+        };
+
+        const incomingBody = {
+            Topic: 'batch_execute.update',
+            CallbackKey: 'cb-cget-test',
+            Data: {
+                Batch: {
+                    BatchId: '[B-CGET-01]',
+                    Phase: {
+                        Step: {
+                            Instruction: {
+                                InstructionId: '[CGET]',
+                                InstructionDescription: 'Charging step finished'
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        const res = await handleStepTriggeredInstructions(incomingBody);
+        assert.equal(queriedTriggerId, 'CGET');
+        assert.equal(queriedBatchId, 'B-CGET-01');
+        assert.equal(res.batchId, 'B-CGET-01');
+        assert.equal(res.triggerId, 'CGET');
+        assert.equal(res.matched, 1);
+        assert.equal(res.executed, 1);
+        assert.equal(res.results[0].status, 'success');
+    } finally {
+        pool.query = origQuery;
+        global.fetch = origFetch;
+    }
+});
+
 test('getPredefinedTemplates and upsertPredefinedTemplate work without recipe_version column', async () => {
     const origQuery = pool.query;
     try {
