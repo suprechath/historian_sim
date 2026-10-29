@@ -244,7 +244,6 @@ CREATE INDEX IF NOT EXISTS idx_health_checks_batch_ack ON integration_health_che
 -- 16. Predefined Instruction Templates (Automated Batch Dispatch on Health Check Pass)
 CREATE TABLE IF NOT EXISTS predefined_instruction_templates (
   id                      SERIAL PRIMARY KEY,
-  recipe_version          TEXT NOT NULL DEFAULT 'v2.1',
   name                    TEXT NOT NULL,
   instruction_id          TEXT,
   instruction_description TEXT NOT NULL,
@@ -260,40 +259,46 @@ CREATE TABLE IF NOT EXISTS predefined_instruction_templates (
   is_active               BOOLEAN NOT NULL DEFAULT TRUE,
   created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (recipe_version, ref_instruction)
+  UNIQUE (ref_instruction)
 );
-CREATE INDEX IF NOT EXISTS idx_predefined_templates_recipe ON predefined_instruction_templates (recipe_version, is_active);
+CREATE INDEX IF NOT EXISTS idx_predefined_templates_active ON predefined_instruction_templates (is_active);
 CREATE INDEX IF NOT EXISTS idx_predefined_templates_ref ON predefined_instruction_templates (ref_instruction);
 
 -- 11. Step-Triggered Instruction Templates (Layer-2 On-Demand Execution / Schedulers)
 CREATE TABLE IF NOT EXISTS step_triggered_instruction_templates (
   id                          SERIAL PRIMARY KEY,
-  recipe_version              TEXT NOT NULL DEFAULT 'v2.1',
-  name                        TEXT NOT NULL,
-  trigger_instruction_id      TEXT NOT NULL,
-  time_source                 TEXT NOT NULL CHECK (time_source IN ('HISTORIAN_EVENT', 'PAYLOAD', 'STATIC')),
-  instruction_id              TEXT,
-  instruction_description     TEXT NOT NULL,
-  ref_instruction             TEXT NOT NULL,
-  event_type                  INTEGER NOT NULL CHECK (event_type IN (1, 2, 3)),
-  ref_event                   TEXT,
-  ref_type                    TEXT,
-  ref_element                 TEXT,
-  ref_time                    TEXT,
-  ref_start_time              TEXT,
-  ref_end_time                TEXT,
-  expected_result             TEXT,
-  is_active                   BOOLEAN NOT NULL DEFAULT TRUE,
-  ref_start_event             TEXT,
-  ref_start_type              TEXT DEFAULT 'StartTime' CHECK (ref_start_type IN ('StartTime', 'EndTime')),
-  ref_end_event               TEXT,
-  ref_end_type                TEXT CHECK (ref_end_type IS NULL OR ref_end_type IN ('StartTime', 'EndTime')),
-  payload_start_field         TEXT DEFAULT 'ActualResult',
-  payload_end_field           TEXT,
-  offset_duration_ms          INTEGER DEFAULT 0,
+  name                        TEXT NOT NULL,                                              -- Descriptive name of the template
+  trigger_instruction_id      TEXT NOT NULL,                                              -- BatchLine instruction ID/Ref that fires this trigger (e.g. 'CGET', 'HMI')
+  time_source                 TEXT NOT NULL CHECK (time_source IN ('HISTORIAN_EVENT', 'PAYLOAD', 'STATIC')), -- Time sourcing mode
+
+  -- Synthesized instruction attributes (returned to BatchLine)
+  instruction_id              TEXT,                                                       -- Instruction ID (defaults to ref_instruction if NULL)
+  instruction_description     TEXT NOT NULL,                                              -- Directives: '[RECORD]', '[PREVBATCH]', '[TIME: VALUE=130]', '[INTERPRET: ...]'
+  ref_instruction             TEXT NOT NULL,                                              -- BatchLine target instruction code to update (e.g. 'PRESS', 'PREVB')
+  event_type                  INTEGER NOT NULL CHECK (event_type IN (1, 2, 3)),           -- Case category: 1=PointInTime/PrevBatch, 2=PhaseTimestamp, 3=TimeRange/Profile
+  ref_event                   TEXT,                                                       -- Recipe phase/event name (e.g. 'Charging', 'PreHeat')
+  ref_type                    TEXT,                                                       -- Sub-type/aggregate: 'MAX', 'MIN', 'AVG', 'PROFILE', 'StartTime', 'EndTime'
+  ref_element                 TEXT,                                                       -- Historian sensor/tag name (e.g. 'R1.TEMP', 'R1.FILTER_DP')
+  ref_time                    TEXT,                                                       -- Static point-in-time timestamp (used if time_source = 'STATIC' for Case 1)
+  ref_start_time              TEXT,                                                       -- Static window start timestamp (used if time_source = 'STATIC' for Case 3)
+  ref_end_time                TEXT,                                                       -- Static window end timestamp (used if time_source = 'STATIC' for Case 3)
+  expected_result             TEXT,                                                       -- Expected setpoint value or criteria
+  is_active                   BOOLEAN NOT NULL DEFAULT TRUE,                              -- TRUE to enable evaluation, FALSE to disable
+
+  -- Dynamic Historian Event Sourcing (time_source = 'HISTORIAN_EVENT')
+  ref_start_event             TEXT,                                                       -- Phase name in 'events' table for start time (e.g. 'Charging')
+  ref_start_type              TEXT DEFAULT 'StartTime' CHECK (ref_start_type IN ('StartTime', 'EndTime')), -- 'StartTime' (started_at) or 'EndTime' (ended_at)
+  ref_end_event               TEXT,                                                       -- Phase name in 'events' table for end time (defaults to ref_start_event if NULL)
+  ref_end_type                TEXT CHECK (ref_end_type IS NULL OR ref_end_type IN ('StartTime', 'EndTime')), -- 'StartTime', 'EndTime', or NULL
+
+  -- Dynamic Webhook Payload Sourcing (time_source = 'PAYLOAD')
+  payload_start_field         TEXT DEFAULT 'ActualResult',                                -- Field to read start timestamp ('ActualResult', 'ExecutedDate', 'RefStartTime')
+  payload_end_field           TEXT,                                                       -- Field to read end timestamp ('RefEndTime', 'ActualResult[1]', or NULL)
+  offset_duration_ms          INTEGER DEFAULT 0,                                          -- Offset in ms added to start time if payload_end_field is NULL
+
   created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (recipe_version, trigger_instruction_id, ref_instruction)
+  UNIQUE (trigger_instruction_id, ref_instruction)
 );
-CREATE INDEX IF NOT EXISTS idx_step_templates_trigger ON step_triggered_instruction_templates (recipe_version, trigger_instruction_id, is_active);
+CREATE INDEX IF NOT EXISTS idx_step_templates_trigger ON step_triggered_instruction_templates (trigger_instruction_id, is_active);
 CREATE INDEX IF NOT EXISTS idx_step_templates_ref ON step_triggered_instruction_templates (ref_instruction);

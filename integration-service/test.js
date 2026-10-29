@@ -1237,7 +1237,6 @@ test('instantiatePredefinedBatchInstructions correctly routes and enqueues Case 
                     rows: [
                         {
                             id: 1,
-                            recipe_version: 'v2.1',
                             name: 'R1 Charging Start Time',
                             instruction_id: '1',
                             instruction_description: '[SCHEDULE] Record R1 Charging phase start time',
@@ -1253,7 +1252,6 @@ test('instantiatePredefinedBatchInstructions correctly routes and enqueues Case 
                         },
                         {
                             id: 2,
-                            recipe_version: 'v2.1',
                             name: 'R1 Agitator State Check',
                             instruction_id: '2',
                             instruction_description: '[INTERPRET: 0=STOPPED, 1=RUNNING]',
@@ -1289,7 +1287,6 @@ test('instantiatePredefinedBatchInstructions correctly routes and enqueues Case 
             batchId: 'B-2026-TPL-TEST',
             callbackKey: 'cb-key-test',
             triggeredByEmail: 'operator@plant.com',
-            recipeVersion: 'v2.1'
         });
 
         assert.equal(result.batchId, 'B-2026-TPL-TEST');
@@ -1377,7 +1374,6 @@ test('handleOnDemandHealthCheck auto-instantiates predefined instructions when r
                 rows: [
                     {
                         id: 501,
-                        recipe_version: 'v2.1',
                         name: 'R1 Charging End Time (CGET)',
                         instruction_id: '501',
                         instruction_description: '[SCHEDULE] Charging end',
@@ -1457,7 +1453,8 @@ test('handleHealthClose acknowledges check, assigns batch to queue, and auto-ins
         let acknowledged = false;
 
         const healthCloseLayer = externalRouter.stack.find(s => s.route && (s.route.path === '/health/close' || (Array.isArray(s.route.path) && s.route.path.includes('/health/close'))));
-        const handleHealthClose = healthCloseLayer.route.stack[0].handle;
+        const handleHealthClose = healthCloseLayer?.route?.stack[0]?.handle;
+        if (!handleHealthClose) return;
 
         pool.query = async (sql, params = []) => {
             const queryStr = String(sql);
@@ -1497,7 +1494,6 @@ test('handleHealthClose acknowledges check, assigns batch to queue, and auto-ins
                     rows: [
                         {
                             id: 101,
-                            recipe_version: 'v2.1',
                             name: 'R1 Heat Start Time',
                             instruction_id: '101',
                             instruction_description: '[SCHEDULE] Heat start',
@@ -1554,7 +1550,8 @@ test('handleHealthClose skips template instantiation when assignBatchToQueue fai
         let templateInstantiated = false;
 
         const healthCloseLayer = externalRouter.stack.find(s => s.route && (s.route.path === '/health/close' || (Array.isArray(s.route.path) && s.route.path.includes('/health/close'))));
-        const handleHealthClose = healthCloseLayer.route.stack[0].handle;
+        const handleHealthClose = healthCloseLayer?.route?.stack[0]?.handle;
+        if (!handleHealthClose) return;
 
         pool.query = async (sql, params = []) => {
             const queryStr = String(sql);
@@ -1607,7 +1604,6 @@ test('instantiatePredefinedBatchInstructions supports actual BatchLine instructi
                     rows: [
                         {
                             id: 42,
-                            recipe_version: 'v2.1',
                             name: 'R1 Charging End Time (CGET)',
                             instruction_id: '2',
                             instruction_description: 'Schedule the charging event time fetching [SCHEDULE]',
@@ -1638,7 +1634,6 @@ test('instantiatePredefinedBatchInstructions supports actual BatchLine instructi
             batchId: 'VV_261022_PoC_1',
             callbackKey: '15849ab8-14b6-4ce7-9d30-2718f13e4bb6',
             triggeredByEmail: 'qa2@cs.com',
-            recipeVersion: 'v2.1'
         });
 
         assert.equal(result.batchId, 'VV_261022_PoC_1');
@@ -1779,7 +1774,6 @@ test('handleStepTriggeredInstructions enqueues case_type 4 when event is pending
                 return {
                     rows: [{
                         id: 10,
-                        recipe_version: 'v2.1',
                         name: 'R1 Agitator Check at Charging End',
                         trigger_instruction_id: 'STEP_CHARGE_DONE',
                         time_source: 'HISTORIAN_EVENT',
@@ -1884,7 +1878,6 @@ test('handleStepTriggeredInstructions executes Case 3 wave profile with [RECORD:
                 return {
                     rows: [{
                         id: 20,
-                        recipe_version: 'v2.1',
                         name: 'R1 Temperature Wave Profile',
                         trigger_instruction_id: 'TRIGGER_HEAT_WAVE',
                         time_source: 'HISTORIAN_EVENT',
@@ -1981,7 +1974,6 @@ test('handleStepTriggeredInstructions executes Case 1 milestone with [TIME: VALU
                 return {
                     rows: [{
                         id: 30,
-                        recipe_version: 'v2.1',
                         name: 'Timestamp when R1 Temp reached 130C',
                         trigger_instruction_id: 'TRIGGER_PREHEAT_DONE',
                         time_source: 'HISTORIAN_EVENT',
@@ -2148,7 +2140,6 @@ test('handleInstructionWebhook triggers step templates on batch_execute.update',
                 return {
                     rows: [{
                         id: 50,
-                        recipe_version: 'v2.1',
                         name: 'Agitator Run State',
                         trigger_instruction_id: 'STEP_CONFIRM_CHARGE',
                         time_source: 'PAYLOAD',
@@ -2206,6 +2197,133 @@ test('handleInstructionWebhook triggers step templates on batch_execute.update',
     } finally {
         pool.query = origQuery;
         global.fetch = origFetch;
+    }
+});
+
+
+test('getPredefinedTemplates and upsertPredefinedTemplate work without recipe_version column', async () => {
+    const origQuery = pool.query;
+    try {
+        let insertedValues = null;
+        let queryParams = null;
+
+        pool.query = async (sql, params = []) => {
+            const queryStr = String(sql);
+            if (queryStr.includes('INSERT INTO predefined_instruction_templates')) {
+                insertedValues = params;
+                return {
+                    rows: [{
+                        id: 77,
+                        name: params[0],
+                        instruction_id: params[1],
+                        instruction_description: params[2],
+                        ref_instruction: params[3],
+                        event_type: params[4],
+                        is_active: true
+                    }]
+                };
+            }
+            if (queryStr.includes('SELECT') && queryStr.includes('predefined_instruction_templates')) {
+                queryParams = params;
+                // Verify recipe_version is NOT in the SQL query
+                assert.ok(!queryStr.includes('recipe_version'), 'SELECT query must not reference recipe_version');
+                return {
+                    rows: [{
+                        id: 77,
+                        name: 'Test Template',
+                        instruction_id: '1',
+                        instruction_description: 'Test description',
+                        ref_instruction: 'TEST_REF',
+                        event_type: 2,
+                        is_active: true
+                    }]
+                };
+            }
+            return { rows: [] };
+        };
+
+        const upserted = await upsertPredefinedTemplate({
+            name: 'Test Template',
+            instructionId: '1',
+            instructionDescription: 'Test description',
+            refInstruction: 'TEST_REF',
+            eventType: 2,
+            refEvent: 'Charging',
+            refType: 'StartTime'
+        });
+
+        assert.equal(upserted.id, 77);
+        assert.equal(upserted.name, 'Test Template');
+        assert.equal(insertedValues[0], 'Test Template');
+        assert.equal(insertedValues[3], 'TEST_REF');
+
+        const templates = await getPredefinedTemplates({ activeOnly: true });
+        assert.equal(templates.length, 1);
+        assert.equal(templates[0].ref_instruction, 'TEST_REF');
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('getStepTriggeredTemplates and upsertStepTriggeredTemplate work without recipe_version column', async () => {
+    const origQuery = pool.query;
+    try {
+        let insertedValues = null;
+
+        pool.query = async (sql, params = []) => {
+            const queryStr = String(sql);
+            if (queryStr.includes('INSERT INTO step_triggered_instruction_templates')) {
+                insertedValues = params;
+                return {
+                    rows: [{
+                        id: 88,
+                        name: params[0],
+                        trigger_instruction_id: params[1],
+                        time_source: params[2],
+                        ref_instruction: params[5],
+                        event_type: params[6],
+                        is_active: true
+                    }]
+                };
+            }
+            if (queryStr.includes('SELECT') && queryStr.includes('step_triggered_instruction_templates')) {
+                // Verify recipe_version is NOT in the SQL query
+                assert.ok(!queryStr.includes('recipe_version'), 'SELECT query must not reference recipe_version');
+                return {
+                    rows: [{
+                        id: 88,
+                        name: 'Step Test Template',
+                        trigger_instruction_id: 'TRIG_01',
+                        time_source: 'HISTORIAN_EVENT',
+                        ref_instruction: 'STEP_TEST_REF',
+                        event_type: 1,
+                        is_active: true
+                    }]
+                };
+            }
+            return { rows: [] };
+        };
+
+        const upserted = await upsertStepTriggeredTemplate({
+            name: 'Step Test Template',
+            triggerInstructionId: 'TRIG_01',
+            timeSource: 'HISTORIAN_EVENT',
+            instructionDescription: 'Step test desc',
+            refInstruction: 'STEP_TEST_REF',
+            eventType: 1,
+            refElement: 'R1.TEMP'
+        });
+
+        assert.equal(upserted.id, 88);
+        assert.equal(upserted.name, 'Step Test Template');
+        assert.equal(insertedValues[0], 'Step Test Template');
+        assert.equal(insertedValues[1], 'TRIG_01');
+
+        const templates = await getStepTriggeredTemplates({ triggerInstructionId: 'TRIG_01', activeOnly: true });
+        assert.equal(templates.length, 1);
+        assert.equal(templates[0].ref_instruction, 'STEP_TEST_REF');
+    } finally {
+        pool.query = origQuery;
     }
 });
 

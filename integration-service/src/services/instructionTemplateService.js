@@ -50,7 +50,6 @@ export async function ensureTemplateTables() {
                 await query(`
                     CREATE TABLE IF NOT EXISTS predefined_instruction_templates (
                         id                      SERIAL PRIMARY KEY,
-                        recipe_version          TEXT NOT NULL DEFAULT 'v2.1',
                         name                    TEXT NOT NULL,
                         instruction_id          TEXT,
                         instruction_description TEXT NOT NULL,
@@ -66,7 +65,7 @@ export async function ensureTemplateTables() {
                         is_active               BOOLEAN NOT NULL DEFAULT TRUE,
                         created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                        UNIQUE (recipe_version, ref_instruction)
+                        UNIQUE (ref_instruction)
                     );
 
                     -- Safe schema migrations if table existed previously with JSONB
@@ -81,8 +80,22 @@ export async function ensureTemplateTables() {
                     ALTER TABLE predefined_instruction_templates ADD COLUMN IF NOT EXISTS ref_end_time TEXT;
                     ALTER TABLE predefined_instruction_templates ADD COLUMN IF NOT EXISTS expected_result TEXT;
 
-                    CREATE INDEX IF NOT EXISTS idx_predefined_templates_recipe 
-                    ON predefined_instruction_templates (recipe_version, is_active);
+                    -- Drop recipe_version column if present and ensure UNIQUE (ref_instruction)
+                    ALTER TABLE predefined_instruction_templates DROP COLUMN IF EXISTS recipe_version CASCADE;
+
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint WHERE conname = 'predefined_instruction_templates_ref_instruction_key'
+                        ) THEN
+                            ALTER TABLE predefined_instruction_templates ADD CONSTRAINT predefined_instruction_templates_ref_instruction_key UNIQUE (ref_instruction);
+                        END IF;
+                    EXCEPTION WHEN duplicate_table OR duplicate_object THEN
+                        -- already exists
+                    END $$;
+
+                    CREATE INDEX IF NOT EXISTS idx_predefined_templates_active 
+                    ON predefined_instruction_templates (is_active);
                     CREATE INDEX IF NOT EXISTS idx_predefined_templates_ref 
                     ON predefined_instruction_templates (ref_instruction);
                 `);
@@ -104,14 +117,12 @@ export async function ensureTemplateTables() {
  * @param {string} options.batchId - The batch identifier (e.g. VV_261022_PoC_1 or B-2026-0001)
  * @param {string} [options.callbackKey] - BatchLine callback key
  * @param {string} [options.triggeredByEmail] - Operator email triggering the health check
- * @param {string} [options.recipeVersion='v2.1'] - Recipe version
  * @returns {Promise<Object>} Summary of instantiated tasks
  */
 export async function instantiatePredefinedBatchInstructions({
     batchId,
     callbackKey = null,
-    triggeredByEmail = null,
-    recipeVersion = 'v2.1'
+    triggeredByEmail = null
 }) {
     if (!batchId || batchId === 'UNKNOWN' || typeof batchId !== 'string' || !batchId.trim()) {
         logger.warn('TemplateService', 'Skipping template instantiation: invalid or missing BatchId');
@@ -124,20 +135,20 @@ export async function instantiatePredefinedBatchInstructions({
     // 1. Fetch active templates with all broken-down columns
     const { rows: templates } = await query(`
         SELECT 
-            id, recipe_version, name, instruction_id, instruction_description,
+            id, name, instruction_id, instruction_description,
             ref_instruction, event_type, ref_event, ref_type, ref_element,
             ref_time, ref_start_time, ref_end_time, expected_result
         FROM predefined_instruction_templates
-        WHERE recipe_version = $1 AND is_active = TRUE
+        WHERE is_active = TRUE
         ORDER BY id ASC;
-    `, [recipeVersion]);
+    `);
 
     if (templates.length === 0) {
-        logger.info('TemplateService', `No active predefined instruction templates found for recipe '${recipeVersion}'.`);
+        logger.info('TemplateService', 'No active predefined instruction templates found.');
         return { total: 0, enqueued: 0, results: [] };
     }
 
-    logger.info('TemplateService', `Instantiating ${templates.length} predefined instruction(s) for Batch "${cleanBatchId}" (Recipe: ${recipeVersion})...`);
+    logger.info('TemplateService', `Instantiating ${templates.length} predefined instruction(s) for Batch "${cleanBatchId}"...`);
 
     const results = [];
     let enqueuedCount = 0;
@@ -231,7 +242,6 @@ export async function instantiatePredefinedBatchInstructions({
     logger.info('TemplateService', `Completed template instantiation for Batch "${cleanBatchId}": ${enqueuedCount}/${templates.length} enqueued/processed.`);
     return {
         batchId: cleanBatchId,
-        recipeVersion,
         total: templates.length,
         enqueued: enqueuedCount,
         results
@@ -241,11 +251,11 @@ export async function instantiatePredefinedBatchInstructions({
 /**
  * Fetch list of predefined templates with clean broken-down attributes.
  */
-export async function getPredefinedTemplates({ recipeVersion = null, activeOnly = false } = {}) {
+export async function getPredefinedTemplates({ activeOnly = false } = {}) {
     await ensureTemplateTables();
     let sql = `
         SELECT 
-            id, recipe_version, name, instruction_id, instruction_description,
+            id, name, instruction_id, instruction_description,
             ref_instruction, event_type, ref_event, ref_type, ref_element,
             ref_time, ref_start_time, ref_end_time, expected_result,
             is_active, created_at, updated_at
@@ -254,10 +264,7 @@ export async function getPredefinedTemplates({ recipeVersion = null, activeOnly 
     `;
     const params = [];
 
-    if (recipeVersion) {
-        params.push(recipeVersion);
-        sql += ` AND recipe_version = $${params.length}`;
-    }
+    
     if (activeOnly) {
         sql += ' AND is_active = TRUE';
     }
@@ -271,7 +278,6 @@ export async function getPredefinedTemplates({ recipeVersion = null, activeOnly 
  * Upsert a predefined instruction template with broken-down attributes.
  */
 export async function upsertPredefinedTemplate({
-    recipeVersion = 'v2.1',
     name,
     instructionId = null,
     instructionDescription,
@@ -292,13 +298,13 @@ export async function upsertPredefinedTemplate({
     const { rows } = await query(`
         INSERT INTO predefined_instruction_templates 
         (
-            recipe_version, name, instruction_id, instruction_description, 
+            name, instruction_id, instruction_description, 
             ref_instruction, event_type, ref_event, ref_type, 
             ref_element, ref_time, ref_start_time, ref_end_time, 
             expected_result, is_active, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
-        ON CONFLICT (recipe_version, ref_instruction) DO UPDATE
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+        ON CONFLICT (ref_instruction) DO UPDATE
         SET name = EXCLUDED.name,
             instruction_id = EXCLUDED.instruction_id,
             instruction_description = EXCLUDED.instruction_description,
@@ -314,7 +320,6 @@ export async function upsertPredefinedTemplate({
             updated_at = NOW()
         RETURNING *;
     `, [
-        recipeVersion,
         name,
         instructionId,
         instructionDescription,

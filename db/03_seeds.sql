@@ -97,18 +97,52 @@ ON CONFLICT (id) DO UPDATE SET speed = 1;
 
 -- 5. Default Predefined Instruction Templates (Layer-1 Batch-Start Schedulers)
 INSERT INTO predefined_instruction_templates (
-  recipe_version, name, instruction_id, instruction_description, 
+  name, instruction_id, instruction_description, 
   ref_instruction, event_type, ref_event, ref_type, 
   ref_element, ref_time, ref_start_time, ref_end_time, 
   expected_result, is_active
 ) VALUES
-  ('v2.1', 'R1 Charging Start Time', '1', 'Schedule the charging event time fetching [SCHEDULE]', 'CGST', 2, 'Charging', 'StartTime', NULL, NULL, NULL, NULL, NULL, TRUE),
-  ('v2.1', 'R1 Charging End Time (CGET)', '2', 'Schedule the charging event time fetching [SCHEDULE]', 'CGET', 2, 'Charging', 'EndTime', NULL, NULL, NULL, NULL, NULL, TRUE)
-ON CONFLICT (recipe_version, ref_instruction) DO NOTHING;
+  ('R1 Charging Start Time', '1', 'Schedule the charging event time fetching [SCHEDULE]', 'CGST', 2, 'Charging', 'StartTime', NULL, NULL, NULL, NULL, NULL, TRUE),
+  ('R1 Charging End Time (CGET)', '2', 'Schedule the charging event time fetching [SCHEDULE]', 'CGET', 2, 'Charging', 'EndTime', NULL, NULL, NULL, NULL, NULL, TRUE)
+ON CONFLICT (ref_instruction) DO NOTHING;
 
 -- 6. Default Step-Triggered Instruction Templates (Layer-2 On-Demand Step Schedulers)
+--
+-- Column Definitions & Possible Values:
+--   1.  name                    TEXT NOT NULL      - Descriptive template label (e.g. 'Pressure curves of filter')
+--   2.  trigger_instruction_id  TEXT NOT NULL      - BatchLine instruction that fires this trigger (e.g. 'CGET', 'HMI', 'STEP_PREHEAT_COMPLETE')
+--   3.  time_source             TEXT NOT NULL      - Sourcing strategy: 'HISTORIAN_EVENT' | 'PAYLOAD' | 'STATIC'
+--   4.  instruction_id          TEXT NULL          - Synthesized instruction ID to return (defaults to ref_instruction if NULL)
+--   5.  instruction_description TEXT NOT NULL      - Directive/mode flags:
+--                                                      '[RECORD]'                     -> Time-range continuous profile curve
+--                                                      '[RECORD: START=.., STOP=..]'  -> Wave rise/fall search
+--                                                      '[PREVBATCH]'                  -> Previous batch lookup
+--                                                      '[TIME: VALUE=130]'            -> Milestone crossing point
+--                                                      '[INTERPRET: 1=RUN, 0=STOP]'   -> Discrete state label mapping
+--                                                      '[SCHEDULE]'                   -> Phase timestamp scheduler
+--   6.  ref_instruction         TEXT NOT NULL      - Target instruction code to update in BatchLine (e.g. 'PRESS', 'PREVB', 'AGIT_STATE')
+--   7.  event_type              INTEGER NOT NULL   - Case category:
+--                                                      1 = Case 1 (Point-in-time / milestone / prev batch / interpret)
+--                                                      2 = Case 2 (Phase StartTime / EndTime timestamp fetching)
+--                                                      3 = Case 3 (Time range / profile curve / aggregates MIN, MAX, AVG)
+--   8.  ref_event               TEXT NULL          - Recipe phase or event name (e.g. 'Charging', 'PreHeat', 'Heating')
+--   9.  ref_type                TEXT NULL          - Aggregate or type specifier: 'MAX' | 'MIN' | 'AVG' | 'PROFILE' | 'StartTime' | 'EndTime' | NULL
+--   10. ref_element             TEXT NULL          - Historian sensor tag name (e.g. 'R1.TEMP', 'R1.FILTER_DP', 'R1.AGIT_RUN')
+--   11. ref_time                TEXT NULL          - Static point-in-time string (used if time_source = 'STATIC' for Case 1)
+--   12. ref_start_time          TEXT NULL          - Static window start string (used if time_source = 'STATIC' for Case 3)
+--   13. ref_end_time            TEXT NULL          - Static window end string (used if time_source = 'STATIC' for Case 3)
+--   14. expected_result         TEXT NULL          - Expected value or setpoint criteria (e.g. '130', NULL)
+--   15. is_active               BOOLEAN NOT NULL   - TRUE (active & evaluated) | FALSE (inactive/disabled)
+--   16. ref_start_event         TEXT NULL          - For HISTORIAN_EVENT: phase name for start time (e.g. 'Charging', 'PreHeat')
+--   17. ref_start_type          TEXT DEFAULT       - For HISTORIAN_EVENT: 'StartTime' (started_at) | 'EndTime' (ended_at)
+--   18. ref_end_event           TEXT NULL          - For HISTORIAN_EVENT: phase name for end time (defaults to ref_start_event if NULL)
+--   19. ref_end_type            TEXT NULL          - For HISTORIAN_EVENT: 'StartTime' | 'EndTime' | NULL (NULL for open-ended or point-in-time)
+--   20. payload_start_field     TEXT DEFAULT       - For PAYLOAD: field to read start timestamp ('ActualResult' | 'ExecutedDate' | 'RefStartTime')
+--   21. payload_end_field       TEXT NULL          - For PAYLOAD: field to read end timestamp ('RefEndTime' | 'ActualResult[1]' | NULL)
+--   22. offset_duration_ms      INTEGER DEFAULT 0  - Time window offset in ms (added to start time if payload_end_field is NULL, e.g. 0, 60000)
+--
 INSERT INTO step_triggered_instruction_templates (
-  recipe_version, name, trigger_instruction_id, time_source,
+  name, trigger_instruction_id, time_source,
   instruction_id, instruction_description, ref_instruction,
   event_type, ref_event, ref_type, ref_element,
   ref_time, ref_start_time, ref_end_time, expected_result, is_active,
@@ -116,7 +150,7 @@ INSERT INTO step_triggered_instruction_templates (
   payload_start_field, payload_end_field, offset_duration_ms
 ) VALUES
   (
-    '1', 'Previous batch number in current line', 'HMI', 'HISTORIAN_EVENT',
+    'Previous batch number in current line', 'HMI', 'STATIC',
     '1', '[PREVBATCH]', 'PREVB',
     1, NULL, NULL, 'R1.TEMP',
     NULL, NULL, NULL, NULL, TRUE,
@@ -124,30 +158,14 @@ INSERT INTO step_triggered_instruction_templates (
     NULL, NULL, 0
   ),
   (
-    '1', 'Pressure curves of filter', 'CGET', 'HISTORIAN_EVENT',
+    'Pressure curves of filter', 'CGET', 'HISTORIAN_EVENT',
     '1', '[RECORD]', 'PRESS',
     3, NULL, 'MAX', 'R1.FILTER_DP',
     NULL, NULL, NULL, NULL, TRUE,
-    'PreHeat', 'EndTime', NULL, NULL,
-    'ActualResult', NULL, 0
-  ),
-  -- (
-  --   'v2.1', 'Timestamp when R1 Temp reached 130C after Preheat', 'STEP_PREHEAT_COMPLETE', 'HISTORIAN_EVENT',
-  --   'INST_TIME_130', 'Find time when temp hits 130C [TIME: VALUE=130]', 'TIME_HIT_130',
-  --   1, 'PreHeat', NULL, 'R1.TEMP',
-  --   NULL, NULL, NULL, NULL, TRUE,
-  --   'PreHeat', 'EndTime', NULL, NULL,
-  --   'ActualResult', NULL, 0
-  -- ),
-  -- (
-  --   'v2.1', 'R1 Agitator State on Operator Confirmation', 'STEP_CONFIRM_CHARGE', 'PAYLOAD',
-  --   'INST_AGIT_STATE', 'Check agitator state at operator time [INTERPRET: 1=RUNNING, 0=STOPPED]', 'AGIT_STATE',
-  --   1, NULL, NULL, 'R1.AGIT_RUN',
-  --   NULL, NULL, NULL, NULL, TRUE,
-  --   NULL, 'StartTime', NULL, NULL,
-  --   'ActualResult', NULL, 0
-  -- )
-ON CONFLICT (recipe_version, trigger_instruction_id, ref_instruction) DO NOTHING;
+    'Charging', 'StartTime', 'Charging', 'EndTime',
+    NULL, NULL, 0
+  )
+ON CONFLICT (trigger_instruction_id, ref_instruction) DO NOTHING;
 
 -- 7. Excluded Product Specifications (Skipped from automatic queue assignment)
 INSERT INTO excluded_product_specifications (product_specification_id)

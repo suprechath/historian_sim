@@ -115,7 +115,7 @@ export async function sendBatchLineInstructionUpdate({ refInstruction, batchId, 
 
         let attempt = 0;
         let chunkDelivered = false;
-        // console.log("payload", payload);
+        console.log("payload", payload);
 
         while (attempt <= maxRetries) {
             try {

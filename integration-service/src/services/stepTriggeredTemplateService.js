@@ -30,45 +30,56 @@ export async function ensureStepTriggeredTables() {
                 await query(`
                     CREATE TABLE IF NOT EXISTS step_triggered_instruction_templates (
                         id                          SERIAL PRIMARY KEY,
-                        recipe_version              TEXT NOT NULL DEFAULT 'v2.1',
-                        name                        TEXT NOT NULL,
-                        
-                        -- Trigger identification
-                        trigger_instruction_id      TEXT NOT NULL,
-                        time_source                 TEXT NOT NULL CHECK (time_source IN ('HISTORIAN_EVENT', 'PAYLOAD', 'STATIC')),
+                        name                        TEXT NOT NULL,                                              -- Descriptive name of the template
+                        trigger_instruction_id      TEXT NOT NULL,                                              -- BatchLine instruction ID/Ref that fires this trigger
+                        time_source                 TEXT NOT NULL CHECK (time_source IN ('HISTORIAN_EVENT', 'PAYLOAD', 'STATIC')), -- Sourcing mode
 
-                        -- Standard instruction attributes (1:1 with predefined_instruction_templates)
-                        instruction_id              TEXT,
-                        instruction_description     TEXT NOT NULL,
-                        ref_instruction             TEXT NOT NULL,
-                        event_type                  INTEGER NOT NULL CHECK (event_type IN (1, 2, 3)),
-                        ref_event                   TEXT,
-                        ref_type                    TEXT,
-                        ref_element                 TEXT,
-                        ref_time                    TEXT,
-                        ref_start_time              TEXT,
-                        ref_end_time                TEXT,
-                        expected_result             TEXT,
-                        is_active                   BOOLEAN NOT NULL DEFAULT TRUE,
+                        -- Standard instruction attributes (1:1 with BatchLine instruction)
+                        instruction_id              TEXT,                                                       -- Instruction ID (defaults to ref_instruction if NULL)
+                        instruction_description     TEXT NOT NULL,                                              -- Directives: '[RECORD]', '[PREVBATCH]', '[TIME: ...]', '[INTERPRET: ...]'
+                        ref_instruction             TEXT NOT NULL,                                              -- BatchLine target instruction code to update
+                        event_type                  INTEGER NOT NULL CHECK (event_type IN (1, 2, 3)),           -- Case category: 1=PointInTime/PrevBatch, 2=PhaseTimestamp, 3=TimeRange/Profile
+                        ref_event                   TEXT,                                                       -- Recipe phase/event name (e.g. 'Charging', 'PreHeat')
+                        ref_type                    TEXT,                                                       -- Sub-type/aggregate: 'MAX', 'MIN', 'AVG', 'PROFILE', 'StartTime', 'EndTime'
+                        ref_element                 TEXT,                                                       -- Historian sensor tag name (e.g. 'R1.TEMP', 'R1.FILTER_DP')
+                        ref_time                    TEXT,                                                       -- Static point-in-time timestamp (used if time_source = 'STATIC' for Case 1)
+                        ref_start_time              TEXT,                                                       -- Static window start timestamp (used if time_source = 'STATIC' for Case 3)
+                        ref_end_time                TEXT,                                                       -- Static window end timestamp (used if time_source = 'STATIC' for Case 3)
+                        expected_result             TEXT,                                                       -- Expected setpoint value or criteria
+                        is_active                   BOOLEAN NOT NULL DEFAULT TRUE,                              -- TRUE to enable evaluation, FALSE to disable
 
-                        -- Resolution: Historian Event Sourcing (Type 1)
-                        ref_start_event             TEXT,
-                        ref_start_type              TEXT DEFAULT 'StartTime' CHECK (ref_start_type IN ('StartTime', 'EndTime')),
-                        ref_end_event               TEXT,
-                        ref_end_type                TEXT CHECK (ref_end_type IS NULL OR ref_end_type IN ('StartTime', 'EndTime')),
+                        -- Resolution: Historian Event Sourcing (time_source = 'HISTORIAN_EVENT')
+                        ref_start_event             TEXT,                                                       -- Phase name in 'events' table for start time (e.g. 'Charging')
+                        ref_start_type              TEXT DEFAULT 'StartTime' CHECK (ref_start_type IN ('StartTime', 'EndTime')), -- 'StartTime' (started_at) or 'EndTime' (ended_at)
+                        ref_end_event               TEXT,                                                       -- Phase name in 'events' table for end time (defaults to ref_start_event if NULL)
+                        ref_end_type                TEXT CHECK (ref_end_type IS NULL OR ref_end_type IN ('StartTime', 'EndTime')), -- 'StartTime', 'EndTime', or NULL
 
-                        -- Resolution: Payload Sourcing (Type 2)
-                        payload_start_field         TEXT DEFAULT 'ActualResult',
-                        payload_end_field           TEXT,
-                        offset_duration_ms          INTEGER DEFAULT 0,
+                        -- Resolution: Payload Sourcing (time_source = 'PAYLOAD')
+                        payload_start_field         TEXT DEFAULT 'ActualResult',                                -- Field to read start timestamp ('ActualResult', 'ExecutedTimestamp', etc.)
+                        payload_end_field           TEXT,                                                       -- Field to read end timestamp ('RefEndTime', 'ActualResult[1]', etc.)
+                        offset_duration_ms          INTEGER DEFAULT 0,                                          -- Offset in ms added to start time if payload_end_field is NULL
 
                         created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                        UNIQUE (recipe_version, trigger_instruction_id, ref_instruction)
+                        UNIQUE (trigger_instruction_id, ref_instruction)
                     );
 
+                    -- Drop recipe_version column if present and ensure UNIQUE (trigger_instruction_id, ref_instruction)
+                    ALTER TABLE step_triggered_instruction_templates DROP COLUMN IF EXISTS recipe_version CASCADE;
+
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint WHERE conname = 'step_triggered_instruction_templates_trigger_ref_key'
+                        ) THEN
+                            ALTER TABLE step_triggered_instruction_templates ADD CONSTRAINT step_triggered_instruction_templates_trigger_ref_key UNIQUE (trigger_instruction_id, ref_instruction);
+                        END IF;
+                    EXCEPTION WHEN duplicate_table OR duplicate_object THEN
+                        -- already exists
+                    END $$;
+
                     CREATE INDEX IF NOT EXISTS idx_step_templates_trigger 
-                    ON step_triggered_instruction_templates (recipe_version, trigger_instruction_id, is_active);
+                    ON step_triggered_instruction_templates (trigger_instruction_id, is_active);
 
                     CREATE INDEX IF NOT EXISTS idx_step_templates_ref 
                     ON step_triggered_instruction_templates (ref_instruction);
@@ -86,11 +97,11 @@ export async function ensureStepTriggeredTables() {
 /**
  * Fetch list of step-triggered instruction templates with optional filters.
  */
-export async function getStepTriggeredTemplates({ recipeVersion = null, triggerInstructionId = null, activeOnly = false } = {}) {
+export async function getStepTriggeredTemplates({ triggerInstructionId = null, activeOnly = false } = {}) {
     await ensureStepTriggeredTables();
     let sql = `
         SELECT 
-            id, recipe_version, name, trigger_instruction_id, time_source,
+            id, name, trigger_instruction_id, time_source,
             instruction_id, instruction_description, ref_instruction,
             event_type, ref_event, ref_type, ref_element,
             ref_time, ref_start_time, ref_end_time, expected_result, is_active,
@@ -102,10 +113,7 @@ export async function getStepTriggeredTemplates({ recipeVersion = null, triggerI
     `;
     const params = [];
 
-    if (recipeVersion) {
-        params.push(recipeVersion);
-        sql += ` AND recipe_version = $${params.length}`;
-    }
+
     if (triggerInstructionId) {
         params.push(String(triggerInstructionId).trim());
         sql += ` AND (trigger_instruction_id = $${params.length} OR LOWER(trigger_instruction_id) = LOWER($${params.length}))`;
@@ -123,7 +131,6 @@ export async function getStepTriggeredTemplates({ recipeVersion = null, triggerI
  * Upsert a step-triggered instruction template.
  */
 export async function upsertStepTriggeredTemplate({
-    recipeVersion = 'v2.1',
     name,
     triggerInstructionId,
     timeSource = 'HISTORIAN_EVENT',
@@ -154,7 +161,7 @@ export async function upsertStepTriggeredTemplate({
     const { rows } = await query(`
         INSERT INTO step_triggered_instruction_templates 
         (
-            recipe_version, name, trigger_instruction_id, time_source,
+            name, trigger_instruction_id, time_source,
             instruction_id, instruction_description, ref_instruction,
             event_type, ref_event, ref_type, ref_element,
             ref_time, ref_start_time, ref_end_time, expected_result, is_active,
@@ -162,10 +169,10 @@ export async function upsertStepTriggeredTemplate({
             payload_start_field, payload_end_field, offset_duration_ms, updated_at
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-            $17, $18, $19, $20, $21, $22, $23, NOW()
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+            $16, $17, $18, $19, $20, $21, $22, NOW()
         )
-        ON CONFLICT (recipe_version, trigger_instruction_id, ref_instruction) DO UPDATE
+        ON CONFLICT (trigger_instruction_id, ref_instruction) DO UPDATE
         SET name = EXCLUDED.name,
             time_source = EXCLUDED.time_source,
             instruction_id = EXCLUDED.instruction_id,
@@ -189,7 +196,7 @@ export async function upsertStepTriggeredTemplate({
             updated_at = NOW()
         RETURNING *;
     `, [
-        recipeVersion, name, cleanTrigger, timeSource,
+        name, cleanTrigger, timeSource,
         instructionId, instructionDescription, cleanRef,
         eventType, refEvent, refType, refElement,
         refTime, refStartTime, refEndTime, expectedResult, isActive,
@@ -317,13 +324,13 @@ export function resolvePayloadTimes(tpl, body) {
     let rawStart = null;
     const startField = String(tpl.payload_start_field || 'ActualResult').toLowerCase();
 
-    if (startField === 'executedtimestamp') {
-        rawStart = latestResult.ExecutedTimestamp || latestResult.executed_timestamp || instruction.ExecutedTimestamp || body.ExecutedTimestamp;
+    if (startField === 'executeddate') {
+        rawStart = latestResult.ExecutedDate || instruction.ExecutedDate || body.ExecutedDate;
     } else if (startField === 'refstarttime') {
         rawStart = instruction.RefStartTime || body.RefStartTime;
     } else {
         // Default: ActualResult value or RefTime
-        rawStart = latestResult.Value || latestResult.value || instruction.RefTime || body.RefTime;
+        rawStart = latestResult.Value;
     }
 
     const parsedStart = rawStart ? (parseBatchLineDate(rawStart) || new Date(rawStart)) : null;
@@ -410,10 +417,9 @@ export async function executeScheduledEventDependentStep(task) {
  * Evaluates and dispatches step-triggered instruction templates when a BatchLine instruction update arrives.
  *
  * @param {Object} body - Incoming BatchLine webhook body
- * @param {string} [recipeVersion='v2.1'] - Recipe version
  * @returns {Promise<Object>} Execution / scheduling summary
  */
-export async function handleStepTriggeredInstructions(body, recipeVersion = 'v2.1') {
+export async function handleStepTriggeredInstructions(body) {
     const data = body.Data || {};
     const batch = data.Batch || {};
     const phase = batch.Phase || {};
@@ -423,7 +429,10 @@ export async function handleStepTriggeredInstructions(body, recipeVersion = 'v2.
     const cleanBatchId = String(batch.BatchId || body.batch_id || body.BatchId || '').trim();
     const triggerId = String(instruction.InstructionId || instruction.RefInstruction || body.InstructionId || body.refInstruction || '').trim();
     const callbackKey = body.CallbackKey || body.callbackkey || null;
-    const triggeredByEmail = instruction.TriggeredByEmail || body.TriggeredByEmail || null;
+    const actualResults = Array.isArray(instruction.ActualResult)
+        ? instruction.ActualResult : (instruction.ActualResult ? [instruction.ActualResult] : []);
+    const latestResult = actualResults[actualResults.length - 1] || actualResults[0] || {};
+    const triggeredByEmail = latestResult.ExecutedUserEmail || body.ExecutedUserEmail || null;
 
     if (!cleanBatchId || !triggerId) {
         return { matched: 0, enqueued: 0, executed: 0, results: [] };
@@ -431,7 +440,6 @@ export async function handleStepTriggeredInstructions(body, recipeVersion = 'v2.
 
     // 1. Fetch matching Layer 2 templates for this triggerId
     const templates = await getStepTriggeredTemplates({
-        recipeVersion,
         triggerInstructionId: triggerId,
         activeOnly: true
     });
@@ -448,7 +456,7 @@ export async function handleStepTriggeredInstructions(body, recipeVersion = 'v2.
 
     for (const tpl of templates) {
         try {
-            const timeSource = tpl.time_source || 'HISTORIAN_EVENT';
+            const timeSource = tpl.time_source;
             let resolvedTime = null;
             let resolvedStartTime = null;
             let resolvedEndTime = null;
