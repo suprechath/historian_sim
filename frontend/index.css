@@ -4861,7 +4861,7 @@ td.u {
     }
 }
 /* ==========================================================================
-   Simulator Controls (DemoControls) - 1-Column Mode (Horizontal 1-Row Layout)
+   Simulator Controls (DemoControls) - 1-Column Mode (Strict Horizontal 1-Row Layout)
    ========================================================================== */
 @media (max-width: 1750px) {
     .mimic-deck {
@@ -4872,19 +4872,39 @@ td.u {
         width: 100%;
     }
 
+    .mimic-side-col .shead {
+        align-items: center;
+    }
+
     .mimic-side-col .demo-col-panel {
         height: auto !important;
         overflow: visible !important;
     }
 
+    .demo-collapse-btn {
+        display: inline-flex !important;
+    }
+
+    .mimic-side-col .demo-col-panel.collapsed {
+        height: auto !important;
+        min-height: 0 !important;
+        border-bottom: 1px solid var(--edge);
+    }
+
+    .mimic-side-col .demo-col-panel.collapsed .demo-col-header {
+        border-bottom: none !important;
+    }
+
     .mimic-side-col .demo-col-body {
         display: flex !important;
         flex-direction: row !important;
+        flex-wrap: nowrap !important;
         align-items: stretch !important;
         gap: 10px !important;
         height: auto !important;
         min-height: 0 !important;
-        overflow: visible !important;
+        overflow-x: auto !important;
+        overflow-y: visible !important;
         padding: 8px !important;
     }
 
@@ -4892,6 +4912,7 @@ td.u {
         display: flex !important;
         flex: 1 1 auto !important;
         flex-direction: row !important;
+        flex-wrap: nowrap !important;
         gap: 10px !important;
         min-width: 0 !important;
         height: auto !important;
@@ -4899,10 +4920,11 @@ td.u {
         overflow: visible !important;
     }
 
-    /* Batch Tab: 1 Row (Batch Form | Status Monitor | Fast-Forward Sequencer) */
+    /* Batch Tab: Strictly 1 Row (Batch Form | Status Monitor | Fast-Forward Sequencer) */
     .mimic-side-col .batch-ctrl-container {
         display: flex !important;
         flex-direction: row !important;
+        flex-wrap: nowrap !important;
         align-items: stretch !important;
         gap: 10px !important;
         flex: 1 1 auto !important;
@@ -4911,8 +4933,9 @@ td.u {
     }
 
     .mimic-side-col .batch-form-box {
-        flex: 0 0 250px !important;
-        width: 250px !important;
+        flex: 0 0 220px !important;
+        width: 220px !important;
+        min-width: 180px !important;
         height: auto !important;
         min-height: 0 !important;
         max-height: none !important;
@@ -4920,8 +4943,8 @@ td.u {
     }
 
     .mimic-side-col .batch-status-panel {
-        flex: 1 1 auto !important;
-        min-width: 320px !important;
+        flex: 1 1 240px !important;
+        min-width: 210px !important;
         height: auto !important;
         min-height: 0 !important;
         justify-content: space-between !important;
@@ -4941,10 +4964,17 @@ td.u {
         align-self: stretch !important;
     }
 
-    /* Faults Tab: 1 Row (Vessel Selector | Fault Triggers | Footer Status | Fast-Forward Sequencer) */
+    .mimic-side-col .modern-skip-card.compact-card {
+        flex: 0 0 210px !important;
+        width: 210px !important;
+        min-width: 180px !important;
+    }
+
+    /* Faults Tab: Strictly 1 Row (Vessel Selector | Fault Triggers | Footer Status | Fast-Forward Sequencer) */
     .mimic-side-col .faults-ctrl-container {
         display: flex !important;
         flex-direction: row !important;
+        flex-wrap: nowrap !important;
         align-items: stretch !important;
         gap: 10px !important;
         flex: 1 1 auto !important;
@@ -4953,8 +4983,9 @@ td.u {
     }
 
     .mimic-side-col .faults-ctrl-container .demo-vessel-tabs-row {
-        flex: 0 0 200px !important;
-        width: 200px !important;
+        flex: 0 0 160px !important;
+        width: 160px !important;
+        min-width: 130px !important;
         height: auto !important;
         min-height: 0 !important;
         display: flex !important;
@@ -4970,7 +5001,7 @@ td.u {
 
     .mimic-side-col .faults-ctrl-container .demo-btn-stack {
         flex: 1 1 auto !important;
-        min-width: 240px !important;
+        min-width: 180px !important;
         height: auto !important;
         min-height: 0 !important;
         justify-content: center !important;
@@ -4982,8 +5013,9 @@ td.u {
     }
 
     .mimic-side-col .faults-ctrl-container .demo-col-footer {
-        flex: 0 0 170px !important;
-        width: 170px !important;
+        flex: 0 0 150px !important;
+        width: 150px !important;
+        min-width: 130px !important;
         height: auto !important;
         min-height: 0 !important;
         margin-top: 0 !important;
@@ -4994,32 +5026,15 @@ td.u {
         gap: 8px !important;
         padding: 8px 10px !important;
     }
+
     .bottom-feed-grid {
         grid-template-columns: 1fr !important;
         gap: 16px !important;
     }
 }
 
-@media (max-width: 960px) {
-    .mimic-side-col .demo-col-body {
-        flex-direction: column !important;
-    }
-
-    .mimic-side-col .demo-tab-content-area,
-    .mimic-side-col .batch-ctrl-container,
-    .mimic-side-col .faults-ctrl-container {
-        flex-direction: column !important;
-    }
-
-    .mimic-side-col .batch-form-box,
-    .mimic-side-col .batch-status-panel,
-    .mimic-side-col .modern-skip-card,
-    .mimic-side-col .faults-ctrl-container .demo-vessel-tabs-row,
-    .mimic-side-col .faults-ctrl-container .demo-btn-stack,
-    .mimic-side-col .faults-ctrl-container .demo-col-footer {
-        flex: 1 1 auto !important;
-        width: 100% !important;
-        min-width: 0 !important;
-        max-width: 100% !important;
+@media (max-width: 600px) {
+    .demo-collapsed-subtitle {
+        display: none;
     }
 }
