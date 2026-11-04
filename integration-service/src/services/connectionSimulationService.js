@@ -187,7 +187,7 @@ export async function setSimulationConnection(targetConnected) {
         logger.warn('ConnectionSimulation', 'Initiating simulated disconnection. Preparing Disconnection Warning Broadcast...');
 
         // Scan batchline_outbound_log for batches active in the last 5 minutes
-        const activeOutboundBatches = await getRecentActiveBatchesFromOutbound(5);
+        const activeOutboundBatches = await getRecentActiveBatchesFromOutbound(10);
 
         // Also check batch_queue and simulation_control for any currently active batch
         const batchMap = new Map();

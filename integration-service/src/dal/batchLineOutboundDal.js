@@ -294,7 +294,7 @@ export async function updateBatchLineOutboundStatus(id, {
 /**
  * Retrieves distinct (batch_id, callback_key) active within the last N minutes.
  */
-export async function getRecentActiveBatchesFromOutbound(minutes = 5) {
+export async function getRecentActiveBatchesFromOutbound(minutes = 10) {
     try {
         await ensureBatchLineOutboundLogTable();
         const { rows } = await query(`
