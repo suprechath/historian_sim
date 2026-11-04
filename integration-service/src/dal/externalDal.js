@@ -789,3 +789,11 @@ export async function getPreviousBatchForAsset({ assetId, currentBatchId = null 
 
     return latestRows.length > 0 ? latestRows[0] : null;
 }
+
+
+// Re-export BatchLine outbound log utilities
+export {
+    ensureBatchLineOutboundLogTable,
+    recordBatchLineOutbound,
+    getBatchLineOutboundLogs
+} from './batchLineOutboundDal.js';

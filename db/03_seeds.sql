@@ -197,6 +197,14 @@ INSERT INTO step_triggered_instruction_templates (
     NULL, NULL, 0
   ),
   (
+    'reactor number in current line', 'HMI', 'STATIC',
+    '1', '[VALUE=R1, REF=REAC]', 'REAC',
+    1, NULL, NULL, 'R1.TEMP',
+    NULL, NULL, NULL, NULL, TRUE,
+    NULL, NULL, NULL, NULL,
+    NULL, NULL, 0
+  ),
+  (
     'Pressure curves of filter', 'CGET', 'HISTORIAN_EVENT',
     '2', '[RECORD]', 'PRESS',
     3, NULL, 'MAX', 'R1.FILTER_DP',
@@ -205,8 +213,16 @@ INSERT INTO step_triggered_instruction_templates (
     NULL, NULL, 0
   ),
   (
+    'Maximum pressure of filter', 'CGET', 'HISTORIAN_EVENT',
+    '2a', 'pressure', 'MPRESS',
+    3, NULL, 'MAX', 'R1.FILTER_DP',
+    NULL, NULL, NULL, NULL, TRUE,
+    'Charging', 'StartTime', 'Charging', 'EndTime',
+    NULL, NULL, 0
+  ),
+  (
     'Get temperature curve above 140 °C.', 'HTST', 'HISTORIAN_EVENT',
-    '3', '[RECORD: START=140, STOP=140, DIRECTION=Rise, INTERVAL=2s, DURATION=200s]', 'RECTEMP',
+    '3', '[RECORD: START=140, STOP=140, DIRECTION=Rise, INTERVAL=5s, DURATION=5m]', 'RECTEMP',
     3, NULL, 'MAX', 'R1.TEMP',
     NULL, NULL, NULL, NULL, TRUE,
     'Heating', 'StartTime', NULL, NULL,
@@ -214,7 +230,7 @@ INSERT INTO step_triggered_instruction_templates (
   ),
   (
     'Get pressure sentinel', 'HTST', 'HISTORIAN_EVENT',
-    '4', '[RECORD: INTERVAL=10s, SENTINEL]', 'RECPRESS',
+    '4', '[RECORD: INTERVAL=15s, SENTINEL]', 'RECPRESS',
     3, NULL, 'MAX', 'R1.PRES',
     NULL, NULL, NULL, NULL, TRUE,
     'Heating', 'StartTime', NULL, NULL,
@@ -243,10 +259,18 @@ INSERT INTO step_triggered_instruction_templates (
     NULL, NULL, NULL, NULL, TRUE,
     'Cooling', 'StartTime', 'Cooling', 'EndTime',
     NULL, NULL, 0
+  ),
+  (
+    'Metal Detector', 'NR1Main', 'HISTORIAN_EVENT',
+    '8', '[INTERPRET: 1="Yes", 0="No"]', 'MDALM',
+    3, NULL, 'Min', 'R3.SEEDED',
+    NULL, NULL, NULL, NULL, TRUE,
+    'Cooling', 'StartTime', 'Cooling', 'EndTime',
+    NULL, NULL, 0
   )
 ON CONFLICT (trigger_instruction_id, ref_instruction) DO NOTHING;
 
 -- 7. Excluded Product Specifications (Skipped from automatic queue assignment)
 INSERT INTO excluded_product_specifications (product_specification_id)
-VALUES ('Vistin_Metformin_HCl_auto')
+VALUES ('Vistin_Metformin_HCl_auto'), ('Metformin_HCl')
 ON CONFLICT (product_specification_id) DO NOTHING;

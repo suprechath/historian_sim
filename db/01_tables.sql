@@ -116,50 +116,7 @@ CREATE TABLE snapshots (
   quality  SMALLINT NOT NULL DEFAULT 0
 );
 
--- 7. Monitoring Jobs (Outbound Periodic Sampling Jobs)
-CREATE TABLE monitoring_jobs (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  batch_pk      INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
-  asset_id      INTEGER NOT NULL REFERENCES assets(id),
-  interval_sec  INTEGER NOT NULL CHECK (interval_sec >= 5),
-  kind          TEXT NOT NULL CHECK (kind IN ('fixed','manual')),
-  started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  end_at        TIMESTAMPTZ,
-  max_samples   INTEGER,
-  next_fire_at  TIMESTAMPTZ NOT NULL,
-  sequence      INTEGER NOT NULL DEFAULT 0,
-  state         TEXT NOT NULL DEFAULT 'active'
-                CHECK (state IN ('active','completed','cancelled','expired')),
-  callback_ref  TEXT NOT NULL,
-  completed_at  TIMESTAMPTZ,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX idx_jobs_due ON monitoring_jobs (next_fire_at) WHERE state = 'active';
-
--- 7b. Monitoring Job Tags (Normalized Many-to-Many junction table for 3NF compliance)
-CREATE TABLE monitoring_job_tags (
-  job_id   UUID NOT NULL REFERENCES monitoring_jobs(id) ON DELETE CASCADE,
-  tag_id   INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
-  PRIMARY KEY (job_id, tag_id)
-);
-
--- 8. Monitoring Outbox (Transactional Webhook Queue)
-CREATE TABLE monitoring_outbox (
-  id            BIGSERIAL PRIMARY KEY,
-  job_id        UUID NOT NULL REFERENCES monitoring_jobs(id) ON DELETE CASCADE,
-  sequence      INTEGER NOT NULL,
-  scheduled_at  TIMESTAMPTZ NOT NULL,
-  sampled_at    TIMESTAMPTZ NOT NULL,
-  payload       JSONB NOT NULL,
-  attempts      INTEGER NOT NULL DEFAULT 0,
-  last_status   INTEGER,
-  last_error    TEXT,
-  delivered_at  TIMESTAMPTZ,
-  UNIQUE (job_id, sequence)
-);
-CREATE INDEX idx_outbox_pending ON monitoring_outbox (job_id, sequence) WHERE delivered_at IS NULL;
-
--- 9. Injected Faults (Simulation Chaos Engine)
+-- 7. Injected Faults (Simulation Chaos Engine)
 CREATE TABLE injected_faults (
   id          SERIAL PRIMARY KEY,
   tag_id      INTEGER NOT NULL REFERENCES tags(id),
@@ -204,6 +161,7 @@ CREATE TABLE IF NOT EXISTS simulation_control (
   assigned_batch_id TEXT,
   batch_command     TEXT,
   single_batch_status TEXT DEFAULT 'idle',
+  integration_connected BOOLEAN NOT NULL DEFAULT true,
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -302,3 +260,31 @@ CREATE TABLE IF NOT EXISTS step_triggered_instruction_templates (
 );
 CREATE INDEX IF NOT EXISTS idx_step_templates_trigger ON step_triggered_instruction_templates (trigger_instruction_id, is_active);
 CREATE INDEX IF NOT EXISTS idx_step_templates_ref ON step_triggered_instruction_templates (ref_instruction);
+
+
+-- 17. BatchLine Outbound Log (Full Audit Trail for all outgoing calls to BatchLine)
+CREATE TABLE IF NOT EXISTS batchline_outbound_log (
+  id              BIGSERIAL PRIMARY KEY,
+  batch_id        TEXT NOT NULL,
+  callback_key    TEXT,
+  ref_instruction TEXT,
+  action          TEXT NOT NULL DEFAULT 'instruction_update'
+                  CHECK (action IN ('instruction_update', 'notification')),
+  target_url      TEXT NOT NULL,
+  chunk_index     INTEGER NOT NULL DEFAULT 1,
+  total_chunks    INTEGER NOT NULL DEFAULT 1,
+  payload         JSONB NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending', 'delivered', 'failed')),
+  http_status     INTEGER,
+  attempts        INTEGER NOT NULL DEFAULT 1,
+  response_body   JSONB,
+  error_message   TEXT,
+  duration_ms     INTEGER,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  delivered_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_batchline_outbound_batch_id    ON batchline_outbound_log (batch_id);
+CREATE INDEX IF NOT EXISTS idx_batchline_outbound_callback_key ON batchline_outbound_log (callback_key) WHERE callback_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_batchline_outbound_created_at   ON batchline_outbound_log (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_batchline_outbound_status       ON batchline_outbound_log (status);

@@ -8,6 +8,7 @@ export const simState = {
     mode: 'continuous',
     assignedBatchId: null,
     singleBatchStatus: 'idle',
+    integrationConnected: true,
     updatedAt: new Date()
 };
 
@@ -60,6 +61,7 @@ export async function ensureSimulationControl() {
       ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS batch_command TEXT;
       ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS single_batch_status TEXT DEFAULT 'idle';
       ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS process_skip_asset TEXT;
+      ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS integration_connected BOOLEAN NOT NULL DEFAULT true;
       INSERT INTO simulation_control (id, running, speed, mode)
       VALUES (1, true, 1, 'continuous')
       ON CONFLICT (id) DO NOTHING;
@@ -100,13 +102,14 @@ export async function ensureSimulationControl() {
  */
 export async function getSimulationState() {
     try {
-        const { rows } = await query('SELECT running, speed, mode, assigned_batch_id, single_batch_status, updated_at FROM simulation_control WHERE id = 1');
+        const { rows } = await query('SELECT running, speed, mode, assigned_batch_id, single_batch_status, integration_connected, updated_at FROM simulation_control WHERE id = 1');
         if (rows.length > 0) {
             simState.running = rows[0].running;
             simState.speed = rows[0].speed;
             simState.mode = rows[0].mode || 'continuous';
             simState.assignedBatchId = rows[0].assigned_batch_id || null;
             simState.singleBatchStatus = rows[0].single_batch_status || 'idle';
+            simState.integrationConnected = rows[0].integration_connected !== undefined ? Boolean(rows[0].integration_connected) : true;
             simState.updatedAt = rows[0].updated_at;
         }
     } catch (err) {

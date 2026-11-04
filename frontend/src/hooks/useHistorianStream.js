@@ -12,7 +12,9 @@ export function useHistorianStream() {
         reactors: { R1: { phase: 'Idle' }, R2: { phase: 'Idle' }, R3: { phase: 'Idle' } },
         tags: [],
         integrationHealth: null,
-        pendingScheduledCount: 0
+        pendingScheduledCount: 0,
+        pendingOutboundCount: 0,
+        integrationConnected: true
     });
     const [connected, setConnected] = useState(false);
 
@@ -29,7 +31,13 @@ export function useHistorianStream() {
                     ...payload,
                     pendingScheduledCount: payload.pendingScheduledCount !== undefined
                         ? payload.pendingScheduledCount
-                        : prev.pendingScheduledCount
+                        : prev.pendingScheduledCount,
+                    pendingOutboundCount: payload.pendingOutboundCount !== undefined
+                        ? payload.pendingOutboundCount
+                        : prev.pendingOutboundCount,
+                    integrationConnected: payload.integrationConnected !== undefined
+                        ? payload.integrationConnected
+                        : prev.integrationConnected
                 }));
             } catch (err) {
                 console.error('SSE JSON error:', err);

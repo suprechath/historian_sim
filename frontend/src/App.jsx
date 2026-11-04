@@ -1,87 +1,103 @@
 import React, { useState, useEffect } from 'react';
 import Header from './components/Header';
+import HealthCheckDialog from './components/HealthCheckDialog';
 import PlantOverview from './pages/PlantOverview';
 import ScheduledTasks from './pages/ScheduledTasks';
-import HealthCheckDialog from './components/HealthCheckDialog';
 import { useHistorianStream } from './hooks/useHistorianStream';
 
 export default function App() {
     const stream = useHistorianStream();
-
-    // Determine initial page from URL hash
-    const [currentPage, setCurrentPage] = useState(() => {
-        const hash = (typeof window !== 'undefined' ? window.location.hash : '').toLowerCase();
-        if (hash.includes('scheduled')) return 'scheduled';
-        return 'overview';
-    });
-
+    const [currentPage, setCurrentPage] = useState('overview'); // 'overview' | 'scheduled'
     const [dismissedHealthCheckId, setDismissedHealthCheckId] = useState(null);
 
-    // Sync hash changes with currentPage
+    // Sync active page from browser URL Hash (#overview, #scheduled)
     useEffect(() => {
         const handleHashChange = () => {
-            const hash = window.location.hash.toLowerCase();
-            if (hash.includes('scheduled')) {
+            const hash = window.location.hash.replace(/^#\/?/, '').toLowerCase();
+            if (hash === 'scheduled' || hash === 'tasks' || hash === 'queue') {
                 setCurrentPage('scheduled');
             } else {
                 setCurrentPage('overview');
             }
         };
 
+        handleHashChange();
         window.addEventListener('hashchange', handleHashChange);
         return () => window.removeEventListener('hashchange', handleHashChange);
     }, []);
 
-    const handleNavigate = (page) => {
-        setCurrentPage(page);
-        if (page === 'scheduled') {
-            window.location.hash = '#/scheduled';
-        } else {
-            window.location.hash = '#/overview';
-        }
+    const handleNavigate = (pageKey) => {
+        setCurrentPage(pageKey);
+        window.location.hash = pageKey === 'scheduled' ? '#scheduled' : '#overview';
     };
 
-    // Health check dialog popup handling
-    const showOnDemandAlert = Boolean(
-        stream.integrationHealth?.isRecentOnDemand &&
-        dismissedHealthCheckId !== stream.integrationHealth?.id
-    );
+    // Callback when operator clicks close / acknowledge on the HEALTH_CHECK dialogue
+    const handleCloseHealthCheck = async (healthRecord) => {
+        const record = (healthRecord && typeof healthRecord === 'object' && healthRecord.id)
+            ? healthRecord
+            : stream.integrationHealth;
 
-    const handleCloseHealthCheck = async () => {
-        const health = stream.integrationHealth;
-        if (!health?.id) return;
+        const recordId = record?.id || 'dismissed';
+        setDismissedHealthCheckId(recordId);
 
-        setDismissedHealthCheckId(health.id);
+        if (!record?.id) return;
 
         try {
             await fetch('/ui/integration/health/close', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    id: health.id,
-                    batchId: health.batch_id
-                })
+                body: JSON.stringify({ id: record.id, batchId: record.batch_id })
             });
         } catch (err) {
-            console.error('Failed to close health check dialog and queue batch:', err);
+            console.error('Failed to acknowledge health check dialog:', err);
         }
     };
 
-    // Dismiss with Escape key
+    // Determine if on-demand alert popup should be visible
+    const showOnDemandAlert = Boolean(
+        stream.integrationHealth?.isRecentOnDemand &&
+        dismissedHealthCheckId !== stream.integrationHealth?.id
+    );
+
+    // Dynamic browser document title indicating plant health and active batch
+    useEffect(() => {
+        const health = stream.integrationHealth;
+        const healthTag = health ? (health.status === 'passed' ? '🟢 OK' : '🔴 DEGRADED') : '⚪ CONNECTING';
+        const batchTag = stream.mode === 'single' && stream.assignedBatchId
+            ? `[${stream.assignedBatchId}]`
+            : '[Train Mode]';
+        const pageTag = currentPage === 'scheduled' ? 'Scheduled Tasks' : 'Plant Overview';
+        document.title = `${healthTag} ${batchTag} Plant Historian — ${pageTag}`;
+    }, [
+        stream.integrationHealth?.status,
+        stream.mode,
+        stream.assignedBatchId,
+        currentPage
+    ]);
+
+    // Keyboard navigation shortcuts
     useEffect(() => {
         const handleKeyDown = (e) => {
-            if (e.key === 'Escape' && showOnDemandAlert) {
-                handleCloseHealthCheck();
+            if (e.target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+            if (e.key === 'Escape' && showOnDemandAlert && stream.integrationHealth) {
+                handleCloseHealthCheck(stream.integrationHealth);
+            }
+            if ((e.key === '1' || e.key === 'o' || e.key === 'O') && !e.ctrlKey && !e.altKey && !e.metaKey) {
+                handleNavigate('overview');
+            }
+            if ((e.key === '2' || e.key === 's' || e.key === 'S') && !e.ctrlKey && !e.altKey && !e.metaKey) {
+                handleNavigate('scheduled');
             }
         };
+
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [showOnDemandAlert, stream.integrationHealth?.id, stream.integrationHealth?.batch_id]);
 
     return (
-        <div className="historian-app-container">
-            {/* Global BatchLine On-Demand HealthCheck Alert Popup */}
-            {showOnDemandAlert && (
+        <div className="layout">
+            {/* On-Demand Health Check Operator Alert Dialogue */}
+            {showOnDemandAlert && stream.integrationHealth && (
                 <HealthCheckDialog
                     health={stream.integrationHealth}
                     onDismiss={handleCloseHealthCheck}
@@ -98,6 +114,8 @@ export default function App() {
                 assignedBatchId={stream.assignedBatchId}
                 singleBatchStatus={stream.singleBatchStatus}
                 integrationHealth={stream.integrationHealth}
+                integrationConnected={stream.integrationConnected}
+                pendingOutboundCount={stream.pendingOutboundCount || 0}
                 activePage={currentPage}
                 onNavigate={handleNavigate}
                 pendingScheduledCount={stream.pendingScheduledCount || 0}
@@ -117,4 +135,3 @@ export default function App() {
         </div>
     );
 }
-

@@ -56,6 +56,87 @@ export function hasPrevBatchTrigger(text) {
 }
 
 /**
+ * Extracts dynamic force update triggers from text (e.g. [REF=REAC, VALUE=R1]).
+ * Directives tell integration-service to directly push static or dynamic values
+ * into BatchLine instruction(s) without requiring Historian sensor tag lookups.
+ *
+ * Supported formats:
+ * - [REF=REAC, VALUE=R1]
+ * - [VALUE=R1, REF=REAC]
+ * - [REF="REAC", VALUE="R1"]
+ * - [FORCE: REF=REAC, VALUE=R1]
+ * - [REF=REAC, VALUE=R1, REPEAT=2]
+ *
+ * @param {string} text - Text to parse (e.g. InstructionDescription or fullDesc).
+ * @param {string|null} [defaultRef=null] - Fallback target RefInstruction if not present in tag.
+ * @returns {Array<{raw: string, targetRef: string, value: string, repeatNo: number, hasExplicitRepeat: boolean}>}
+ */
+export function extractForceUpdateTriggers(text, defaultRef = null) {
+    if (!text || typeof text !== 'string') return [];
+    const bracketRegex = /\[([^\]]+)\]/g;
+    const triggers = [];
+    const seen = new Set();
+    let m;
+    while ((m = bracketRegex.exec(text)) !== null) {
+        let content = m[1].trim();
+
+        // Skip non-force keywords
+        if (/^(?:TIME|RECORD|DURATION|EXCEPTION|INTERPRET|SCHEDULE|HEALTH|PING|PREV[-_]?BATCH)\b/i.test(content)) {
+            continue;
+        }
+
+        const isExplicitForce = /^FORCE(?:_UPDATE)?:\s*/i.test(content);
+        if (isExplicitForce) {
+            content = content.replace(/^FORCE(?:_UPDATE)?:\s*/i, '').trim();
+        }
+
+        const hasRef = /\bREF\s*=/i.test(content);
+        const hasValue = /\bVALUE\s*=/i.test(content);
+
+        // Require VALUE and (REF or isExplicitForce or defaultRef)
+        if (!hasValue || (!hasRef && !isExplicitForce && !defaultRef)) {
+            continue;
+        }
+
+        // Extract REF
+        const refMatch = content.match(/\bREF\s*=\s*(?:"([^"]*)"|'([^']*)'|([^,\s\]]+))/i);
+        const rawRef = refMatch ? (refMatch[1] ?? refMatch[2] ?? refMatch[3]) : defaultRef;
+        const targetRef = rawRef ? cleanInstructionId(rawRef) : null;
+
+        // Extract VALUE: supports double/single quotes or unquoted until comma or bracket
+        const valMatch = content.match(/\bVALUE\s*=\s*(?:"([^"]*)"|'([^']*)'|([^,\]]+))/i);
+        const rawValue = valMatch ? (valMatch[1] ?? valMatch[2] ?? valMatch[3] ?? '').trim() : '';
+
+        // Extract optional REPEAT or REPEAT_NO
+        const repeatMatch = content.match(/\b(?:REPEAT(?:_NO)?)\s*=\s*(\d+)/i);
+        const repeatNo = repeatMatch ? parseInt(repeatMatch[1], 10) : 1;
+
+        if (!targetRef) continue;
+
+        const dedupeKey = `${targetRef}_${rawValue}_${repeatMatch ? repeatNo : 'auto'}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+
+        triggers.push({
+            raw: m[0],
+            targetRef,
+            value: rawValue,
+            repeatNo,
+            hasExplicitRepeat: Boolean(repeatMatch)
+        });
+    }
+    return triggers;
+}
+
+/**
+ * Checks if any dynamic force update trigger is present in text.
+ */
+export function hasForceUpdateTrigger(text, defaultRef = null) {
+    if (!text || typeof text !== 'string') return false;
+    return extractForceUpdateTriggers(text, defaultRef).length > 0;
+}
+
+/**
  * Extracts [EXCEPTION: REF=...] triggers from text (e.g. [EXCEPTION: REF=REFINST] or [EXCEPTION]).
  */
 export function extractExceptionTriggers(text, defaultRef = null) {

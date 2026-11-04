@@ -4,13 +4,15 @@ import {
     getCombinedDescription,
     extractExceptionTriggers,
     hasHealthCheckTrigger,
-    hasPrevBatchTrigger
+    hasPrevBatchTrigger,
+    extractForceUpdateTriggers
 } from '../utils/instructionParsers.js';
 import { reportError } from '../clients/batchLineClient.js';
 import { checkAndForwardHighExceptions } from '../services/highExceptionService.js';
 import { handleBatchExceptionTrigger } from '../services/exceptionTriggerService.js';
 import { handleCase1PointInTime } from '../services/case1Service.js';
 import { handlePreviousBatchInstruction } from '../services/previousBatchService.js';
+import { handleForceUpdateInstruction } from '../services/forceUpdateService.js';
 import { handleCase2PhaseTimestamp } from '../services/case2Service.js';
 import { handleCase3TimeRange } from '../services/case3Service.js';
 import { handlePrintLabelInstruction } from '../services/printLabelService.js';
@@ -120,6 +122,12 @@ export async function handleInstructionWebhook(req, res) {
 
             // Dispatch EventType cases
             if (eventType === 1) {
+                // Check for dynamic force update trigger: [REF=..., VALUE=...]
+                const forceUpdateTriggers = extractForceUpdateTriggers(fullDesc || ctx.instructionDescription, ctx.refInstruction);
+                if (forceUpdateTriggers.length > 0) {
+                    logger.info('InstructionWebhook', `Dynamic force update trigger detected (${forceUpdateTriggers.length} directive(s)). Routing to force update handler.`);
+                    return await handleForceUpdateInstruction(ctx, res, forceUpdateTriggers);
+                }
                 // Check for [PREVBATCH] trigger word in instruction description
                 if (hasPrevBatchTrigger(fullDesc) || hasPrevBatchTrigger(ctx.instructionDescription)) {
                     logger.info('InstructionWebhook', `[PREVBATCH] trigger detected for RefElement "${ctx.refElement}". Routing to previous batch lookup.`);

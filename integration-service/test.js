@@ -23,12 +23,22 @@ import {
     parsePrintLabelPayload,
     extractInstructionPayload,
     hasHealthCheckTrigger,
-    hasPrevBatchTrigger
+    hasPrevBatchTrigger,
+    extractForceUpdateTriggers,
+    hasForceUpdateTrigger
 } from './src/utils/instructionParsers.js';
 import { handleOnDemandHealthCheck } from './src/services/healthCheckService.js';
 import { handlePreviousBatchInstruction } from './src/services/previousBatchService.js';
+import { handleForceUpdateInstruction } from './src/services/forceUpdateService.js';
 import { handleInstructionWebhook, handleStatusPost } from './src/controllers/externalController.js';
 import externalRouter from './src/routes/external.js';
+import { sendBatchLineInstructionUpdate, sendBatchLineNotification } from './src/clients/batchLineClient.js';
+import { recordBatchLineOutbound, getBatchLineOutboundLogs } from './src/dal/batchLineOutboundDal.js';
+import {
+    isIntegrationConnected,
+    setSimulationConnection,
+    flushPendingOutboxLogs
+} from './src/services/connectionSimulationService.js';
 
 import {
     resolveMetric,
@@ -2410,6 +2420,608 @@ test('getStepTriggeredTemplates and upsertStepTriggeredTemplate work without rec
         assert.equal(templates.length, 1);
         assert.equal(templates[0].ref_instruction, 'STEP_TEST_REF');
     } finally {
+        pool.query = origQuery;
+    }
+});
+
+
+test('extractForceUpdateTriggers and hasForceUpdateTrigger parse directives correctly', () => {
+    // 1. Basic [REF=REAC, VALUE=R1]
+    const t1 = extractForceUpdateTriggers('[REF=REAC, VALUE=R1]');
+    assert.equal(t1.length, 1);
+    assert.equal(t1[0].targetRef, 'REAC');
+    assert.equal(t1[0].value, 'R1');
+    assert.equal(t1[0].repeatNo, 1);
+    assert.equal(hasForceUpdateTrigger('[REF=REAC, VALUE=R1]'), true);
+
+    // 2. Embedded in description text with spaces
+    const t2 = extractForceUpdateTriggers('Description text [REF = REAC , VALUE = R1] followed by notes');
+    assert.equal(t2.length, 1);
+    assert.equal(t2[0].targetRef, 'REAC');
+    assert.equal(t2[0].value, 'R1');
+
+    // 3. Reversed key order [VALUE=R1, REF=REAC]
+    const t3 = extractForceUpdateTriggers('[VALUE=R1, REF=REAC]');
+    assert.equal(t3.length, 1);
+    assert.equal(t3[0].targetRef, 'REAC');
+    assert.equal(t3[0].value, 'R1');
+
+    // 4. Quotes around keys and values with spaces
+    const t4 = extractForceUpdateTriggers('[REF="REAC", VALUE="Reactor 1 Synthesis"]');
+    assert.equal(t4.length, 1);
+    assert.equal(t4[0].targetRef, 'REAC');
+    assert.equal(t4[0].value, 'Reactor 1 Synthesis');
+
+    // 5. Explicit [FORCE: REF=REAC, VALUE=R1]
+    const t5 = extractForceUpdateTriggers('[FORCE: REF=REAC, VALUE=R1]');
+    assert.equal(t5.length, 1);
+    assert.equal(t5[0].targetRef, 'REAC');
+    assert.equal(t5[0].value, 'R1');
+
+    // 6. Explicit REPEAT=2
+    const t6 = extractForceUpdateTriggers('[REF=REAC, VALUE=R1, REPEAT=2]');
+    assert.equal(t6.length, 1);
+    assert.equal(t6[0].repeatNo, 2);
+    assert.equal(t6[0].hasExplicitRepeat, true);
+
+    // 7. Multiple directives
+    const t7 = extractForceUpdateTriggers('[REF=REAC, VALUE=R1] [REF=TEMP, VALUE=50]');
+    assert.equal(t7.length, 2);
+    assert.equal(t7[0].targetRef, 'REAC');
+    assert.equal(t7[0].value, 'R1');
+    assert.equal(t7[1].targetRef, 'TEMP');
+    assert.equal(t7[1].value, '50');
+
+    // 8. Ignore non-force triggers
+    assert.equal(extractForceUpdateTriggers('[TIME: VALUE=130]').length, 0);
+    assert.equal(extractForceUpdateTriggers('[RECORD: DURATION=5m]').length, 0);
+    assert.equal(extractForceUpdateTriggers('[EXCEPTION: REF=REAC]').length, 0);
+    assert.equal(extractForceUpdateTriggers('[PREVBATCH]').length, 0);
+    assert.equal(extractForceUpdateTriggers('[SCHEDULE]').length, 0);
+    assert.equal(extractForceUpdateTriggers('[HEALTH_CHECK]').length, 0);
+});
+
+test('handleForceUpdateInstruction sends instruction update to BatchLine with actualResult', async () => {
+    let statusCode = 200;
+    let jsonBody = null;
+    const mockRes = {
+        status(code) { statusCode = code; return this; },
+        json(payload) { jsonBody = payload; return this; }
+    };
+
+    const origFetch = global.fetch;
+    const fetchCalls = [];
+    global.fetch = async (url, opts) => {
+        fetchCalls.push({ url, opts, body: JSON.parse(opts.body) });
+        return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ status: 'ok' })
+        };
+    };
+
+    try {
+        const ctx = {
+            batchId: 'B-TEST-001',
+            refInstruction: 'DEFAULT_INST',
+            callbackKey: 'CB-KEY-999',
+            triggeredByEmail: 'operator@cs.com',
+            instructionDescription: 'Record equipment ID [REF=REAC, VALUE=R1]'
+        };
+
+        await handleForceUpdateInstruction(ctx, mockRes);
+
+        assert.equal(statusCode, 200);
+        assert.equal(jsonBody.status, 'success');
+        assert.equal(jsonBody.case, 1);
+        assert.equal(jsonBody.subcase, 'force_update');
+        assert.equal(jsonBody.batch_id, 'B-TEST-001');
+        assert.equal(jsonBody.target_instruction, 'REAC');
+        assert.equal(jsonBody.value, 'R1');
+        assert.equal(jsonBody.executed_user_email, 'operator@cs.com');
+        assert.ok(jsonBody.executed_timestamp);
+
+        // Verify outgoing fetch call
+        assert.equal(fetchCalls.length, 1);
+        const call = fetchCalls[0];
+        assert.ok(call.url.includes('/api/v1/batch/instruction/update/REAC'));
+        assert.equal(call.body.batch_id, 'B-TEST-001');
+        assert.equal(call.body.actual_result.length, 1);
+        assert.equal(call.body.actual_result[0].repeat_no, 1);
+        assert.equal(call.body.actual_result[0].value, 'R1');
+        assert.equal(call.body.actual_result[0].executed_user_email, 'operator@cs.com');
+    } finally {
+        global.fetch = origFetch;
+    }
+});
+
+test('handleInstructionWebhook routes EventType 1 with dynamic force update [REF=REAC, VALUE=R1]', async () => {
+    let statusCode = 200;
+    let jsonBody = null;
+    const mockRes = {
+        status(code) { statusCode = code; return this; },
+        json(payload) { jsonBody = payload; return this; }
+    };
+
+    const origFetch = global.fetch;
+    const fetchCalls = [];
+    global.fetch = async (url, opts) => {
+        fetchCalls.push({ url, opts, body: JSON.parse(opts.body) });
+        return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ status: 'ok' })
+        };
+    };
+
+    try {
+        const req = {
+            body: {
+                Topic: 'batch_active_instruction.update',
+                CallbackKey: 'CB-DYNAMIC-123',
+                Data: {
+                    Batch: {
+                        BatchId: 'B-2026-FORCE-01',
+                        Phase: {
+                            Step: {
+                                Instruction: {
+                                    EventType: 1,
+                                    InstructionId: 'INST-DYNAMIC-SET',
+                                    InstructionDescription: 'Force dynamic reactor setting [REF=REAC, VALUE=R1]',
+                                    RefElement: null, // Note: No Historian sensor element needed
+                                    TriggeredByEmail: 'supervisor@cs.com'
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        await handleInstructionWebhook(req, mockRes);
+
+        assert.equal(statusCode, 200);
+        assert.equal(jsonBody.status, 'success');
+        assert.equal(jsonBody.subcase, 'force_update');
+        assert.equal(jsonBody.target_instruction, 'REAC');
+        assert.equal(jsonBody.value, 'R1');
+        assert.equal(jsonBody.batch_id, 'B-2026-FORCE-01');
+
+        assert.equal(fetchCalls.length, 1);
+        assert.ok(fetchCalls[0].url.includes('/api/v1/batch/instruction/update/REAC'));
+        assert.equal(fetchCalls[0].body.actual_result[0].value, 'R1');
+    } finally {
+        global.fetch = origFetch;
+    }
+});
+
+// ============================================================================
+// BATCHLINE OUTBOUND AUDIT LOG TESTS
+// ============================================================================
+test('recordBatchLineOutbound inserts into batchline_outbound_log with correct fields', async () => {
+    const origQuery = pool.query;
+    let executedSql = '';
+    let executedParams = [];
+
+    pool.query = async (sql, params = []) => {
+        if (sql.includes('CREATE TABLE IF NOT EXISTS batchline_outbound_log')) {
+            return { rows: [] };
+        }
+        if (sql.includes('INSERT INTO batchline_outbound_log')) {
+            executedSql = sql;
+            executedParams = params;
+            return {
+                rows: [{ id: '101', created_at: new Date() }]
+            };
+        }
+        return { rows: [] };
+    };
+
+    try {
+        const result = await recordBatchLineOutbound({
+            batchId: 'B-TEST-OUTBOUND-01',
+            callbackKey: 'cb-key-test-01',
+            refInstruction: 'TEMP_SET',
+            action: 'instruction_update',
+            targetUrl: 'http://test-batchline/api/v1/batch/instruction/update/TEMP_SET',
+            chunkIndex: 1,
+            totalChunks: 2,
+            payload: { value: 75.5 },
+            status: 'delivered',
+            httpStatus: 200,
+            attempts: 1,
+            responseBody: { success: true },
+            durationMs: 45
+        });
+
+        assert.ok(result);
+        assert.equal(result.id, '101');
+        assert.ok(executedSql.includes('INSERT INTO batchline_outbound_log'));
+        assert.equal(executedParams[0], 'B-TEST-OUTBOUND-01');
+        assert.equal(executedParams[1], 'cb-key-test-01');
+        assert.equal(executedParams[2], 'TEMP_SET');
+        assert.equal(executedParams[3], 'instruction_update');
+        assert.equal(executedParams[5], 1);
+        assert.equal(executedParams[6], 2);
+        assert.equal(executedParams[8], 'delivered');
+        assert.equal(executedParams[9], 200);
+        assert.equal(executedParams[13], 45);
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('getBatchLineOutboundLogs queries by batchId and callbackKey', async () => {
+    const origQuery = pool.query;
+    let capturedSql = '';
+    let capturedParams = [];
+
+    pool.query = async (sql, params = []) => {
+        if (sql.includes('CREATE TABLE IF NOT EXISTS batchline_outbound_log')) {
+            return { rows: [] };
+        }
+        if (sql.includes('SELECT id, batch_id, callback_key')) {
+            capturedSql = sql;
+            capturedParams = params;
+            return {
+                rows: [
+                    {
+                        id: '1',
+                        batch_id: 'B-QUERY-01',
+                        callback_key: 'cb-query-01',
+                        status: 'delivered'
+                    }
+                ]
+            };
+        }
+        return { rows: [] };
+    };
+
+    try {
+        const rows = await getBatchLineOutboundLogs({
+            batchId: 'B-QUERY-01',
+            callbackKey: 'cb-query-01',
+            limit: 10
+        });
+
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0].batch_id, 'B-QUERY-01');
+        assert.ok(capturedSql.includes('batch_id = $1'));
+        assert.ok(capturedSql.includes('callback_key = $2'));
+        assert.equal(capturedParams[0], 'B-QUERY-01');
+        assert.equal(capturedParams[1], 'cb-query-01');
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('sendBatchLineInstructionUpdate automatically records delivered chunks in batchline_outbound_log', async () => {
+    const origFetch = global.fetch;
+    const origQuery = pool.query;
+    const recordedEntries = [];
+
+    pool.query = async (sql, params = []) => {
+        if (sql.includes('CREATE TABLE IF NOT EXISTS batchline_outbound_log')) {
+            return { rows: [] };
+        }
+        if (sql.includes('INSERT INTO batchline_outbound_log')) {
+            recordedEntries.push(params);
+            return { rows: [{ id: String(recordedEntries.length), created_at: new Date() }] };
+        }
+        return { rows: [] };
+    };
+
+    global.fetch = async (url, opts) => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: true })
+    });
+
+    try {
+        const res = await sendBatchLineInstructionUpdate({
+            refInstruction: 'PRESS_LOG',
+            batchId: 'B-AUTO-LOG-01',
+            callbackKey: 'cb-auto-log-key',
+            actualResult: [{ repeat_no: 1, value: '1.24' }]
+        });
+
+        assert.ok(res.ok);
+        assert.equal(recordedEntries.length, 1);
+        const [batchId, callbackKey, refInst, action, targetUrl, chunkIdx, totalChunks, payload, status, httpStatus] = recordedEntries[0];
+        assert.equal(batchId, 'B-AUTO-LOG-01');
+        assert.equal(callbackKey, 'cb-auto-log-key');
+        assert.equal(refInst, 'PRESS_LOG');
+        assert.equal(action, 'instruction_update');
+        assert.equal(status, 'delivered');
+        assert.equal(httpStatus, 200);
+        assert.equal(chunkIdx, 1);
+        assert.equal(totalChunks, 1);
+    } finally {
+        global.fetch = origFetch;
+        pool.query = origQuery;
+    }
+});
+
+test('sendBatchLineInstructionUpdate records failed status on HTTP error', async () => {
+    const origFetch = global.fetch;
+    const origQuery = pool.query;
+    const recordedEntries = [];
+
+    pool.query = async (sql, params = []) => {
+        if (sql.includes('CREATE TABLE IF NOT EXISTS batchline_outbound_log')) {
+            return { rows: [] };
+        }
+        if (sql.includes('INSERT INTO batchline_outbound_log')) {
+            recordedEntries.push(params);
+            return { rows: [{ id: String(recordedEntries.length), created_at: new Date() }] };
+        }
+        return { rows: [] };
+    };
+
+    global.fetch = async (url, opts) => ({
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({ error: { detail: 'Bad Request' } })
+    });
+
+    try {
+        const res = await sendBatchLineInstructionUpdate({
+            refInstruction: 'ERR_INST',
+            batchId: 'B-FAIL-LOG-01',
+            callbackKey: 'cb-fail-key',
+            actualResult: 'error_val'
+        });
+
+        assert.equal(res.ok, false);
+        assert.equal(recordedEntries.length, 2);
+        const [batchId, callbackKey, refInst, action, targetUrl, chunkIdx, totalChunks, payload, status, httpStatus] = recordedEntries[0];
+        assert.equal(batchId, 'B-FAIL-LOG-01');
+        assert.equal(callbackKey, 'cb-fail-key');
+        assert.equal(refInst, 'ERR_INST');
+        assert.equal(status, 'failed');
+        assert.equal(httpStatus, 400);
+    } finally {
+        global.fetch = origFetch;
+        pool.query = origQuery;
+    }
+});
+
+test('sendBatchLineNotification records notification outbound log', async () => {
+    const origFetch = global.fetch;
+    const origQuery = pool.query;
+    const recordedEntries = [];
+
+    pool.query = async (sql, params = []) => {
+        if (sql.includes('CREATE TABLE IF NOT EXISTS batchline_outbound_log')) {
+            return { rows: [] };
+        }
+        if (sql.includes('INSERT INTO batchline_outbound_log')) {
+            recordedEntries.push(params);
+            return { rows: [{ id: String(recordedEntries.length), created_at: new Date() }] };
+        }
+        return { rows: [] };
+    };
+
+    global.fetch = async (url, opts) => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ pushed: true })
+    });
+
+    try {
+        const res = await sendBatchLineNotification({
+            batchId: 'B-NOTIF-01',
+            message: 'Process deviation alert',
+            callbackKey: 'cb-notif-key'
+        });
+
+        assert.ok(res.ok);
+        assert.equal(recordedEntries.length, 1);
+        const [batchId, callbackKey, refInst, action, targetUrl, chunkIdx, totalChunks, payload, status, httpStatus] = recordedEntries[0];
+        assert.equal(batchId, 'B-NOTIF-01');
+        assert.equal(callbackKey, 'cb-notif-key');
+        assert.equal(action, 'notification');
+        assert.equal(status, 'delivered');
+        assert.equal(httpStatus, 200);
+    } finally {
+        global.fetch = origFetch;
+        pool.query = origQuery;
+    }
+});
+
+
+test('isIntegrationConnected defaults to true, and setSimulationConnection(false) broadcasts warning for batches in last 5min', async () => {
+    const origFetch = global.fetch;
+    const origQuery = pool.query;
+    const fetchedCalls = [];
+
+    pool.query = async (sql, params = []) => {
+        if (sql.includes('SELECT DISTINCT batch_id, callback_key')) {
+            return {
+                rows: [
+                    { batch_id: 'B-2026-ACTIVE-1', callback_key: 'cb-alpha' },
+                    { batch_id: 'B-2026-ACTIVE-2', callback_key: 'cb-beta' }
+                ]
+            };
+        }
+        if (sql.includes('UPDATE simulation_control')) {
+            return { rows: [] };
+        }
+        if (sql.includes('SELECT COUNT(*)::int AS count')) {
+            return { rows: [{ count: 0 }] };
+        }
+        return { rows: [] };
+    };
+
+    global.fetch = async (url, opts) => {
+        const body = JSON.parse(opts.body);
+        fetchedCalls.push({ url, body });
+        return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ success: true })
+        };
+    };
+
+    try {
+        assert.equal(isIntegrationConnected(), true);
+
+        const result = await setSimulationConnection(false);
+        assert.equal(result.connected, false);
+        assert.equal(isIntegrationConnected(), false);
+        assert.equal(result.broadcastCount, 2);
+
+        // Check that warning notifications were dispatched to both batches
+        assert.equal(fetchedCalls.length, 2);
+        assert.equal(fetchedCalls[0].body.batchid, 'B-2026-ACTIVE-1');
+        assert.equal(fetchedCalls[0].body.callbackkey, 'cb-alpha');
+        assert.ok(fetchedCalls[0].body.message.includes('[SYSTEM WARNING]'));
+
+        assert.equal(fetchedCalls[1].body.batchid, 'B-2026-ACTIVE-2');
+        assert.equal(fetchedCalls[1].body.callbackkey, 'cb-beta');
+        assert.ok(fetchedCalls[1].body.message.includes('[SYSTEM WARNING]'));
+    } finally {
+        global.fetch = origFetch;
+        pool.query = origQuery;
+    }
+});
+
+test('While offline, outbound notification and instruction updates buffer to batchline_outbound_log with status pending', async () => {
+    const origFetch = global.fetch;
+    const origQuery = pool.query;
+    const bufferedEntries = [];
+
+    pool.query = async (sql, params = []) => {
+        if (sql.includes('INSERT INTO batchline_outbound_log')) {
+            bufferedEntries.push(params);
+            return { rows: [{ id: String(bufferedEntries.length), created_at: new Date() }] };
+        }
+        return { rows: [] };
+    };
+
+    let fetchCalled = false;
+    global.fetch = async () => {
+        fetchCalled = true;
+        return { ok: true, status: 200, text: async () => '{}' };
+    };
+
+    try {
+        // Ensure server is in offline state
+        assert.equal(isIntegrationConnected(), false);
+
+        // 1. Attempt outbound notification
+        const notifRes = await sendBatchLineNotification({
+            batchId: 'B-OFFLINE-01',
+            message: 'Offline test alert',
+            callbackKey: 'cb-off-1'
+        });
+
+        assert.equal(notifRes.buffered, true);
+        assert.equal(notifRes.offline, true);
+        assert.equal(fetchCalled, false); // Did NOT send over network!
+
+        // 2. Attempt outbound instruction update
+        const instRes = await sendBatchLineInstructionUpdate({
+            refInstruction: 'REAC',
+            batchId: 'B-OFFLINE-01',
+            actualResult: 'R1',
+            callbackKey: 'cb-off-1'
+        });
+
+        assert.equal(instRes.buffered, true);
+        assert.equal(instRes.offline, true);
+        assert.equal(fetchCalled, false); // Still did NOT send over network!
+
+        // Check buffered entries in DB
+        assert.equal(bufferedEntries.length, 2);
+        // Entry 1: notification
+        assert.equal(bufferedEntries[0][0], 'B-OFFLINE-01');
+        assert.equal(bufferedEntries[0][3], 'notification');
+        assert.equal(bufferedEntries[0][8], 'pending'); // status
+        assert.equal(bufferedEntries[0][10], 0); // attempts = 0
+
+        // Entry 2: instruction_update
+        assert.equal(bufferedEntries[1][0], 'B-OFFLINE-01');
+        assert.equal(bufferedEntries[1][3], 'instruction_update');
+        assert.equal(bufferedEntries[1][8], 'pending'); // status
+        assert.equal(bufferedEntries[1][10], 0); // attempts = 0
+    } finally {
+        global.fetch = origFetch;
+        pool.query = origQuery;
+    }
+});
+
+test('setSimulationConnection(true) reconnects server and flushes pending queue with Store-and-Forward', async () => {
+    const origFetch = global.fetch;
+    const origQuery = pool.query;
+    const updatedStatusRecords = [];
+    const flushedHttpCalls = [];
+
+    const mockPendingLogs = [
+        {
+            id: '101',
+            batch_id: 'B-BUFFERED-01',
+            callback_key: 'cb-buf-1',
+            ref_instruction: null,
+            action: 'notification',
+            target_url: 'http://batchline/Notification/push',
+            payload: { batchid: 'B-BUFFERED-01', message: 'Buffered alert', callbackkey: 'cb-buf-1' },
+            attempts: 0
+        },
+        {
+            id: '102',
+            batch_id: 'B-BUFFERED-01',
+            callback_key: 'cb-buf-1',
+            ref_instruction: 'TEMP_SET',
+            action: 'instruction_update',
+            target_url: 'http://batchline/api/v1/batch/instruction/update/TEMP_SET',
+            payload: { batch_id: 'B-BUFFERED-01', actual_result: '65.5' },
+            attempts: 0
+        }
+    ];
+
+    pool.query = async (sql, params = []) => {
+        if (sql.includes(`WHERE status = 'pending'`)) {
+            return { rows: mockPendingLogs };
+        }
+        if (sql.includes('UPDATE batchline_outbound_log')) {
+            updatedStatusRecords.push(params);
+            return { rows: [{ id: params[params.length - 1], status: params[0] }] };
+        }
+        if (sql.includes('SELECT COUNT(*)::int AS count')) {
+            return { rows: [{ count: 0 }] };
+        }
+        return { rows: [] };
+    };
+
+    global.fetch = async (url, opts) => {
+        flushedHttpCalls.push({ url, body: JSON.parse(opts.body) });
+        return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ delivered: true })
+        };
+    };
+
+    try {
+        const result = await setSimulationConnection(true);
+        assert.equal(result.connected, true);
+        assert.equal(isIntegrationConnected(), true);
+        assert.equal(result.flushedCount, 2);
+
+        // Verify that both buffered messages were sent to BatchLine
+        assert.ok(flushedHttpCalls.length >= 2);
+        assert.equal(flushedHttpCalls[0].url, 'http://batchline/Notification/push');
+        assert.equal(flushedHttpCalls[1].url, 'http://batchline/api/v1/batch/instruction/update/TEMP_SET');
+
+        // Verify status was updated to 'delivered' in batchline_outbound_log
+        assert.equal(updatedStatusRecords.length, 2);
+        assert.equal(updatedStatusRecords[0][0], 'delivered');
+        assert.equal(updatedStatusRecords[0][1], 200); // httpStatus
+        assert.equal(updatedStatusRecords[1][0], 'delivered');
+        assert.equal(updatedStatusRecords[1][1], 200); // httpStatus
+    } finally {
+        global.fetch = origFetch;
         pool.query = origQuery;
     }
 });

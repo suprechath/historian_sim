@@ -87,6 +87,7 @@ export async function ensureSimulationControl() {
       ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS batch_command TEXT;
       ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS single_batch_status TEXT DEFAULT 'idle';
       ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS process_skip_asset TEXT;
+      ALTER TABLE simulation_control ADD COLUMN IF NOT EXISTS integration_connected BOOLEAN NOT NULL DEFAULT true;
       INSERT INTO simulation_control (id, running, speed, mode)
       VALUES (1, true, 1, 'continuous')
       ON CONFLICT (id) DO NOTHING;

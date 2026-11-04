@@ -15,6 +15,7 @@ import {
     triggerScheduledInstructionNow
 } from '../services/scheduledInstructionsService.js';
 import { logger } from '../utils/logger.js';
+import { executeInternalHeartbeat } from '../services/heartbeatService.js';
 
 export { simState, ensureSimulationControl, getSimulationState, assignBatchToQueue };
 
@@ -157,6 +158,19 @@ router.get('/stream', (req, res) => {
                 // Ignore if table does not exist yet
             }
 
+            // 6. Active Pending Store-and-Forward Outbound Records Count
+            let pendingOutboundCount = 0;
+            try {
+                const { rows: outRows } = await query(`
+                    SELECT COUNT(*)::int AS count
+                    FROM batchline_outbound_log
+                    WHERE status = 'pending';
+                `);
+                pendingOutboundCount = outRows[0]?.count || 0;
+            } catch (outErr) {
+                // Ignore if table does not exist yet
+            }
+
             res.write(`data: ${JSON.stringify({
                 clock: new Date(),
                 running: currentSimState.running,
@@ -164,11 +178,13 @@ router.get('/stream', (req, res) => {
                 mode: currentSimState.mode,
                 assignedBatchId: currentSimState.assignedBatchId,
                 singleBatchStatus: currentSimState.singleBatchStatus,
+                integrationConnected: currentSimState.integrationConnected !== false,
                 batchQueue,
                 reactors: reactorMap,
                 tags,
                 integrationHealth,
-                pendingScheduledCount
+                pendingScheduledCount,
+                pendingOutboundCount
             })}\n\n`);
         } catch (err) {
             console.error('SSE snapshot fetch error:', err.message);
@@ -182,6 +198,81 @@ router.get('/stream', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+
+// Simulated Disconnection endpoints for integration-service
+router.get('/simulation/integration-connection', async (req, res) => {
+    try {
+        const intUrl = (process.env.INTEGRATION_SERVICE_URL || 'http://integration-service:4001').replace(/\/+$/, '');
+        try {
+            const intRes = await fetch(`${intUrl}/simulation/connection`, {
+                signal: AbortSignal.timeout(3000)
+            });
+            if (intRes.ok) {
+                const data = await intRes.json();
+                return res.json(data);
+            }
+        } catch (fetchErr) {
+            // Fallback to database if integration service directly unreachable
+        }
+
+        const state = await getSimulationState();
+        res.json({
+            connected: state.integrationConnected !== false,
+            source: 'db_fallback'
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/simulation/integration-connection', async (req, res) => {
+    try {
+        const { connected } = req.body;
+        const intUrl = (process.env.INTEGRATION_SERVICE_URL || 'http://integration-service:4001').replace(/\/+$/, '');
+        
+        let result = null;
+        try {
+            const intRes = await fetch(`${intUrl}/simulation/connection`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ connected: Boolean(connected) }),
+                signal: AbortSignal.timeout(10000)
+            });
+            if (intRes.ok) {
+                result = await intRes.json();
+            }
+        } catch (callErr) {
+            logger.warn('UI', `Failed to call integration-service /simulation/connection: ${callErr.message}`);
+        }
+
+        if (!result) {
+            // Direct DB update fallback
+            await ensureSimulationControl();
+            await query(`
+                UPDATE simulation_control
+                SET integration_connected = $1, updated_at = NOW()
+                WHERE id = 1;
+            `, [Boolean(connected)]);
+            simState.integrationConnected = Boolean(connected);
+            result = {
+                connected: Boolean(connected),
+                message: `Connection state updated to ${Boolean(connected) ? 'ONLINE' : 'OFFLINE'} via DB fallback`
+            };
+        } else {
+            simState.integrationConnected = Boolean(connected);
+        }
+
+        // Trigger immediate internal heartbeat tick to re-evaluate health status
+        executeInternalHeartbeat().catch(err => {
+            logger.warn('UI', 'Heartbeat trigger error:', err.message);
+        });
+
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // 2. Simulation State & Demo Controls
 // ---------------------------------------------------------------------------
 router.get('/simulation/state', async (req, res) => {
@@ -572,9 +663,10 @@ router.get('/integration/health', async (req, res) => {
 // ---------------------------------------------------------------------------
 // 7. Acknowledge Health Check Dialogue & Start Batch ("wait R1 available")
 // ---------------------------------------------------------------------------
-router.post('/integration/health/close', async (req, res) => {
+async function handleHealthClose(req, res) {
     try {
-        const { id, batchId } = req.body || {};
+        const id = req.body?.id || req.params?.id;
+        const batchId = req.body?.batchId || req.query?.batchId;
 
         if (id) {
             try {
@@ -585,6 +677,16 @@ router.post('/integration/health/close', async (req, res) => {
                 `, [id]);
             } catch (uErr) {
                 console.warn('Could not update acknowledged_at on health check (non-fatal):', uErr.message);
+            }
+        } else if (batchId && batchId !== 'UNKNOWN' && String(batchId).trim()) {
+            try {
+                await query(`
+                    UPDATE integration_health_checks
+                    SET acknowledged_at = NOW()
+                    WHERE batch_id = $1 AND acknowledged_at IS NULL;
+                `, [String(batchId).trim()]);
+            } catch (uErr) {
+                console.warn('Could not update acknowledged_at by batchId (non-fatal):', uErr.message);
             }
         }
 
@@ -623,7 +725,11 @@ router.post('/integration/health/close', async (req, res) => {
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
-});
+}
+
+router.post('/integration/health/close', handleHealthClose);
+router.post('/healthcheck/:id/acknowledge', handleHealthClose);
+router.post('/healthcheck/close', handleHealthClose);
 
 
 // ---------------------------------------------------------------------------

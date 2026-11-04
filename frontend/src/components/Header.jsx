@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 
 function formatDate(isoStr) {
     if (!isoStr) return '—';
@@ -17,10 +17,23 @@ export default function Header({
     assignedBatchId,
     singleBatchStatus,
     integrationHealth,
+    integrationConnected = true,
+    pendingOutboundCount = 0,
     activePage = 'overview',
     onNavigate,
     pendingScheduledCount = 0
 }) {
+    const [isToggling, setIsToggling] = useState(false);
+    const [toastMessage, setToastMessage] = useState(null);
+    const [localConnected, setLocalConnected] = useState(null);
+
+    // Sync optimistic local state whenever prop updates from stream
+    useEffect(() => {
+        setLocalConnected(null);
+    }, [integrationConnected]);
+
+    const isConnected = localConnected !== null ? localConnected : Boolean(integrationConnected);
+
     const handleSpeed = async (newSpeed, newRunning) => {
         try {
             await fetch('/ui/simulation/state', {
@@ -30,6 +43,43 @@ export default function Header({
             });
         } catch (err) {
             console.error('Speed change error:', err);
+        }
+    };
+
+    // Handler for the fake disconnection / reconnection flipping toggle
+    const handleToggleIntegrationConnection = async () => {
+        if (isToggling) return;
+        const targetState = !isConnected;
+        setIsToggling(true);
+        setLocalConnected(targetState); // Instant visual feedback
+        setToastMessage(null);
+
+        try {
+            const res = await fetch('/ui/simulation/integration-connection', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ connected: targetState })
+            });
+            const data = await res.json();
+
+            if (res.ok) {
+                setLocalConnected(Boolean(data.connected));
+                if (!data.connected) {
+                    setToastMessage(`Disconnected. Broadcast sent to ${data.broadcastCount || 0} batch(es).`);
+                } else {
+                    setToastMessage(`Reconnected. Flushed ${data.flushedCount || 0} pending message(s).`);
+                }
+            } else {
+                setLocalConnected(null);
+                setToastMessage(`Error: ${data.error || 'Failed to toggle'}`);
+            }
+        } catch (err) {
+            console.error('Connection toggle error:', err);
+            setLocalConnected(null);
+            setToastMessage(`Connection error: ${err.message}`);
+        } finally {
+            setIsToggling(false);
+            setTimeout(() => setToastMessage(null), 5000);
         }
     };
 
@@ -81,6 +131,42 @@ export default function Header({
             </div>
 
             <div className="hdr-r">
+                {/* Integration Server Connection Simulation Flipping Toggle */}
+                <div
+                    className={`integration-toggle-wrapper ${!isConnected ? 'offline-active' : 'online-active'}`}
+                    title={
+                        isConnected
+                            ? 'Integration Server is ONLINE. Click to simulate disconnection (Warning broadcast to active batches from last 5min, Store-and-Forward queue buffering).'
+                            : `Integration Server is SIMULATED OFFLINE (${pendingOutboundCount} buffered). Click to reconnect and flush pending queue.`
+                    }
+                >
+                    <button
+                        type="button"
+                        className={`flip-toggle-btn ${isConnected ? 'btn-connected' : 'btn-disconnected'}`}
+                        onClick={handleToggleIntegrationConnection}
+                        disabled={isToggling}
+                        aria-pressed={isConnected}
+                        aria-label="Toggle integration server fake disconnection"
+                    >
+                        <span className="flip-slider">
+                            <span className="flip-knob" />
+                        </span>
+                        <span className="flip-title">
+                            <b>Int-Server:</b> {isToggling ? '...' : isConnected ? 'ONLINE' : 'OFFLINE'}
+                        </span>
+                        {!isConnected && (
+                            <span className="flip-buffered-badge" title={`${pendingOutboundCount} outbound request(s) buffered in Store-and-Forward queue`}>
+                                {pendingOutboundCount} buf
+                            </span>
+                        )}
+                    </button>
+                    {toastMessage && (
+                        <div className="toggle-toast-pill" role="status">
+                            {toastMessage}
+                        </div>
+                    )}
+                </div>
+
                 {integrationHealth && (
                     <div
                         className={`integration-chip ${integrationHealth.status} ${integrationHealth.isRecentOnDemand ? 'pulse-alert' : ''}`}

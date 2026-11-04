@@ -11,10 +11,12 @@ import {
     extractRecordDurationMs,
     extractInterpretMapping,
     hasPrevBatchTrigger,
-    hasHealthCheckTrigger
+    hasHealthCheckTrigger,
+    extractForceUpdateTriggers
 } from '../utils/instructionParsers.js';
 import { reportError, sendBatchLineInstructionUpdate } from '../clients/batchLineClient.js';
 import { handlePreviousBatchInstruction } from './previousBatchService.js';
+import { handleForceUpdateInstruction } from './forceUpdateService.js';
 import { handleOnDemandHealthCheck } from './healthCheckService.js';
 import {
     resolveTag,
@@ -37,7 +39,14 @@ export async function handleCase1PointInTime(ctx, res) {
         return await handleOnDemandHealthCheck({ body: ctx.rawBody || ctx }, res);
     }
 
-    // 0.1 Check for [PREVBATCH] trigger word in instruction description
+    // 0.1 Check for dynamic force update trigger: [REF=..., VALUE=...]
+    const forceUpdateTriggers = extractForceUpdateTriggers(fullDesc || ctx.instructionDescription, ctx.refInstruction);
+    if (forceUpdateTriggers.length > 0) {
+        logger.info('Case1', `Dynamic force update trigger detected (${forceUpdateTriggers.length} directive(s)). Routing to force update handler.`);
+        return await handleForceUpdateInstruction(ctx, res, forceUpdateTriggers);
+    }
+
+    // 0.2 Check for [PREVBATCH] trigger word in instruction description
     if (hasPrevBatchTrigger(fullDesc) || hasPrevBatchTrigger(ctx.instructionDescription)) {
         logger.info('Case1', `[PREVBATCH] trigger detected for RefElement "${ctx.refElement}". Routing to previous batch handler.`);
         return await handlePreviousBatchInstruction(ctx, res);

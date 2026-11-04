@@ -7,7 +7,6 @@ import { ControlService } from './services/controlService.js';
 import { ChaosService } from './services/chaosService.js';
 import { AlarmService } from './services/alarmService.js';
 import { ArchiveService } from './services/archiveService.js';
-import { MonitoringService } from './services/monitoringService.js';
 import { BatchOrchestrator } from './services/batchOrchestrator.js';
 
 export class SimulationEngine {
@@ -20,8 +19,7 @@ export class SimulationEngine {
     // Services
     this.controlService = new ControlService();
     this.archiveService = new ArchiveService();
-    this.monitoringService = new MonitoringService();
-    this.alarmService = new AlarmService();
+        this.alarmService = new AlarmService();
 
     // Domain data
     this.assets = [];
@@ -236,9 +234,6 @@ export class SimulationEngine {
       // 6. Persist Snapshots & Periodically Flush Archive
       await this.archiveService.updateSnapshots(snapshotRecords);
       await this.archiveService.tickArchive();
-
-      // 7. Dispatch Outbound Monitoring Webhook Jobs
-      await this.monitoringService.tick(now);
 
       this.totalTicks++;
       this.lastTickDurationMs = Date.now() - tickStart;

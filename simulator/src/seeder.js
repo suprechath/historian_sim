@@ -36,9 +36,9 @@ export async function seedHistory({ days = config.autoSeedDays, seed = Date.now(
     tags.forEach((t) => tagLookup.set(`${t.asset_id}_${t.parameter}`, t));
 
     // 2. Clean existing historical data and reset stale injected faults
-    logger.info('Cleaning old historical records (monitoring, events, batches, batch_exceptions, readings, faults)...', 'Seeder');
+    logger.info('Cleaning old historical records (events, batches, batch_exceptions, readings, faults)...', 'Seeder');
     await client.query(
-      'TRUNCATE TABLE monitoring_outbox, monitoring_jobs, events, batches, batch_exceptions, injected_faults CASCADE'
+      'TRUNCATE TABLE events, batches, batch_exceptions, injected_faults CASCADE'
     );
     await client.query('TRUNCATE TABLE readings');
 

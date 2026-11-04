@@ -5,7 +5,6 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { query, pool } from './db.js';
 import uiRoutes, { ensureSimulationControl } from './routes/ui.js';
-import { startJobsWorker, stopJobsWorker } from './jobsWorker.js';
 import {
     ensureHealthCheckTables,
     startInternalHeartbeatWorker,
@@ -96,7 +95,7 @@ app.use((err, req, res, next) => {
 await ensureSimulationControl();
 await ensureScheduledInstructionsTable();
 await ensureHealthCheckTables();
-startJobsWorker();
+try { await query('DROP TABLE IF EXISTS monitoring_outbox, monitoring_job_tags, monitoring_jobs CASCADE'); } catch (_) {}
 startInternalHeartbeatWorker();
 
 const server = app.listen(PORT, () => {
@@ -108,8 +107,7 @@ const server = app.listen(PORT, () => {
 // 7. Graceful Termination Handling
 const shutdown = () => {
     logger.info('HistorianAPI', 'Gracefully terminating HTTP server, worker, and DB pool...');
-    stopJobsWorker();
-    stopInternalHeartbeatWorker();
+        stopInternalHeartbeatWorker();
     server.close(async () => {
         try {
             await pool.end();

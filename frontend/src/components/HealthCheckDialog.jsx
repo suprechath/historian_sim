@@ -49,10 +49,19 @@ function HealthMessageView({ message, status }) {
 export default function HealthCheckDialog({ health, onDismiss }) {
     if (!health) return null;
 
+    const handleDismiss = (e) => {
+        if (e && typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+        }
+        if (typeof onDismiss === 'function') {
+            onDismiss(health);
+        }
+    };
+
     return (
         <div
             className="healthcheck-popup-backdrop"
-            onClick={onDismiss}
+            onClick={handleDismiss}
         >
             <div
                 className={`healthcheck-popup-card ${health.status}`}
@@ -69,7 +78,7 @@ export default function HealthCheckDialog({ health, onDismiss }) {
                     </div>
                     <button
                         className="healthcheck-popup-close"
-                        onClick={onDismiss}
+                        onClick={handleDismiss}
                         title="Close"
                     >
                         &times;
@@ -165,7 +174,7 @@ export default function HealthCheckDialog({ health, onDismiss }) {
                     )}
                     <button
                         className="healthcheck-popup-btn"
-                        onClick={onDismiss}
+                        onClick={handleDismiss}
                         autoFocus
                     >
                         OK
