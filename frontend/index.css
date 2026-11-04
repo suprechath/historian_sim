@@ -274,9 +274,18 @@ header {
 }
 
 @keyframes integrationPulse {
-    0% { transform: scale(1); }
-    50% { transform: scale(1.04); box-shadow: 0 0 8px rgba(45, 122, 62, 0.4); }
-    100% { transform: scale(1); }
+    0% {
+        transform: scale(1);
+    }
+
+    50% {
+        transform: scale(1.04);
+        box-shadow: 0 0 8px rgba(45, 122, 62, 0.4);
+    }
+
+    100% {
+        transform: scale(1);
+    }
 }
 
 .integration-chip .integration-chip-text {
@@ -303,8 +312,13 @@ header {
 }
 
 @keyframes popupFadeIn {
-    from { opacity: 0; }
-    to { opacity: 1; }
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
 }
 
 @keyframes cardPop {
@@ -312,6 +326,7 @@ header {
         opacity: 0;
         transform: scale(0.92) translateY(-6px);
     }
+
     to {
         opacity: 1;
         transform: scale(1) translateY(0);
@@ -1796,7 +1811,7 @@ td.u {
     align-items: stretch;
 }
 
-@media (max-width: 1040px) {
+@media (max-width: 1750px) {
     .mimic-deck {
         grid-template-columns: 1fr;
     }
@@ -2000,6 +2015,98 @@ td.u {
     letter-spacing: -0.01em;
 }
 
+.skip-card-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.btn-skip-expand-header {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    padding: 2px 4px;
+    cursor: pointer;
+    color: var(--ink-2);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    transition: all 0.15s ease;
+}
+
+.btn-skip-expand-header:hover {
+    background: var(--panel-2);
+    border-color: var(--edge);
+    color: var(--ink);
+}
+
+.skip-compact-box {
+    display: flex;
+    flex-direction: column;
+    padding: 2px 0;
+}
+
+.btn-open-skip-dialog {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    background: linear-gradient(180deg, #f8fafc 0%, #edf2f7 100%);
+    border: 1px solid #7d868c;
+    border-radius: 4px;
+    color: #1b2124;
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+    transition: all 0.15s ease;
+    text-align: left;
+}
+
+.btn-open-skip-dialog:hover {
+    background: linear-gradient(180deg, #ffffff 0%, #e2e8f0 100%);
+    border-color: #475569;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.14);
+    transform: translateY(-1px);
+}
+
+.btn-open-skip-dialog:active {
+    transform: translateY(0);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+.btn-open-skip-dialog .btn-icon {
+    font-size: 16px;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.btn-open-skip-dialog .btn-text-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    flex: 1;
+}
+
+.btn-open-skip-dialog .btn-title {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: #000000;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.btn-open-skip-dialog .btn-desc {
+    font-size: 10px;
+    font-weight: 600;
+    color: #2563eb;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .skip-card-badge {
     font-size: 9.5px;
     font-weight: 600;
@@ -2162,6 +2269,193 @@ td.u {
     border-color: #2563eb;
     transform: translateY(0.5px);
     box-shadow: 0 1px 2px rgba(37, 99, 235, 0.1);
+}
+
+/* ==========================================================================
+   Fast-Forward Sequencer Dialog
+   ========================================================================== */
+.skip-dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.65);
+    backdrop-filter: blur(3px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+    padding: 16px;
+}
+
+.skip-dialog-card {
+    background: #ffffff;
+    border: 2px solid var(--edge-dark);
+    border-radius: 8px;
+    box-shadow: 0 18px 42px -6px rgba(15, 23, 42, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.6) inset;
+    width: 100%;
+    max-width: 520px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    animation: cardPop 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    font-family: inherit;
+    color: var(--ink);
+}
+
+.skip-dialog-header {
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--edge-dark);
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.skip-dialog-title-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.skip-dialog-icon {
+    font-size: 16px;
+    line-height: 1;
+}
+
+.skip-dialog-title-group h3 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 800;
+    color: #000000;
+    letter-spacing: -0.01em;
+}
+
+.skip-dialog-badge {
+    font-size: 10px;
+    font-weight: 700;
+    color: #1e3a8a;
+    background: #dbeafe;
+    padding: 2px 7px;
+    border-radius: 12px;
+    border: 1px solid #bfdbfe;
+    letter-spacing: 0.02em;
+}
+
+.skip-dialog-close {
+    background: transparent;
+    border: none;
+    font-size: 22px;
+    line-height: 1;
+    color: var(--ink-2);
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: all 0.15s ease;
+}
+
+.skip-dialog-close:hover {
+    background: rgba(0, 0, 0, 0.08);
+    color: var(--alarm);
+}
+
+.skip-dialog-body {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    background: #f8fafc;
+}
+
+.skip-dialog-intro {
+    font-size: 12px;
+    color: var(--ink-2);
+    line-height: 1.45;
+    margin: 0;
+}
+
+.skip-dialog-intro b {
+    color: var(--ink);
+}
+
+.skip-dialog-table-wrap {
+    background: #ffffff;
+    border: 1px solid var(--edge);
+    border-radius: 6px;
+    padding: 12px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.skip-dialog-table-wrap .modern-skip-table {
+    border-spacing: 6px 8px;
+}
+
+.skip-dialog-table-wrap .reactor-col-badge {
+    padding: 6px 8px;
+}
+
+.skip-dialog-table-wrap .reactor-badge-dot {
+    width: 8px;
+    height: 8px;
+}
+
+.skip-dialog-table-wrap .reactor-badge-name {
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.skip-dialog-table-wrap .modern-skip-btn {
+    padding: 8px 10px;
+    font-size: 12px;
+    font-weight: 700;
+    border-radius: 5px;
+    gap: 7px;
+}
+
+.skip-dialog-table-wrap .modern-skip-btn .btn-icon {
+    font-size: 15px;
+}
+
+.skip-dialog-footer {
+    background: var(--panel-2);
+    border-top: 1px solid var(--edge-dark);
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.skip-dialog-hint {
+    font-size: 11px;
+    color: var(--ink-2);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.skip-dialog-hint kbd {
+    background: #ffffff;
+    border: 1px solid var(--edge);
+    border-radius: 3px;
+    padding: 1px 4px;
+    font-size: 10px;
+    font-family: inherit;
+    box-shadow: 0 1px 0 rgba(0, 0, 0, 0.1);
+}
+
+.skip-dialog-dismiss-btn {
+    padding: 5px 14px;
+    font-size: 11.5px;
+    font-weight: 600;
+    background: #ffffff;
+    border: 1px solid var(--edge-dark);
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--ink);
+    transition: all 0.15s ease;
+}
+
+.skip-dialog-dismiss-btn:hover {
+    background: #f1f5f9;
+    border-color: #475569;
 }
 
 .skip-btn-row {
@@ -2735,7 +3029,7 @@ td.u {
 /* Bottom Feed Grid: 1-Min Rollup Audit (Left) & Events/Alarms Feed (Right) */
 .bottom-feed-grid {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
     gap: 16px;
     margin-top: 14px;
     align-items: stretch;
@@ -2754,6 +3048,30 @@ td.u {
 }
 
 /* Rollup Audit Panel & Events Feed Panel */
+.panel.rollup-audit-panel.collapsed,
+.panel.events-feed-panel.collapsed {
+    height: auto !important;
+    max-height: none !important;
+    padding-bottom: 0;
+}
+
+.panel.rollup-audit-panel.collapsed .rollup-toolbar,
+.panel.events-feed-panel.collapsed .events-toolbar {
+    border-bottom: none;
+}
+
+.rollup-title-clickable,
+.events-title-clickable {
+    cursor: pointer;
+    user-select: none;
+    transition: opacity 0.15s ease;
+}
+
+.rollup-title-clickable:hover,
+.events-title-clickable:hover {
+    opacity: 0.85;
+}
+
 .rollup-audit-panel,
 .events-feed-panel {
     padding: 0;
@@ -3044,6 +3362,7 @@ td.u {
     background: var(--ok);
     color: #ffffff;
 }
+
 /* ==========================================================================
    SCHEDULED INSTRUCTIONS & TASKS QUEUE (SCADA INDUSTRIAL GRADE)
    ========================================================================== */
@@ -3107,8 +3426,17 @@ td.u {
 }
 
 @keyframes pulse-tab-badge {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.85; transform: scale(1.08); }
+
+    0%,
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+
+    50% {
+        opacity: 0.85;
+        transform: scale(1.08);
+    }
 }
 
 .hdr-adminer-link {
@@ -3219,8 +3547,15 @@ td.u {
 }
 
 @keyframes beacon-blink {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.35; }
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.35;
+    }
 }
 
 .refresh-rate-picker {
@@ -3971,7 +4306,9 @@ td.u {
 }
 
 @keyframes spin {
-    to { transform: rotate(360deg); }
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 .table-footer-status {
@@ -4049,10 +4386,22 @@ td.u {
     border-radius: 50%;
 }
 
-.modal-status-beacon.pending { background: #d97706; box-shadow: 0 0 6px #d97706; }
-.modal-status-beacon.completed { background: var(--ok); }
-.modal-status-beacon.cancelled { background: #94a3b8; }
-.modal-status-beacon.failed { background: var(--alarm); }
+.modal-status-beacon.pending {
+    background: #d97706;
+    box-shadow: 0 0 6px #d97706;
+}
+
+.modal-status-beacon.completed {
+    background: var(--ok);
+}
+
+.modal-status-beacon.cancelled {
+    background: #94a3b8;
+}
+
+.modal-status-beacon.failed {
+    background: var(--alarm);
+}
 
 .modal-ref-tag {
     font-family: 'IBM Plex Mono', monospace, Consolas, monospace;
@@ -4298,8 +4647,15 @@ td.u {
 }
 
 @keyframes toast-slide-in {
-    from { transform: translateY(12px); opacity: 0; }
-    to { transform: translateY(0); opacity: 1; }
+    from {
+        transform: translateY(12px);
+        opacity: 0;
+    }
+
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
 }
 
 .scheduled-toast.success .toast-dot {
@@ -4387,9 +4743,18 @@ td.u {
 }
 
 @keyframes offlinePulse {
-    0% { border-color: #c97b1a; }
-    50% { border-color: var(--alarm); box-shadow: 0 0 6px rgba(181, 50, 28, 0.35); }
-    100% { border-color: #c97b1a; }
+    0% {
+        border-color: #c97b1a;
+    }
+
+    50% {
+        border-color: var(--alarm);
+        box-shadow: 0 0 6px rgba(181, 50, 28, 0.35);
+    }
+
+    100% {
+        border-color: #c97b1a;
+    }
 }
 
 .flip-slider {
@@ -4452,9 +4817,18 @@ td.u {
 }
 
 @keyframes badgePulse {
-    0% { opacity: 0.85; }
-    50% { opacity: 1; transform: scale(1.05); }
-    100% { opacity: 0.85; }
+    0% {
+        opacity: 0.85;
+    }
+
+    50% {
+        opacity: 1;
+        transform: scale(1.05);
+    }
+
+    100% {
+        opacity: 0.85;
+    }
 }
 
 .toggle-toast-pill {
@@ -4469,13 +4843,183 @@ td.u {
     font-family: 'IBM Plex Mono', monospace;
     padding: 4px 8px;
     border-radius: 4px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
     z-index: 1000;
     pointer-events: none;
     animation: toastFadeIn 0.2s ease-out;
 }
 
 @keyframes toastFadeIn {
-    from { opacity: 0; transform: translateY(-4px); }
-    to { opacity: 1; transform: translateY(0); }
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+/* ==========================================================================
+   Simulator Controls (DemoControls) - 1-Column Mode (Horizontal 1-Row Layout)
+   ========================================================================== */
+@media (max-width: 1750px) {
+    .mimic-deck {
+        grid-template-columns: 1fr;
+    }
+
+    .mimic-side-col {
+        width: 100%;
+    }
+
+    .mimic-side-col .demo-col-panel {
+        height: auto !important;
+        overflow: visible !important;
+    }
+
+    .mimic-side-col .demo-col-body {
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: stretch !important;
+        gap: 10px !important;
+        height: auto !important;
+        min-height: 0 !important;
+        overflow: visible !important;
+        padding: 8px !important;
+    }
+
+    .mimic-side-col .demo-tab-content-area {
+        display: flex !important;
+        flex: 1 1 auto !important;
+        flex-direction: row !important;
+        gap: 10px !important;
+        min-width: 0 !important;
+        height: auto !important;
+        min-height: 0 !important;
+        overflow: visible !important;
+    }
+
+    /* Batch Tab: 1 Row (Batch Form | Status Monitor | Fast-Forward Sequencer) */
+    .mimic-side-col .batch-ctrl-container {
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: stretch !important;
+        gap: 10px !important;
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+        height: auto !important;
+    }
+
+    .mimic-side-col .batch-form-box {
+        flex: 0 0 250px !important;
+        width: 250px !important;
+        height: auto !important;
+        min-height: 0 !important;
+        max-height: none !important;
+        justify-content: space-between !important;
+    }
+
+    .mimic-side-col .batch-status-panel {
+        flex: 1 1 auto !important;
+        min-width: 320px !important;
+        height: auto !important;
+        min-height: 0 !important;
+        justify-content: space-between !important;
+    }
+
+    .mimic-side-col .batch-msg-banner {
+        width: 100% !important;
+        order: -1 !important;
+    }
+
+    .mimic-side-col .modern-skip-card {
+        flex: 0 0 350px !important;
+        width: 350px !important;
+        height: auto !important;
+        min-height: 0 !important;
+        margin-top: 0 !important;
+        align-self: stretch !important;
+    }
+
+    /* Faults Tab: 1 Row (Vessel Selector | Fault Triggers | Footer Status | Fast-Forward Sequencer) */
+    .mimic-side-col .faults-ctrl-container {
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: stretch !important;
+        gap: 10px !important;
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+        height: auto !important;
+    }
+
+    .mimic-side-col .faults-ctrl-container .demo-vessel-tabs-row {
+        flex: 0 0 200px !important;
+        width: 200px !important;
+        height: auto !important;
+        min-height: 0 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        justify-content: center !important;
+        gap: 8px !important;
+        padding: 8px 10px !important;
+        background: var(--panel-2) !important;
+        border: 1px solid var(--edge) !important;
+        border-radius: 3px !important;
+    }
+
+    .mimic-side-col .faults-ctrl-container .demo-btn-stack {
+        flex: 1 1 auto !important;
+        min-width: 240px !important;
+        height: auto !important;
+        min-height: 0 !important;
+        justify-content: center !important;
+        gap: 6px !important;
+        padding: 6px 10px !important;
+        background: var(--panel-2) !important;
+        border: 1px solid var(--edge) !important;
+        border-radius: 3px !important;
+    }
+
+    .mimic-side-col .faults-ctrl-container .demo-col-footer {
+        flex: 0 0 170px !important;
+        width: 170px !important;
+        height: auto !important;
+        min-height: 0 !important;
+        margin-top: 0 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        justify-content: center !important;
+        align-items: center !important;
+        gap: 8px !important;
+        padding: 8px 10px !important;
+    }
+    .bottom-feed-grid {
+        grid-template-columns: 1fr !important;
+        gap: 16px !important;
+    }
+}
+
+@media (max-width: 960px) {
+    .mimic-side-col .demo-col-body {
+        flex-direction: column !important;
+    }
+
+    .mimic-side-col .demo-tab-content-area,
+    .mimic-side-col .batch-ctrl-container,
+    .mimic-side-col .faults-ctrl-container {
+        flex-direction: column !important;
+    }
+
+    .mimic-side-col .batch-form-box,
+    .mimic-side-col .batch-status-panel,
+    .mimic-side-col .modern-skip-card,
+    .mimic-side-col .faults-ctrl-container .demo-vessel-tabs-row,
+    .mimic-side-col .faults-ctrl-container .demo-btn-stack,
+    .mimic-side-col .faults-ctrl-container .demo-col-footer {
+        flex: 1 1 auto !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+    }
 }

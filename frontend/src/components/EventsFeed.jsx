@@ -5,6 +5,25 @@ export default function EventsFeed({ selectedReactor = 'R1', onSelectReactor }) 
     const [filterReactor, setFilterReactor] = useState(selectedReactor);
     const [filterLevel, setFilterLevel] = useState('ALL');
     const [loading, setLoading] = useState(false);
+    const [isCollapsed, setIsCollapsed] = useState(() => {
+        try {
+            return localStorage.getItem('historian_events_collapsed') === 'true';
+        } catch {
+            return false;
+        }
+    });
+
+    const toggleCollapse = () => {
+        setIsCollapsed(prev => {
+            const next = !prev;
+            try {
+                localStorage.setItem('historian_events_collapsed', String(next));
+            } catch {
+                // Ignore storage errors
+            }
+            return next;
+        });
+    };
 
     // Keep internal filter in sync when parent vessel selection changes
     useEffect(() => {
@@ -14,6 +33,7 @@ export default function EventsFeed({ selectedReactor = 'R1', onSelectReactor }) 
     }, [selectedReactor]);
 
     const fetchEvents = useCallback(async (asset, level) => {
+        if (isCollapsed) return;
         setLoading(true);
         try {
             const params = new URLSearchParams({ limit: '40' });
@@ -30,15 +50,16 @@ export default function EventsFeed({ selectedReactor = 'R1', onSelectReactor }) 
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [isCollapsed]);
 
     useEffect(() => {
+        if (isCollapsed) return;
         fetchEvents(filterReactor, filterLevel);
         const interval = setInterval(() => {
             fetchEvents(filterReactor, filterLevel);
         }, 5000); // 5s auto-refresh for live alarms & event stream
         return () => clearInterval(interval);
-    }, [filterReactor, filterLevel, fetchEvents]);
+    }, [filterReactor, filterLevel, fetchEvents, isCollapsed]);
 
     const handleReactorChange = (r) => {
         setFilterReactor(r);
@@ -68,125 +89,163 @@ export default function EventsFeed({ selectedReactor = 'R1', onSelectReactor }) 
     };
 
     return (
-        <div className="panel events-feed-panel">
+        <div className={`panel events-feed-panel ${isCollapsed ? 'collapsed' : ''}`}>
             {/* Filter & Refresh Toolbar */}
             <div className="events-toolbar">
-                <div className="events-title-grp">
-                    <span className="events-title">Events & Alarms Feed</span>
-                    <span className="events-subtitle">ISA-88 phases, batch transitions & alarms</span>
+                <div
+                    className="events-title-grp events-title-clickable"
+                    onClick={toggleCollapse}
+                    title={isCollapsed ? "Click to expand Events & Process Alarms Feed" : "Click to collapse Events & Process Alarms Feed"}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span className="events-title">Events & Alarms Feed</span>
+                        {isCollapsed && (
+                            <span className="trend-collapsed-pill">Collapsed</span>
+                        )}
+                    </div>
+                    <span className="events-subtitle">
+                        {isCollapsed
+                            ? 'Click Expand or header to view events feed'
+                            : 'ISA-88 phases, batch transitions & alarms'}
+                    </span>
                 </div>
 
                 <div className="events-controls">
-                    {/* Reactor Filter */}
-                    <div className="vessel-filter-grp" role="group" aria-label="Filter events by reactor">
-                        {['ALL', 'R1', 'R2', 'R3'].map(r => (
-                            <button
-                                key={r}
-                                type="button"
-                                className={`vessel-filter-btn ${filterReactor === r ? 'active' : ''}`}
-                                onClick={() => handleReactorChange(r)}>
-                                {r}
-                            </button>
-                        ))}
-                    </div>
+                    {!isCollapsed && (
+                        <>
+                            {/* Reactor Filter */}
+                            <div className="vessel-filter-grp" role="group" aria-label="Filter events by reactor">
+                                {['ALL', 'R1', 'R2', 'R3'].map(r => (
+                                    <button
+                                        key={r}
+                                        type="button"
+                                        className={`vessel-filter-btn ${filterReactor === r ? 'active' : ''}`}
+                                        onClick={() => handleReactorChange(r)}>
+                                        {r}
+                                    </button>
+                                ))}
+                            </div>
 
-                    {/* Level Filter */}
-                    <div className="level-filter-grp" role="group" aria-label="Filter events by level">
-                        {[
-                            { label: 'All', val: 'ALL' },
-                            { label: 'Alarms', val: 'Alarm' },
-                            { label: 'Phases', val: 'Phase' },
-                            { label: 'States', val: 'StateChange' }
-                        ].map(l => (
-                            <button
-                                key={l.val}
-                                type="button"
-                                className={`level-filter-btn ${filterLevel === l.val ? 'active' : ''}`}
-                                onClick={() => setFilterLevel(l.val)}>
-                                {l.label}
-                            </button>
-                        ))}
-                    </div>
+                            {/* Level Filter */}
+                            <div className="level-filter-grp" role="group" aria-label="Filter events by level">
+                                {[
+                                    { label: 'All', val: 'ALL' },
+                                    { label: 'Alarms', val: 'Alarm' },
+                                    { label: 'Phases', val: 'Phase' },
+                                    { label: 'States', val: 'StateChange' }
+                                ].map(l => (
+                                    <button
+                                        key={l.val}
+                                        type="button"
+                                        className={`level-filter-btn ${filterLevel === l.val ? 'active' : ''}`}
+                                        onClick={() => setFilterLevel(l.val)}>
+                                        {l.label}
+                                    </button>
+                                ))}
+                            </div>
 
+                            <button
+                                type="button"
+                                className="btn-refresh"
+                                onClick={() => fetchEvents(filterReactor, filterLevel)}
+                                title="Refresh events feed now">
+                                {loading ? '⟳…' : '⟳ Refresh'}
+                            </button>
+                        </>
+                    )}
+
+                    {/* Collapse / Expand Toggle Button */}
                     <button
                         type="button"
-                        className="btn-refresh"
-                        onClick={() => fetchEvents(filterReactor, filterLevel)}
-                        title="Refresh events feed now">
-                        {loading ? '⟳…' : '⟳ Refresh'}
+                        className={`trend-collapse-btn ${isCollapsed ? 'collapsed' : ''}`}
+                        onClick={toggleCollapse}
+                        title={isCollapsed ? "Expand Events Feed" : "Collapse Events Feed"}
+                        aria-expanded={!isCollapsed}>
+                        <svg
+                            width="12"
+                            height="12"
+                            viewBox="0 0 16 16"
+                            fill="currentColor"
+                            style={{
+                                transition: 'transform 0.2s ease',
+                                transform: isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)'
+                            }}>
+                            <path d="M7.247 11.14 2.451 5.658C1.885 5.013 2.345 4 3.204 4h9.592a1 1 0 0 1 .753 1.659l-4.796 5.48a1 1 0 0 1-1.506 0z" />
+                        </svg>
+                        <span>{isCollapsed ? 'Expand' : 'Collapse'}</span>
                     </button>
                 </div>
             </div>
 
             {/* Events Data Table */}
-            <div className="events-table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th style={{ width: '75px' }}>Time</th>
-                            <th style={{ width: '120px' }}>Level</th>
-                            <th style={{ width: '50px' }}>Unit</th>
-                            <th>Event / Alarm Description</th>
-                            <th style={{ width: '150px' }}>Batch</th>
-                            <th style={{ textAlign: 'right', width: '120px' }}>Active / Duration</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {events.length === 0 ? (
+            {!isCollapsed && (
+                <div className="events-table-wrap">
+                    <table>
+                        <thead>
                             <tr>
-                                <td colSpan="6" className="events-empty">
-                                    {loading ? 'Loading events feed…' : `No events recorded for ${filterReactor}`}
-                                </td>
+                                <th style={{ width: '75px' }}>Time</th>
+                                <th style={{ width: '120px' }}>Level</th>
+                                <th style={{ width: '50px' }}>Unit</th>
+                                <th>Event / Alarm Description</th>
+                                <th style={{ width: '150px' }}>Batch</th>
+                                <th style={{ textAlign: 'right', width: '120px' }}>Active / Duration</th>
                             </tr>
-                        ) : (
-                            events.map(e => {
-                                const isAlarm = e.level === 'Alarm';
-                                const isPhase = e.level === 'Phase';
-                                const isActive = !e.ended_at;
+                        </thead>
+                        <tbody>
+                            {events.length === 0 ? (
+                                <tr>
+                                    <td colSpan="6" className="events-empty">
+                                        {loading ? 'Loading events feed…' : `No events recorded for ${filterReactor}`}
+                                    </td>
+                                </tr>
+                            ) : (
+                                events.map(e => {
+                                    const isAlarm = e.level === 'Alarm';
+                                    const isPhase = e.level === 'Phase';
+                                    const isActive = !e.ended_at;
 
-                                let badgeClass = 'state';
-                                if (isAlarm) badgeClass = 'alarm';
-                                else if (isPhase) badgeClass = 'phase';
+                                    let badgeClass = 'state';
+                                    if (isAlarm) badgeClass = 'alarm';
+                                    else if (isPhase) badgeClass = 'phase';
 
-                                return (
-                                    <tr key={e.id} className={isAlarm && isActive ? 'alarm-active-row' : ''}>
-                                        <td className="mono muted">{formatTime(e.started_at)}</td>
-                                        <td>
-                                            <span className={`event-level-pill ${badgeClass}`}>
-                                                {isAlarm && <i className="alarm-dot" />}
-                                                {e.level}
-                                            </span>
-                                        </td>
-                                        <td>
-                                            <span className="vessel-badge">{e.asset}</span>
-                                        </td>
-                                        <td className={`event-name-cell ${isAlarm ? 'alarm-text' : ''}`} title={e.name}>
-                                            <b>{e.name}</b>
-                                            {/* {e.tag_name && <span className="event-tag-sub">{e.tag_name}</span>} */}
-                                        </td>
-                                        <td className="mono muted">
-                                            {e.batch_id ? (
-                                                <span className="batch-pill">{e.batch_id}</span>
-                                            ) : (
-                                                '—'
-                                            )}
-                                        </td>
-                                        <td style={{ textAlign: 'right' }}>
-                                            {isActive ? (
-                                                <span className={`status-active-pill ${isAlarm ? 'alarm' : 'running'}`}>
-                                                    ACTIVE
+                                    return (
+                                        <tr key={e.id} className={isAlarm && isActive ? 'alarm-active-row' : ''}>
+                                            <td className="mono muted">{formatTime(e.started_at)}</td>
+                                            <td>
+                                                <span className={`event-level-pill ${badgeClass}`}>
+                                                    {isAlarm && <i className="alarm-dot" />}
+                                                    {e.level}
                                                 </span>
-                                            ) : (
-                                                <span className="mono muted">{getDuration(e.started_at, e.ended_at)}</span>
-                                            )}
-                                        </td>
-                                    </tr>
-                                );
-                            })
-                        )}
-                    </tbody>
-                </table>
-            </div>
+                                            </td>
+                                            <td>
+                                                <span className="vessel-badge">{e.asset}</span>
+                                            </td>
+                                            <td className={`event-name-cell ${isAlarm ? 'alarm-text' : ''}`} title={e.name}>
+                                                <b>{e.name}</b>
+                                            </td>
+                                            <td className="mono muted">
+                                                {e.batch_id ? (
+                                                    <span className="batch-pill">{e.batch_id}</span>
+                                                ) : (
+                                                    '—'
+                                                )}
+                                            </td>
+                                            <td style={{ textAlign: 'right' }}>
+                                                {isActive ? (
+                                                    <span className={`status-active-pill ${isAlarm ? 'alarm' : 'running'}`}>
+                                                        ACTIVE
+                                                    </span>
+                                                ) : (
+                                                    <span className="mono muted">{getDuration(e.started_at, e.ended_at)}</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    );
+                                })
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            )}
         </div>
     );
 }
