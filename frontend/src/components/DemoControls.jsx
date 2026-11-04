@@ -90,20 +90,26 @@ export default function DemoControls({
         fetchFaults();
         const interval = setInterval(fetchFaults, 3000);
         return () => clearInterval(interval);
-    }, [effectiveCollapsed]);
+    }, [is1Col, effectiveCollapsed]);
 
     // Track container width on resize so that when space is constrained (e.g. window narrowed to 50% or sidebar mode),
     // the Fast-Forward Sequencer displays as a compact dialog button instead of breaking the horizontal row.
     useEffect(() => {
         const checkCompact = () => {
+            // In 2-column mode, DemoControls is in the vertical sidebar where the buttons fit directly.
+            if (!is1Col) {
+                setIsCompact(false);
+                return;
+            }
+
             if (bodyRef.current) {
-                // When container width is under 860px (such as 50% screen width or sidebar),
+                // When container width is under 860px in 1-column mode (such as 50% screen width),
                 // switch to compact button so all components fit comfortably in 1 horizontal row.
                 setIsCompact(bodyRef.current.offsetWidth < 860);
             } else if (cardRef.current) {
                 setIsCompact(cardRef.current.offsetWidth < 345);
             } else if (typeof window !== 'undefined') {
-                setIsCompact(window.innerWidth < 1650);
+                setIsCompact(window.innerWidth < 860);
             }
         };
 
