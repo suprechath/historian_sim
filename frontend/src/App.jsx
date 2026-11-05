@@ -3,32 +3,47 @@ import Header from './components/Header';
 import HealthCheckDialog from './components/HealthCheckDialog';
 import PlantOverview from './pages/PlantOverview';
 import ScheduledTasks from './pages/ScheduledTasks';
+import ConfigurePage from './pages/ConfigurePage';
 import { useHistorianStream } from './hooks/useHistorianStream';
 
 export default function App() {
     const stream = useHistorianStream();
-    const [currentPage, setCurrentPage] = useState('overview'); // 'overview' | 'scheduled'
+    const [currentPage, setCurrentPage] = useState('overview'); // 'overview' | 'scheduled' | 'configure'
     const [dismissedHealthCheckId, setDismissedHealthCheckId] = useState(null);
 
-    // Sync active page from browser URL Hash (#overview, #scheduled)
+    // Sync active page from browser URL (Pathname /configure or Hash #scheduled / #overview / #configure)
     useEffect(() => {
-        const handleHashChange = () => {
+        const handleLocationChange = () => {
+            const pathname = window.location.pathname.toLowerCase();
             const hash = window.location.hash.replace(/^#\/?/, '').toLowerCase();
-            if (hash === 'scheduled' || hash === 'tasks' || hash === 'queue') {
+
+            if (pathname.includes('/configure') || hash === 'configure' || hash === 'config') {
+                setCurrentPage('configure');
+            } else if (hash === 'scheduled' || hash === 'tasks' || hash === 'queue' || pathname.includes('/scheduled')) {
                 setCurrentPage('scheduled');
             } else {
                 setCurrentPage('overview');
             }
         };
 
-        handleHashChange();
-        window.addEventListener('hashchange', handleHashChange);
-        return () => window.removeEventListener('hashchange', handleHashChange);
+        handleLocationChange();
+        window.addEventListener('hashchange', handleLocationChange);
+        window.addEventListener('popstate', handleLocationChange);
+        return () => {
+            window.removeEventListener('hashchange', handleLocationChange);
+            window.removeEventListener('popstate', handleLocationChange);
+        };
     }, []);
 
     const handleNavigate = (pageKey) => {
         setCurrentPage(pageKey);
-        window.location.hash = pageKey === 'scheduled' ? '#scheduled' : '#overview';
+        if (pageKey === 'configure') {
+            window.history.pushState(null, '', '/configure');
+        } else if (pageKey === 'scheduled') {
+            window.history.pushState(null, '', '/#scheduled');
+        } else {
+            window.history.pushState(null, '', '/');
+        }
     };
 
     // Callback when operator clicks close / acknowledge on the HEALTH_CHECK dialogue
@@ -66,7 +81,11 @@ export default function App() {
         const batchTag = stream.mode === 'single' && stream.assignedBatchId
             ? `[${stream.assignedBatchId}]`
             : '[Train Mode]';
-        const pageTag = currentPage === 'scheduled' ? 'Scheduled Tasks' : 'Plant Overview';
+        const pageTag = currentPage === 'scheduled' 
+            ? 'Scheduled Tasks' 
+            : currentPage === 'configure' 
+            ? 'Template Configuration' 
+            : 'Plant Overview';
         document.title = `${healthTag} ${batchTag} Plant Historian — ${pageTag}`;
     }, [
         stream.integrationHealth?.status,
@@ -104,7 +123,7 @@ export default function App() {
                 />
             )}
 
-            {/* Global Industrial SCADA Header */}
+            {/* Global Industrial SCADA Header (No button to /configure) */}
             <Header
                 clock={stream.clock}
                 running={stream.running}
@@ -121,10 +140,14 @@ export default function App() {
                 pendingScheduledCount={stream.pendingScheduledCount || 0}
             />
 
-            {/* Active View: Process Mimic vs Scheduled Instructions Queue */}
+            {/* Active View: Process Mimic vs Scheduled Tasks vs Configure Page */}
             {currentPage === 'scheduled' ? (
                 <ScheduledTasks
                     stream={stream}
+                    onNavigate={handleNavigate}
+                />
+            ) : currentPage === 'configure' ? (
+                <ConfigurePage
                     onNavigate={handleNavigate}
                 />
             ) : (

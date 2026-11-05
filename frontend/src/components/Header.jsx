@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 
 function formatDate(isoStr) {
-    if (!isoStr) return '—';
+    if (!isoStr) return 'â€”';
     const d = new Date(isoStr);
     const p2 = (n) => String(n).padStart(2, '0');
     return `${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())} ` +
@@ -86,7 +86,7 @@ export default function Header({
     return (
         <header>
             <div className="brand">
-                API Plant Historian <span>— {activePage === 'scheduled' ? 'Scheduled Instructions' : 'Process overview'}</span>
+                API Plant Historian <span>— {activePage === 'scheduled' ? 'Scheduled Instructions' : activePage === 'configure' ? 'Template Configuration' : 'Process overview'}</span>
             </div>
 
             {/* Navigation Switcher: Process Mimic vs Scheduled Tasks */}
@@ -238,3 +238,4 @@ export default function Header({
         </header>
     );
 }
+

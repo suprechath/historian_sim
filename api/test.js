@@ -17,6 +17,20 @@ import {
     triggerScheduledInstructionNow
 } from './src/services/scheduledInstructionsService.js';
 
+import {
+    getConfigurationMeta,
+    getPredefinedTemplates,
+    createPredefinedTemplate,
+    updatePredefinedTemplate,
+    deletePredefinedTemplate,
+    togglePredefinedTemplate,
+    getStepTriggeredTemplates,
+    createStepTriggeredTemplate,
+    updateStepTriggeredTemplate,
+    deleteStepTriggeredTemplate,
+    toggleStepTriggeredTemplate
+} from './src/services/configurationService.js';
+
 after(async () => {
     await pool.end();
 });
@@ -561,6 +575,125 @@ test('triggerScheduledInstructionNow sets scheduled_time to NOW for pending task
         const res = await triggerScheduledInstructionNow('task-pending-02');
         assert.equal(triggered, true);
         assert.equal(res.id, 'task-pending-02');
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+// ============================================================================
+// 6. CONFIGURATION SERVICE TESTS (Predefined & Step-Triggered Templates)
+// ============================================================================
+test('getPredefinedTemplates queries predefined_instruction_templates', async () => {
+    const origQuery = pool.query;
+    try {
+        pool.query = async (text) => {
+            const sql = String(text);
+            if (sql.includes('FROM predefined_instruction_templates')) {
+                return {
+                    rows: [
+                        { id: 1, name: 'Charging End', ref_instruction: 'CGET', event_type: 2, is_active: true }
+                    ]
+                };
+            }
+            return { rows: [] };
+        };
+
+        const res = await getPredefinedTemplates();
+        assert.equal(res.length, 1);
+        assert.equal(res[0].ref_instruction, 'CGET');
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('createPredefinedTemplate inserts into predefined_instruction_templates', async () => {
+    const origQuery = pool.query;
+    try {
+        let inserted = false;
+        pool.query = async (text, params) => {
+            const sql = String(text);
+            if (sql.includes('INSERT INTO predefined_instruction_templates')) {
+                inserted = true;
+                return {
+                    rows: [{ id: 10, name: params[0], ref_instruction: params[3] }]
+                };
+            }
+            return { rows: [] };
+        };
+
+        const res = await createPredefinedTemplate({
+            name: 'Test Template',
+            ref_instruction: 'TEST_REF',
+            event_type: 2
+        });
+        assert.equal(inserted, true);
+        assert.equal(res.id, 10);
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('getStepTriggeredTemplates queries step_triggered_instruction_templates', async () => {
+    const origQuery = pool.query;
+    try {
+        pool.query = async (text) => {
+            const sql = String(text);
+            if (sql.includes('FROM step_triggered_instruction_templates')) {
+                return {
+                    rows: [
+                        {
+                            id: 1,
+                            name: 'Pressure curves',
+                            trigger_instruction_id: 'CGET',
+                            ref_instruction: 'PRESS',
+                            time_source: 'HISTORIAN_EVENT',
+                            is_active: true
+                        }
+                    ]
+                };
+            }
+            return { rows: [] };
+        };
+
+        const res = await getStepTriggeredTemplates();
+        assert.equal(res.length, 1);
+        assert.equal(res[0].trigger_instruction_id, 'CGET');
+        assert.equal(res[0].ref_instruction, 'PRESS');
+    } finally {
+        pool.query = origQuery;
+    }
+});
+
+test('createStepTriggeredTemplate inserts into step_triggered_instruction_templates', async () => {
+    const origQuery = pool.query;
+    try {
+        let inserted = false;
+        pool.query = async (text, params) => {
+            const sql = String(text);
+            if (sql.includes('INSERT INTO step_triggered_instruction_templates')) {
+                inserted = true;
+                return {
+                    rows: [{
+                        id: 20,
+                        name: params[0],
+                        trigger_instruction_id: params[1],
+                        ref_instruction: params[5]
+                    }]
+                };
+            }
+            return { rows: [] };
+        };
+
+        const res = await createStepTriggeredTemplate({
+            name: 'Agitator State Check',
+            trigger_instruction_id: 'CGET',
+            ref_instruction: 'AGIT',
+            time_source: 'HISTORIAN_EVENT',
+            event_type: 1
+        });
+        assert.equal(inserted, true);
+        assert.equal(res.id, 20);
+        assert.equal(res.trigger_instruction_id, 'CGET');
     } finally {
         pool.query = origQuery;
     }

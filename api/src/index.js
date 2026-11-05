@@ -12,6 +12,7 @@ import {
 } from './services/heartbeatService.js';
 import { logger } from './utils/logger.js';
 import { ensureScheduledInstructionsTable } from './services/scheduledInstructionsService.js';
+import { ensureConfigurationTables } from './services/configurationService.js';
 
 // Resolve and load root .env (two levels up from api/src)
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -94,6 +95,7 @@ app.use((err, req, res, next) => {
 // 6. Initialize Database state and Background Workers
 await ensureSimulationControl();
 await ensureScheduledInstructionsTable();
+await ensureConfigurationTables();
 await ensureHealthCheckTables();
 try { await query('DROP TABLE IF EXISTS monitoring_outbox, monitoring_job_tags, monitoring_jobs CASCADE'); } catch (_) {}
 startInternalHeartbeatWorker();

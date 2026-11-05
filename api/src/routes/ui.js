@@ -16,6 +16,19 @@ import {
 } from '../services/scheduledInstructionsService.js';
 import { logger } from '../utils/logger.js';
 import { executeInternalHeartbeat } from '../services/heartbeatService.js';
+import {
+    getConfigurationMeta,
+    getPredefinedTemplates,
+    createPredefinedTemplate,
+    updatePredefinedTemplate,
+    deletePredefinedTemplate,
+    togglePredefinedTemplate,
+    getStepTriggeredTemplates,
+    createStepTriggeredTemplate,
+    updateStepTriggeredTemplate,
+    deleteStepTriggeredTemplate,
+    toggleStepTriggeredTemplate
+} from '../services/configurationService.js';
 
 export { simState, ensureSimulationControl, getSimulationState, assignBatchToQueue };
 
@@ -816,6 +829,122 @@ router.post('/scheduled-instructions/:id/trigger-now', async (req, res) => {
     } catch (err) {
         const statusCode = err.message.includes('not in pending') ? 400 : (err.message.includes('not found') ? 404 : 500);
         res.status(statusCode).json({ error: err.message });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// 8. Template & Automation Trigger Configuration Endpoints
+// ---------------------------------------------------------------------------
+
+router.get('/configuration/meta', async (req, res) => {
+    try {
+        const meta = await getConfigurationMeta();
+        res.json(meta);
+    } catch (err) {
+        logger.error('HistorianAPI', 'Error fetching configuration meta', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Predefined Instruction Templates (Layer 1)
+router.get('/configuration/predefined-templates', async (req, res) => {
+    try {
+        const templates = await getPredefinedTemplates();
+        res.json({ count: templates.length, templates });
+    } catch (err) {
+        logger.error('HistorianAPI', 'Error fetching predefined templates', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/configuration/predefined-templates', async (req, res) => {
+    try {
+        const created = await createPredefinedTemplate(req.body || {});
+        res.status(201).json({ message: 'Template created', template: created });
+    } catch (err) {
+        logger.error('HistorianAPI', 'Error creating predefined template', { error: err.message });
+        res.status(400).json({ error: err.message });
+    }
+});
+
+router.put('/configuration/predefined-templates/:id', async (req, res) => {
+    try {
+        const updated = await updatePredefinedTemplate(req.params.id, req.body || {});
+        res.json({ message: 'Template updated', template: updated });
+    } catch (err) {
+        logger.error('HistorianAPI', 'Error updating predefined template', { error: err.message });
+        res.status(400).json({ error: err.message });
+    }
+});
+
+router.patch('/configuration/predefined-templates/:id/toggle', async (req, res) => {
+    try {
+        const toggled = await togglePredefinedTemplate(req.params.id);
+        res.json({ message: 'Template active status toggled', template: toggled });
+    } catch (err) {
+        logger.error('HistorianAPI', 'Error toggling predefined template', { error: err.message });
+        res.status(400).json({ error: err.message });
+    }
+});
+
+router.delete('/configuration/predefined-templates/:id', async (req, res) => {
+    try {
+        const deleted = await deletePredefinedTemplate(req.params.id);
+        res.json({ message: 'Template deleted', template: deleted });
+    } catch (err) {
+        logger.error('HistorianAPI', 'Error deleting predefined template', { error: err.message });
+        res.status(400).json({ error: err.message });
+    }
+});
+
+// Step-Triggered Instruction Templates (Layer 2)
+router.get('/configuration/step-triggered-templates', async (req, res) => {
+    try {
+        const templates = await getStepTriggeredTemplates();
+        res.json({ count: templates.length, templates });
+    } catch (err) {
+        logger.error('HistorianAPI', 'Error fetching step-triggered templates', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/configuration/step-triggered-templates', async (req, res) => {
+    try {
+        const created = await createStepTriggeredTemplate(req.body || {});
+        res.status(201).json({ message: 'Step-triggered template created', template: created });
+    } catch (err) {
+        logger.error('HistorianAPI', 'Error creating step-triggered template', { error: err.message });
+        res.status(400).json({ error: err.message });
+    }
+});
+
+router.put('/configuration/step-triggered-templates/:id', async (req, res) => {
+    try {
+        const updated = await updateStepTriggeredTemplate(req.params.id, req.body || {});
+        res.json({ message: 'Step-triggered template updated', template: updated });
+    } catch (err) {
+        logger.error('HistorianAPI', 'Error updating step-triggered template', { error: err.message });
+        res.status(400).json({ error: err.message });
+    }
+});
+
+router.patch('/configuration/step-triggered-templates/:id/toggle', async (req, res) => {
+    try {
+        const toggled = await toggleStepTriggeredTemplate(req.params.id);
+        res.json({ message: 'Step-triggered template active status toggled', template: toggled });
+    } catch (err) {
+        logger.error('HistorianAPI', 'Error toggling step-triggered template', { error: err.message });
+        res.status(400).json({ error: err.message });
+    }
+});
+
+router.delete('/configuration/step-triggered-templates/:id', async (req, res) => {
+    try {
+        const deleted = await deleteStepTriggeredTemplate(req.params.id);
+        res.json({ message: 'Step-triggered template deleted', template: deleted });
+    } catch (err) {
+        logger.error('HistorianAPI', 'Error deleting step-triggered template', { error: err.message });
+        res.status(400).json({ error: err.message });
     }
 });
 
